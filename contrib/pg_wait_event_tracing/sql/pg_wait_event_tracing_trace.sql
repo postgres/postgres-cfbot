@@ -1,0 +1,444 @@
+--
+-- PG_WAIT_EVENT_TRACING_TRACE
+--
+-- Exercises the trace level's query-attribution markers (fix 6): the
+-- QueryStart/ExecStart/ExecEnd/UtilityStart/UtilityEnd/TxnCommit/TxnAbort
+-- marker set and pg_wait_event_trace_by_statement().  The ring buffer's own
+-- seqlock/wrap/orphan-lifecycle machinery is exercised by TAP tests with
+-- injection points (WP4), not here.
+--
+-- Idle, and IdleInTransaction (the same marker written while a transaction
+-- is open, as in case 2), are deliberately excluded from every comparison
+-- below (see the WHERE clause in the pattern below): whether either
+-- appears at all depends on whether the backend actually blocks in
+-- ClientRead, which depends on whether the next message psql sends is
+-- already buffered by the time the backend looks -- protocol structure
+-- (separate messages vs. one multi-statement message) makes it likely but
+-- not deterministic either way on a loaded CI runner. A TAP test, where
+-- the client can pause deliberately between statements to force the wait,
+-- covers both instead (WP4b).
+--
+-- Reading a session's own ring via SQL is necessarily self-referential:
+-- every observing SELECT below writes its own QueryStart+ExecStart into
+-- the ring (post_parse_analyze/ExecutorStart fire before its body runs),
+-- and the "markN" SELECT used to record a starting ring position finishes
+-- writing its own ExecEnd+TxnCommit (and possibly an Idle, excluded here
+-- for the same reason as above) *after* that position was captured
+-- (captured mid-execution, from inside its own target list).  Every case
+-- below therefore uses the identical, fully deterministic pattern:
+--
+--   SELECT coalesce(max(seq), -1) AS markN FROM pg_backend_wait_event_trace \gset
+--   <the statement(s) under test>
+--   SELECT (array_agg(wait_event ORDER BY seq))[3:count(*)-2] AS markers
+--   FROM pg_backend_wait_event_trace
+--   WHERE wait_event_type = 'Query' AND seq > :markN
+--     AND wait_event NOT IN ('Idle', 'IdleInTransaction');
+--
+-- [3:count(*)-2]: index 1-2 are always the "markN" statement's own
+-- trailing ExecEnd, TxnCommit (everything it itself writes to the ring
+-- after the position was captured from its still-in-progress ExecStart,
+-- minus any Idle, already filtered out by the WHERE clause regardless of
+-- whether it fired); the last 2 indexes are always this observing SELECT's
+-- own leading-in-time-but-trailing-in-the-array QueryStart, ExecStart
+-- (written to the ring before its body/aggregate runs).  Slicing them off
+-- leaves exactly the case's own real, non-Idle markers.  Real wait events
+-- are deliberately never asserted by exact count (plan sec 5.5): the one
+-- case with a real wait (case 7) checks only presence/attribution.
+--
+CREATE EXTENSION IF NOT EXISTS pg_wait_event_tracing;
+
+-- CI forces debug_parallel_query = regress on some platforms, which
+-- would move statements below into a parallel worker, recording their
+-- markers under the worker's own ring, not this session's.
+SET debug_parallel_query = off;
+
+SET pg_wait_event_tracing.capture = trace;
+
+--
+-- Case 1: a single autocommit statement.
+-- Expect: QueryStart, ExecStart, ExecEnd, TxnCommit (Idle excluded; it
+-- would follow once the implicit transaction has committed and the
+-- backend waits for the next client message -- see the file header).
+--
+SELECT coalesce(max(seq), -1) AS mark1 FROM pg_backend_wait_event_trace \gset
+SELECT 1;
+SELECT (array_agg(wait_event ORDER BY seq))[3:count(*)-2] AS markers
+FROM pg_backend_wait_event_trace
+WHERE wait_event_type = 'Query' AND seq > :mark1
+  AND wait_event NOT IN ('Idle', 'IdleInTransaction');
+
+--
+-- Case 2: an explicit transaction with two statements, each on its own
+-- line.  The transaction stays open the whole time (no TxnCommit/TxnAbort
+-- until the final COMMIT).  TxnCommit follows UtilityEnd here, the same
+-- as case 4's plain utility statement, not during ProcessUtility: an
+-- explicit COMMIT's EndTransactionBlock() only marks the transaction
+-- block TBLOCK_END while still inside the utility statement: the actual
+-- commit (CommitTransaction(), which fires the xact callback) happens in
+-- finish_xact_command(), called by exec_simple_query() (postgres.c)
+-- *after* ProcessUtility returns -- the same command-loop point an
+-- ordinary autocommit statement's implicit commit happens at.
+--
+SELECT coalesce(max(seq), -1) AS mark2 FROM pg_backend_wait_event_trace \gset
+BEGIN;
+SELECT 1;
+SELECT 2;
+COMMIT;
+SELECT (array_agg(wait_event ORDER BY seq))[3:count(*)-2] AS markers
+FROM pg_backend_wait_event_trace
+WHERE wait_event_type = 'Query' AND seq > :mark2
+  AND wait_event NOT IN ('Idle', 'IdleInTransaction');
+
+--
+-- Case 3: two statements sent as ONE simple-query protocol message, both
+-- on the same input line so psql sends them together.  Each still gets
+-- its own individual QueryStart/ExecStart/ExecEnd/TxnCommit -- autocommit
+-- commits after every statement in a multi-statement string, not once at
+-- the end.
+--
+SELECT coalesce(max(seq), -1) AS mark3 FROM pg_backend_wait_event_trace \gset
+SELECT 1; SELECT 2;
+SELECT (array_agg(wait_event ORDER BY seq))[3:count(*)-2] AS markers
+FROM pg_backend_wait_event_trace
+WHERE wait_event_type = 'Query' AND seq > :mark3
+  AND wait_event NOT IN ('Idle', 'IdleInTransaction');
+
+--
+-- Case 4: a utility statement (no executor involvement): UtilityStart/
+-- UtilityEnd only, no ExecStart/ExecEnd, TxnCommit after UtilityEnd --
+-- same shape and same reason as case 2's COMMIT above (the implicit
+-- per-statement commit happens in the command loop, after
+-- ProcessUtility_hook returns).
+--
+SELECT coalesce(max(seq), -1) AS mark4 FROM pg_backend_wait_event_trace \gset
+CREATE TABLE pwet_trace_test_t (a int);
+SELECT (array_agg(wait_event ORDER BY seq))[3:count(*)-2] AS markers
+FROM pg_backend_wait_event_trace
+WHERE wait_event_type = 'Query' AND seq > :mark4
+  AND wait_event NOT IN ('Idle', 'IdleInTransaction');
+DROP TABLE pwet_trace_test_t;
+
+--
+-- Case 5: an error raised during PLANNING, not execution: 1/0 is a
+-- constant expression, and the planner's eval_const_expressions() folds
+-- it by calling evaluate_expr() (clauses.c), which builds a throwaway
+-- executor state and evaluates the expression right there -- raising the
+-- division-by-zero before ExecutorStart is ever reached.  So there is no
+-- ExecStart/ExecEnd pair to leave unmatched here: QueryStart opens the
+-- statement's interval, and TxnAbort -- not TxnCommit -- closes it
+-- directly.  This no longer exercises pwet_marker_txn_abort()'s
+-- defensive pwet_exec_depth reset (needed for a genuinely mid-execution
+-- error, which this simple, always-planning-time-erroring form cannot
+-- produce); that reset stays uncovered by this regression file.
+--
+SELECT coalesce(max(seq), -1) AS mark5 FROM pg_backend_wait_event_trace \gset
+SELECT 1/0;
+SELECT (array_agg(wait_event ORDER BY seq))[3:count(*)-2] AS markers
+FROM pg_backend_wait_event_trace
+WHERE wait_event_type = 'Query' AND seq > :mark5
+  AND wait_event NOT IN ('Idle', 'IdleInTransaction');
+
+--
+-- Case 6: a nested query call (depth 1 inside depth 0).  LANGUAGE SQL
+-- will not do here: inline_function() (clauses.c) inlines a SQL-language
+-- function whose body is a single simple SELECT directly into the
+-- calling query, so it never runs its own separate, nested executor
+-- invocation at all.  PL/pgSQL is not inlined, and a PERFORM statement
+-- in its body always goes through SPI's normal execute path (unlike a
+-- bare RETURN/assignment expression, which plpgsql evaluates directly
+-- without SPI when it is "simple enough"), so it reliably produces a
+-- real nested ExecStart/ExecEnd pair.  plpgsql is installed in every
+-- database by default, so this needs no extra CREATE EXTENSION.
+--
+-- The function is called once first, outside the measured window, so
+-- its PERFORM statement's query is already parsed and its plan cached
+-- (plpgsql caches each statement's plan across calls in the same
+-- session) by the time of the measured call -- keeping this case about
+-- the ExecStart/ExecEnd depth nesting specifically, not about whether a
+-- cached call also re-parses (it does not, so no QueryStart happens at
+-- nested depth in the measured call).
+--
+CREATE FUNCTION pwet_trace_test_nested() RETURNS int
+LANGUAGE plpgsql AS $$ BEGIN PERFORM 1; RETURN 1; END $$;
+SELECT pwet_trace_test_nested();
+
+SELECT coalesce(max(seq), -1) AS mark6 FROM pg_backend_wait_event_trace \gset
+SELECT pwet_trace_test_nested();
+SELECT (array_agg(wait_event ORDER BY seq))[3:count(*)-2] AS markers,
+       (array_agg(depth ORDER BY seq))[3:count(*)-2] AS depths
+FROM pg_backend_wait_event_trace
+WHERE wait_event_type = 'Query' AND seq > :mark6
+  AND wait_event NOT IN ('Idle', 'IdleInTransaction');
+DROP FUNCTION pwet_trace_test_nested();
+
+--
+-- Case 7: pg_wait_event_trace_by_statement() attribution.  A pg_sleep()
+-- inside its own statement guarantees at least one real (Timeout/
+-- PgSleep) wait to attribute; the following bare SELECT has none.  Never
+-- assert an exact PgSleep count (plan sec 5.5): only that every PgSleep
+-- wait this session ever recorded was attributed to a real statement,
+-- never to the synthetic <idle>/<unattributed> buckets, and that at
+-- least one such wait was seen.
+--
+SELECT procnumber FROM pg_stat_wait_event_timing
+WHERE pid = pg_backend_pid() LIMIT 1 \gset
+
+SELECT pg_sleep(0.01);
+SELECT 1;
+
+SELECT bool_and(bucket NOT IN ('<idle>', '<unattributed>')) AS pgsleep_attributed,
+       sum(calls) >= 1 AS at_least_one_pgsleep
+FROM pg_wait_event_trace_by_statement(:procnumber)
+WHERE wait_event = 'PgSleep';
+
+--
+-- Cases 8-12: statement attribution of pg_wait_event_trace_by_statement()
+-- for the ways a statement can start.  Every statement under test sleeps
+-- for 10 ms, giving it at least one Timeout/PgSleep wait (a platform may
+-- record more than one, so only "at least one" is ever asserted), and
+-- each check counts the distinct statement buckets holding such waits
+-- after a recorded ring position.  A bucket's statement_seq is the seq of
+-- the marker that opened it, so looking that marker up in the ring tells
+-- which kind of marker opened the bucket.
+--
+-- compute_query_id is on so the markers carry a query identifier.
+--
+SET compute_query_id = on;
+
+--
+-- Case 8: one named prepared statement executed three times over the
+-- extended protocol.  Only the first Parse runs post_parse_analyze; each
+-- execution writes just an ExecStart.  Expect three buckets, all with the
+-- query_id of the ExecStart that opened them, and no PgSleep wait in any
+-- synthetic bucket.
+--
+SELECT coalesce(max(seq), -1) AS mark8 FROM pg_backend_wait_event_trace \gset
+SELECT pg_sleep(0.01) AS slept8 \parse pwet_trace_s8
+\bind_named pwet_trace_s8 \g
+\bind_named pwet_trace_s8 \g
+\bind_named pwet_trace_s8 \g
+SELECT count(DISTINCT b.statement_seq) AS buckets,
+       count(DISTINCT b.query_id) AS query_ids,
+       bool_and(m.wait_event = 'ExecStart' AND m.query_id = b.query_id
+                AND b.query_id <> 0) AS opened_by_execstart,
+       bool_and(b.phase IN ('pre', 'statement')) AS phases_ok
+FROM pg_wait_event_trace_by_statement(:procnumber) b
+     JOIN pg_backend_wait_event_trace m ON m.seq = b.statement_seq
+WHERE b.wait_event = 'PgSleep' AND b.statement_seq > :mark8;
+SELECT count(*) AS sleeps_in_synthetic_buckets
+FROM pg_wait_event_trace_by_statement(:procnumber)
+WHERE wait_event = 'PgSleep' AND bucket IN ('<idle>', '<unattributed>', '<no-statement>');
+
+--
+-- Case 9: the same statement run in a pipeline with a sync between the
+-- executions.  Each sync commits, so every ExecStart follows a TxnCommit
+-- with no Idle marker in between (the next message was already
+-- buffered).  Expect three separate buckets.
+--
+SELECT coalesce(max(seq), -1) AS mark9 FROM pg_backend_wait_event_trace \gset
+\startpipeline
+\bind_named pwet_trace_s8 \sendpipeline
+\syncpipeline
+\bind_named pwet_trace_s8 \sendpipeline
+\syncpipeline
+\bind_named pwet_trace_s8 \sendpipeline
+\endpipeline
+SELECT count(DISTINCT b.statement_seq) AS buckets,
+       bool_and(m.wait_event = 'ExecStart' AND m.query_id = b.query_id
+                AND b.query_id <> 0) AS opened_by_execstart
+FROM pg_wait_event_trace_by_statement(:procnumber) b
+     JOIN pg_backend_wait_event_trace m ON m.seq = b.statement_seq
+WHERE b.wait_event = 'PgSleep' AND b.statement_seq > :mark9;
+\close_prepared pwet_trace_s8
+
+--
+-- Case 10: a DO block looping three times over a statement whose plan is
+-- cached after the first iteration.  The statements it runs have depth-0
+-- markers (UtilityStart does not raise the depth), but belong to the DO:
+-- expect exactly one bucket, opened by the QueryStart of the DO itself,
+-- holding at least three PgSleep waits.
+--
+SELECT coalesce(max(seq), -1) AS mark10 FROM pg_backend_wait_event_trace \gset
+DO $$ BEGIN FOR i IN 1..3 LOOP PERFORM pg_sleep(0.01); END LOOP; END $$;
+SELECT count(DISTINCT b.statement_seq) AS buckets,
+       sum(b.calls) >= 3 AS at_least_three_sleeps,
+       bool_and(m.wait_event = 'QueryStart') AS opened_by_querystart
+FROM pg_wait_event_trace_by_statement(:procnumber) b
+     JOIN pg_backend_wait_event_trace m ON m.seq = b.statement_seq
+WHERE b.wait_event = 'PgSleep' AND b.statement_seq > :mark10;
+
+--
+-- Case 11: a utility statement over the simple protocol writes QueryStart
+-- and then UtilityStart; the pair is one statement.  CREATE TABLE AS also
+-- runs its query inside the utility (ExecStart at depth 0), which must
+-- not open another bucket.
+--
+SELECT coalesce(max(seq), -1) AS mark11 FROM pg_backend_wait_event_trace \gset
+CREATE TEMP TABLE pwet_trace_t11 AS SELECT pg_sleep(0.01)::text AS slept11;
+SELECT count(DISTINCT b.statement_seq) AS buckets,
+       bool_and(m.wait_event = 'QueryStart') AS opened_by_querystart
+FROM pg_wait_event_trace_by_statement(:procnumber) b
+     JOIN pg_backend_wait_event_trace m ON m.seq = b.statement_seq
+WHERE b.wait_event = 'PgSleep' AND b.statement_seq > :mark11;
+DROP TABLE pwet_trace_t11;
+
+--
+-- Case 12: three statements in one simple-query string: one bucket each.
+--
+SELECT coalesce(max(seq), -1) AS mark12 FROM pg_backend_wait_event_trace \gset
+SELECT pg_sleep(0.01); SELECT pg_sleep(0.01); SELECT pg_sleep(0.01);
+SELECT count(DISTINCT b.statement_seq) AS buckets,
+       bool_and(m.wait_event = 'QueryStart') AS opened_by_querystart
+FROM pg_wait_event_trace_by_statement(:procnumber) b
+     JOIN pg_backend_wait_event_trace m ON m.seq = b.statement_seq
+WHERE b.wait_event = 'PgSleep' AND b.statement_seq > :mark12;
+
+--
+-- Case 13: no wait of the whole session is lost or counted twice: the
+-- function's calls add up to the number of non-marker records in the ring.
+-- The ring is read before and after the function (this session can record
+-- another wait in between), so the sum is bounded by the two counts; the
+-- TAP test 014 checks the exact equality on a quiet session.
+--
+SELECT count(*) FROM pg_get_wait_event_trace(:procnumber)
+WHERE wait_event_type <> 'Query' \gset before_
+SELECT sum(calls) AS total_calls FROM pg_wait_event_trace_by_statement(:procnumber) \gset
+SELECT count(*) FROM pg_get_wait_event_trace(:procnumber)
+WHERE wait_event_type <> 'Query' \gset after_
+SELECT :total_calls BETWEEN :before_count AND :after_count AS no_wait_lost_or_doubled;
+
+RESET compute_query_id;
+
+RESET pg_wait_event_tracing.capture;
+
+--
+-- Cases 14-26: the attribution rule on fixed marker streams, through
+-- pg_wait_event_trace_attribute(), which the TAP tests cannot always
+-- produce from a live backend (whether a commit waits at all, or whether
+-- the backend reads two pipelined messages in one go, depends on timing).
+-- pwet_stream() builds the records from a compact notation: QS/ES/EE/US/UE
+-- with "/query_id" and an optional ":depth", TC and TA with an optional
+-- ":depth", I = Idle,
+-- IIT = IdleInTransaction, and "Type:Event" for a wait.  seq is the
+-- token's position, starting at 1.
+--
+CREATE FUNCTION pwet_stream(stream text)
+RETURNS pg_wait_event_trace_record[] LANGUAGE plpgsql AS $$
+DECLARE
+    tok text;
+    n int := 0;
+    r pg_wait_event_trace_record;
+    res pg_wait_event_trace_record[] := '{}';
+    m text[];
+BEGIN
+    FOREACH tok IN ARRAY regexp_split_to_array(stream, '\s+') LOOP
+        n := n + 1;
+        r := ROW(n, 'Query', NULL, 0, 0, 0);
+        IF tok ~ '^(QS|ES|EE|US|UE)/' THEN
+            m := regexp_match(tok, '^(\w+)/(\d+)(?::(\d+))?$');
+            r.wait_event := CASE m[1] WHEN 'QS' THEN 'QueryStart'
+                                      WHEN 'ES' THEN 'ExecStart'
+                                      WHEN 'EE' THEN 'ExecEnd'
+                                      WHEN 'US' THEN 'UtilityStart'
+                                      ELSE 'UtilityEnd' END;
+            r.query_id := m[2]::int8;
+            r.depth := coalesce(m[3]::int, 0);
+        ELSIF tok ~ '^T[CA](:\d+)?$' THEN
+            r.wait_event := CASE WHEN tok LIKE 'TC%' THEN 'TxnCommit'
+                                 ELSE 'TxnAbort' END;
+            r.depth := coalesce(substring(tok FROM ':(\d+)$')::int, 0);
+        ELSIF tok = 'I' THEN
+            r.wait_event := 'Idle';
+        ELSIF tok = 'IIT' THEN
+            r.wait_event := 'IdleInTransaction';
+        ELSE
+            m := regexp_match(tok, '^(\w+):(\w+)$');
+            r.wait_event_type := m[1];
+            r.wait_event := m[2];
+            r.duration_us := 1;
+        END IF;
+        res := res || r;
+    END LOOP;
+    RETURN res;
+END $$;
+
+CREATE FUNCTION pwet_attr(stream text,
+    OUT bucket text, OUT phase text, OUT wait_event text, OUT calls int8)
+RETURNS SETOF record LANGUAGE sql AS $$
+    SELECT bucket, phase, wait_event, calls
+    FROM pg_wait_event_trace_attribute(pwet_stream(stream));
+$$;
+
+-- Case 14: a delayed Sync commits after an IdleInTransaction: the commit's
+-- waits (CommitDelay, WalWrite) and the cleanup after it (DataFileRead) go
+-- to the statement opened at seq 2; the ClientReads stay in <idle>.
+SELECT * FROM pwet_attr('I QS/1 ES/1 Timeout:PgSleep EE/1 IIT Client:ClientRead
+    Timeout:CommitDelay IO:WalWrite TC IO:DataFileRead I Client:ClientRead');
+
+-- Case 15: the same pause, then a request that fails: <no-statement>.
+SELECT * FROM pwet_attr('I QS/1 ES/1 Timeout:PgSleep EE/1 IIT Client:ClientRead
+    Lock:relation TA I Client:ClientRead');
+
+-- Case 16: an IdleInTransaction that follows a commit, not a statement:
+-- a later commit with no statement in between is not a delayed commit.
+SELECT * FROM pwet_attr('I QS/1 ES/1 EE/1 TC IIT Client:ClientRead
+    IO:WalWrite TC I');
+
+-- Case 17: an explicit COMMIT after the pause keeps its commit's waits.
+SELECT * FROM pwet_attr('I QS/1 ES/1 Timeout:PgSleep EE/1 IIT Client:ClientRead
+    QS/2 US/2 UE/2 Timeout:CommitDelay TC I');
+
+-- Case 18: a non-Client wait during a pause that has not ended in a
+-- commit stays in <idle>.
+SELECT * FROM pwet_attr('I QS/1 ES/1 EE/1 IIT Client:ClientRead
+    LWLock:LockManager');
+
+-- Case 19: a CALL, then an Execute of a prepared statement with no idle
+-- marker in between: two buckets (the UtilityEnd that closes the CALL ends
+-- it).
+SELECT * FROM pwet_attr('I US/3 Timeout:PgSleep UE/3 ES/4 Timeout:PgSleep
+    EE/4 TC I');
+
+-- Case 20: the same with a COMMIT inside the CALL (depth 1): the wait after
+-- it is still the CALL's, not the next statement's pre phase.
+SELECT * FROM pwet_attr('I US/3 Timeout:PgSleep TC:1 Timeout:PgSleep UE/3
+    ES/4 Timeout:PgSleep EE/4 TC I');
+
+-- Case 21: a ROLLBACK inside a CALL (depth 1), then a statement the
+-- procedure runs: one bucket.
+SELECT * FROM pwet_attr('I QS/5 US/5 Timeout:PgSleep TA:1 Timeout:PgSleep
+    QS/6 ES/6 Timeout:PgSleep EE/6 UE/5 TC I');
+
+-- Case 22: a nested utility statement that failed inside a caught error
+-- still writes its UtilityEnd; the next Execute is top-level.
+SELECT * FROM pwet_attr('I US/7 US/8 Timeout:PgSleep UE/8 TA:1 UE/7
+    ES/9 Timeout:PgSleep EE/9 TC I');
+
+-- Case 23: three statements before the pause (pipelined Executes): the
+-- delayed commit and its cleanup go to the last of them, opened at seq 10.
+SELECT * FROM pwet_attr('I QS/1 ES/1 Timeout:PgSleep EE/1 QS/2 ES/2
+    Timeout:PgSleep EE/2 QS/3 ES/3 Timeout:PgSleep EE/3 IIT Client:ClientRead
+    Timeout:CommitDelay IO:WalWrite TC IO:DataFileRead I Client:ClientRead');
+
+-- Case 24: a portal suspended by a row limit, whose function ran a SHOW
+-- (a nested utility statement), resumed after a pause.  No idle marker is
+-- written inside the statement, so the pause and the resumed sleep stay in
+-- the SELECT's bucket.
+SELECT * FROM pwet_attr('I QS/1 ES/1 ES/2:1 Timeout:PgSleep EE/2:1 US/3:1
+    UE/3:1 Client:ClientRead ES/2:1 Timeout:PgSleep EE/2:1 US/3:1 UE/3:1 EE/1
+    TC I Client:ClientRead');
+
+-- Case 25: while the plan is made (depth 1), a stable function calls a
+-- volatile one that runs SHOW (depth 2): its UtilityEnd says depth 2, so it
+-- does not end the statement, and the ExecStart that follows is still the
+-- statement opened at seq 2.
+SELECT * FROM pwet_attr('I QS/1 ES/2:1 ES/3:2 Timeout:PgSleep EE/3:2
+    US/4:2 UE/4:2 EE/2:1 ES/1 Timeout:PgSleep EE/1 TC I');
+
+-- Case 26: an extension's end callback runs SQL while the plan is ended
+-- (depth 1): it belongs to the statement.
+SELECT * FROM pwet_attr('I QS/1 ES/1 Timeout:PgSleep QS/2:1 ES/2:1
+    Timeout:PgSleep EE/2:1 EE/1 TC I');
+
+DROP FUNCTION pwet_attr(text);
+DROP FUNCTION pwet_stream(text);

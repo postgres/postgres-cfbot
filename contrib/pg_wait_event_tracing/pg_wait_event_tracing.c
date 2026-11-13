@@ -1,0 +1,6435 @@
+/*-------------------------------------------------------------------------
+ *
+ * pg_wait_event_tracing.c
+ *	  Statistics-level wait-event collector.
+ *
+ * The recorder is the peer-review package's collector, ported onto the
+ * begin/end wait-event hooks and renamed.  Each collecting backend owns one
+ * sparse DSA slot, addressed through a small, always-resident control
+ * table; the roughly 200 KiB-per-backend timing payload itself lives in a
+ * DSA area (GetNamedDSA()) and is allocated only for a backend that
+ * actually enables capture.  Hook callbacks only touch state preallocated
+ * before capture starts (backend-local variables and this backend's own slot
+ * in shared memory, which no other process writes): allocation, locking, and
+ * error-capable work happen from parse/executor safe points, never from the
+ * begin/end hooks themselves.
+ *
+ * The control table lives in fixed shared memory (shmem_request_hook /
+ * shmem_startup_hook), not the DSM registry: a server-side process (the
+ * checkpointer, an I/O worker, ...) must reach its slot from inside the
+ * begin hook, where it cannot attach anything (see the "server processes"
+ * block below), so the table has to already be mapped by the time any
+ * hook can fire.  That is true of fixed shmem in every process from
+ * postmaster startup on -- the module requires shared_preload_libraries,
+ * so shmem_startup_hook always runs before user code does -- but is not
+ * true of a DSM-registry segment, which is created/attached lazily on
+ * first reference.
+ *
+ * Server-side processes never reach post_parse_analyze_hook or
+ * ExecutorStart_hook (they don't parse queries or run the executor
+ * through those entry points), so without help they would only ever
+ * attach at the next configuration reload after capture is turned on --
+ * missing everything from process start until then, including
+ * crash-recovery waits in the startup process.  When capture is already
+ * on in the configuration at postmaster start, this module additionally
+ * reserves a second, fixed-size region -- one payload-sized slot per
+ * possible server-side ProcNumber -- and each such process claims its own
+ * slot from inside the begin hook itself (see the claim protocol below),
+ * without allocating, locking, waiting, or erroring.
+ *
+ * This file also carries the trace level (pg_wait_event_tracing.capture =
+ * trace): a per-backend ring buffer of individual completed waits and
+ * query-attribution markers, addressed through the same control segment
+ * (PwetSlot's trace_ptr/trace_state/trace_owner_pid/trace_owner_start
+ * fields) and allocated in its own DSA area (GetNamedDSA()), lazily, only
+ * for a backend that enables trace.  Trace attach/detach/orphan-reclaim
+ * always happens at the same safe points as stats attach (the assign hook
+ * or the post_parse_analyze/ExecutorStart hooks); the begin/end wait hooks
+ * only ever append an already-allocated ring, lock-free, single-writer,
+ * exactly like the stats hot path.  Query markers are covered in the
+ * comment on the marker state machine further down.
+ *
+ * Trace is not covered by the server-process fixed-memory region (see the
+ * comment above): a per-server-process ring would cost several MiB each,
+ * so a server-side process starts tracing only at the first configuration
+ * reload with capture = trace, via the DSA path in the assign hook, same
+ * as any client backend's assign-hook attach.
+ *
+ *-------------------------------------------------------------------------
+ */
+#include "postgres.h"
+
+#include "access/htup_details.h"
+#include "access/parallel.h"
+#include "access/xact.h"
+#include "catalog/pg_authid.h"
+#include "catalog/pg_type_d.h"
+#include "executor/executor.h"
+#include "fmgr.h"
+#include "funcapi.h"
+#include "miscadmin.h"
+#include "nodes/queryjumble.h"
+#include "optimizer/planner.h"
+#include "parser/analyze.h"
+#include "pgstat.h"
+#include "port/pg_bitutils.h"
+#include "port/atomics.h"
+#include "portability/instr_time.h"
+#include "postmaster/autovacuum.h"
+#include "replication/walsender.h"
+#include "storage/dsm_registry.h"
+#include "storage/io_worker.h"
+#include "storage/ipc.h"
+#include "storage/lwlock.h"
+#include "storage/proc.h"
+#include "storage/procarray.h"
+#include "storage/procnumber.h"
+#include "storage/shmem.h"
+#include "tcop/utility.h"
+#include "utils/acl.h"
+#include "utils/array.h"
+#include "utils/backend_status.h"
+#include "utils/builtins.h"
+#include "utils/dsa.h"
+#include "utils/guc.h"
+#include "utils/injection_point.h"
+#include "utils/jsonb.h"
+#include "utils/numeric.h"
+#include "utils/pgstat_internal.h"
+#include "utils/timestamp.h"
+#include "utils/tuplestore.h"
+#include "utils/wait_classes.h"
+#include "utils/wait_event.h"
+
+#include "pg_wait_event_tracing_data.h"
+
+PG_MODULE_MAGIC_EXT(
+					.name = "pg_wait_event_tracing",
+					.version = PG_VERSION
+);
+
+PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_timing);
+PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_timing_overflow);
+PG_FUNCTION_INFO_V1(pg_stat_reset_wait_event_timing);
+PG_FUNCTION_INFO_V1(pg_stat_reset_wait_event_timing_all);
+PG_FUNCTION_INFO_V1(pg_wait_event_tracing_capacity);
+PG_FUNCTION_INFO_V1(pg_wait_event_tracing_hooks_installed);
+PG_FUNCTION_INFO_V1(pg_get_backend_wait_event_trace);
+PG_FUNCTION_INFO_V1(pg_get_wait_event_trace);
+PG_FUNCTION_INFO_V1(pg_stat_clear_orphaned_wait_event_rings);
+PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_totals);
+PG_FUNCTION_INFO_V1(pg_stat_get_wait_event_totals_info);
+PG_FUNCTION_INFO_V1(pg_stat_reset_wait_event_totals);
+PG_FUNCTION_INFO_V1(pg_wait_event_snapshot);
+
+PGDLLEXPORT void _PG_init(void);
+
+#define PWET_CONTROL_NAME "pg_wait_event_tracing"
+#define PWET_CONTROL_STRUCT_NAME "pg_wait_event_tracing control"
+#define PWET_REGION_HEADER_NAME "pg_wait_event_tracing header"
+#define PWET_SERVER_REGION_NAME "pg_wait_event_tracing server processes"
+#define PWET_STATS_DSA_NAME "pg_wait_event_tracing_stats"
+#define PWET_TRACE_DSA_NAME "pg_wait_event_tracing_trace"
+#define PWET_NUM_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
+
+/*
+ * "6" in plan section 4.2a's R = [MaxConnections, MaxBackends + 6 +
+ * io_max_workers): the auxiliary process types other than I/O workers
+ * (checkpointer, background writer, WAL writer, WAL summarizer, archiver,
+ * startup process, WAL receiver -- proc.h's own comment on
+ * NUM_AUXILIARY_PROCS explains why 6 of these overlapping-lifetime slots
+ * suffice).  Expressed from proc.h's constants, not as a literal, so it
+ * tracks NUM_AUXILIARY_PROCS/MAX_IO_WORKERS if they ever change.
+ */
+#define PWET_NON_IO_AUX_PROCS (NUM_AUXILIARY_PROCS - MAX_IO_WORKERS)
+#define PWET_HISTOGRAM_BUCKETS 32
+#define PWET_IDX_LWLOCK (-2)
+#define PWET_LWLOCK_EMPTY ((uint16) 0xFFFF)
+#define PWET_WAIT_EVENT_CLASS_MASK 0xFF000000U
+#define PWET_WAIT_EVENT_ID_MASK 0x0000FFFFU
+#define PWET_HAS_STATS_PRIVS(role) \
+	(has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS) || \
+	 has_privs_of_role(GetUserId(), role))
+
+/*
+ * trace_state values (PwetSlot.trace_state).
+ *
+ *   FREE      no ring allocated (trace_ptr invalid).
+ *   ACTIVE    a live process is writing to the ring (trace_owner_pid/start
+ *             identify it).
+ *   ORPHANED  the owner exited; the ring is post-mortem and immutable,
+ *             kept readable until a successor reclaims it or an
+ *             administrator sweeps it (pg_stat_clear_orphaned_wait_event_
+ *             rings()).
+ */
+#define PWET_TRACE_FREE 0
+#define PWET_TRACE_ACTIVE 1
+#define PWET_TRACE_ORPHANED 2
+
+/*
+ * Trace record type tags (PwetTraceRecord.record_type).  Numeric values
+ * for WAIT/QUERY_START/EXEC_START/EXEC_END are kept where the peer-review
+ * package already used them (see wp3-trace-parts-from-package.c.txt); the
+ * package's QUERY_END has no v8 equivalent (v8 closes a statement's
+ * interval with ExecEnd/UtilityEnd/TxnCommit/TxnAbort/Idle instead, per
+ * the marker state machine below), so its value (2) is left unused rather
+ * than reassigned.  UTILITY_START/END, TXN_COMMIT/ABORT and IDLE are new
+ * in v8 (plan sec 5.3, fix 6).  IDLE_IN_XACT is IDLE written while a valid
+ * transaction is still open (see pwet_wait_begin_impl()).
+ */
+#define PWET_TRACE_WAIT 0
+#define PWET_TRACE_QUERY_START 1
+#define PWET_TRACE_EXEC_START 3
+#define PWET_TRACE_EXEC_END 4
+#define PWET_TRACE_UTILITY_START 5
+#define PWET_TRACE_UTILITY_END 6
+#define PWET_TRACE_TXN_COMMIT 7
+#define PWET_TRACE_TXN_ABORT 8
+#define PWET_TRACE_IDLE 9
+#define PWET_TRACE_IDLE_IN_XACT 10
+
+typedef enum PwetCaptureLevel
+{
+	PWET_CAPTURE_OFF = 0,
+	PWET_CAPTURE_STATS,
+	PWET_CAPTURE_TRACE,
+} PwetCaptureLevel;
+
+typedef struct PwetTimingEntry
+{
+	int64		count;
+	int64		total_ns;
+	int64		max_ns;
+	int64		histogram[PWET_HISTOGRAM_BUCKETS];
+} PwetTimingEntry;
+
+typedef struct PwetLWLockHashEntry
+{
+	uint16		tranche_id;
+	uint16		dense_idx;
+} PwetLWLockHashEntry;
+
+typedef struct PwetLWLockHash
+{
+	int			num_used;
+	int			hash_size;
+	int			max_entries;
+} PwetLWLockHash;
+
+/*
+ * Per-backend statistics payload, allocated in the stats DSA area only for
+ * a backend that has enabled capture.  Fixed-class entries are followed by
+ * the runtime-sized LWLock hash and its entry array.
+ *
+ * The in-flight wait (which event, and when it started) is NOT part of
+ * this payload: it lives in the process-local statics pwet_wait_start/
+ * pwet_current_event instead, because it is written by the owning backend
+ * only and read by nobody else -- no cross-backend reader ever looked at
+ * it (pg_stat_get_wait_event_timing() and friends only ever copy
+ * events/lwlock_hash/the overflow counters/reset_count out of a payload;
+ * see pwet_emit_timing_row() and pg_stat_get_wait_event_timing_overflow()).
+ * Keeping it here would just be extra bytes in a struct that is, for the
+ * fixed-region case, memcpy'd whole on every lock-free read.
+ */
+typedef struct PwetStats
+{
+	/*
+	 * Structural sequence counter: odd while the owner is inserting a
+	 * tranche, clearing the table or (re)initializing the whole payload,
+	 * even otherwise.  Ordinary counter updates never touch it.  A reader
+	 * copying the payload validates the copy against the SHARED value (the
+	 * copied one is meaningless); see pwet_copy_stable().  Kept outside the
+	 * "body" below so a payload reinitialization never rewinds it.
+	 */
+	pg_atomic_uint32 struct_seq;
+	int64		reset_count;
+	PwetTimingEntry events[PWET_NUM_EVENTS];
+	PwetLWLockHash lwlock_hash;
+	int64		lwlock_overflow_count;
+	int64		flat_overflow_count;
+} PwetStats;
+
+/*
+ * One trace ring record: 32 bytes, seqlock-protected (single writer, the
+ * owning backend; lock-free readers use the position-encoded identity
+ * check described on emit_wait_event_trace_for_procnumber()).  record_type
+ * selects which half of the union is meaningful:
+ *
+ *   PWET_TRACE_WAIT           data.wait: a completed wait (event, duration)
+ *   everything else           data.marker: a query-attribution marker
+ *                              (query_id, and the executor nesting depth
+ *                              for QUERY_START/EXEC_START/EXEC_END/
+ *                              UTILITY_START, the utility nesting depth
+ *                              for TXN_COMMIT/TXN_ABORT; 0 for the rest)
+ *
+ * Field layout and the seqlock protocol are ported from the peer-review
+ * package (wp3-trace-parts-from-package.c.txt); only the second union arm
+ * is renamed/repurposed (query.pad2 -> marker.depth) to carry the nesting
+ * depth the v8 marker set needs, without changing the record size.
+ */
+typedef struct PwetTraceRecord
+{
+	uint32		seq;
+	uint8		record_type;
+	uint8		pad[3];
+	int64		timestamp_ns;
+	union
+	{
+		struct
+		{
+			uint32		event;
+			uint32		pad2;
+			int64		duration_ns;
+		}			wait;
+		struct
+		{
+			int64		query_id;
+			int64		depth;
+		}			marker;
+	}			data;
+} PwetTraceRecord;
+
+StaticAssertDecl(sizeof(PwetTraceRecord) == 32,
+				 "PwetTraceRecord must be exactly 32 bytes");
+
+/*
+ * Per-backend trace ring: header plus a runtime-sized records[] array
+ * (row count decided by pg_wait_event_tracing.trace_ring_size, PGC_POSTMASTER,
+ * so every ring in this postmaster run has the same dimensions).
+ */
+typedef struct PwetTraceState
+{
+	pg_atomic_uint64 write_pos;
+	uint32		ring_mask;
+	uint32		pad;
+	PwetTraceRecord records[FLEXIBLE_ARRAY_MEMBER];
+} PwetTraceState;
+
+/*
+ * One entry per possible ProcNumber, always resident in the control
+ * segment.
+ *
+ * owner_pid/owner_start identify the process that currently owns the
+ * stats payload (stats_ptr for a client backend; the matching slice of the
+ * fixed server-process region -- see below -- for a server-side process):
+ * every stats reader compares them against the live PgBackendStatus entry
+ * for this ProcNumber and ignores the slot on a mismatch, so a successor
+ * that has not (yet) claimed its own payload never gets attributed a
+ * predecessor's counters.
+ *
+ * A client backend publishes owner_pid/owner_start under pwet_lock,
+ * alongside stats_ptr; a server-side process instead publishes them
+ * lock-free from its begin hook (see pwet_claim_fixed_slot()), since the
+ * hook may not take a lock.  reset_generation lives here, not in the
+ * payload itself, so that a reset request (always published under
+ * pwet_lock, regardless of which kind of slot it targets -- see
+ * pwet_request_reset()) can be tied atomically to the owner token that
+ * authorizes it, and so the owning process can later notice it with a
+ * lock-free read (see pwet_wait_end()).
+ *
+ * trace_ptr/trace_state/trace_owner_pid/trace_owner_start are the trace
+ * level's own, independent ownership token for this ProcNumber's ring --
+ * deliberately NOT shared with owner_pid/owner_start above.  The two
+ * lifecycles differ: on exit, the stats payload is freed outright
+ * (pwet_release_stats() clears owner_pid/owner_start), but the trace ring
+ * is orphaned, not freed -- state becomes ORPHANED and trace_owner_pid/
+ * start are RETAINED so a post-mortem reader can still attribute the ring
+ * to its producer even after a successor has already claimed this
+ * ProcNumber's stats slot (see pwet_orphan_trace()/pwet_attach_trace()).
+ * Sharing owner_pid/owner_start between the two would make the successor's
+ * ordinary stats attach silently reattribute the predecessor's still-
+ * orphaned trace ring to itself.
+ */
+typedef struct PwetSlot
+{
+	dsa_pointer stats_ptr;		/* InvalidDsaPointer when not collecting */
+	dsa_pointer trace_ptr;		/* InvalidDsaPointer when trace_state == FREE */
+	uint8		trace_state;	/* PWET_TRACE_FREE/ACTIVE/ORPHANED */
+	int			owner_pid;		/* 0 when unowned */
+	TimestampTz owner_start;	/* MyStartTimestamp of the owner */
+	pg_atomic_uint32 generation;	/* bumped on every ownership change */
+	pg_atomic_uint32 reset_generation; /* bumped by a reset request */
+	int			trace_owner_pid;	/* producer of trace_ptr's ring, live or
+									 * dead; 0 when trace_state == FREE */
+	TimestampTz trace_owner_start;
+} PwetSlot;
+
+/*
+ * A small, always-allocated (regardless of capture) record of the one
+ * decision that can only be made once, by whichever process creates
+ * shared memory: whether the server-process region was requested, and
+ * if so, its bounds.  shmem_request_hook decides this from pwet_capture
+ * at postmaster start, but shmem_startup_hook -- which is what actually
+ * opens the region -- also runs in every EXEC_BACKEND child, potentially
+ * long after a reload has changed pwet_capture to something else.  A
+ * child must never re-derive the decision from its own (possibly
+ * reloaded) pwet_capture; it has to read what the postmaster actually
+ * decided and reserved, from here.
+ */
+typedef struct PwetRegionHeader
+{
+	bool		server_region_present;
+	int			server_region_start;
+	int			server_region_end;
+} PwetRegionHeader;
+
+/*
+ * Lifetime ledgers (instance totals).
+ *
+ * One fixed-size ledger per possible ProcNumber, in the module's main
+ * shared memory, holds the cumulative number and total duration of every
+ * completed wait that process ever reported, per flat wait event and per
+ * LWLock tranche.  Unlike the per-backend payload above (freed or reset
+ * whenever its owner detaches, resets or exits) a ledger is NEVER cleared:
+ * not on exit, capture change, per-backend reset, reset-all or slot reuse,
+ * and the fixed-slot claim does not touch it.  Only creating shared memory
+ * (server start, crash restart) zeroes it, so summing all ledgers gives the
+ * instance-wide totals including processes that already exited.
+ *
+ * Ownership: only the process owning ProcNumber N ever writes ledger N.  An
+ * old owner cannot write after its slot is reassigned, because every
+ * before_shmem_exit callback, including the exit drain, runs before
+ * ProcKill()/AuxiliaryProcKill() release the PGPROC (ipc.c, shmem_exit();
+ * proc.c, ProcKill() and AuxiliaryProcKill()), and after the drain this
+ * process never writes its ledger again (pwet_ledger_closed).  The
+ * fixed-slot claim allocates no ProcNumber of its own.  The ledger is found
+ * from MyProcNumber, which is assigned before BaseInit(), so it does not
+ * depend on pwet_my_procno or on any legacy attachment.
+ *
+ * A ledger is updated only from pwet_flush_pending(), so the ordinary wait
+ * begin/end path does no new work: a completion reaches the ledger when it
+ * is flushed (next timed wait begin, or one of the other flush points, or
+ * the exit drain).  Writers bracket the update with a seqlock; changecount
+ * is a plain aligned 32-bit word accessed with single loads and stores,
+ * unrelated to PwetStats.struct_seq.  A reader copies the whole ledger as a
+ * block and accepts the copy only if changecount was even and unchanged
+ * around the copy, which also protects the 64-bit fields on 32-bit
+ * platforms.  Wraparound assumption: a reader is not descheduled across
+ * 2^31 updates of one slot (each bracket adds 2 to a 32-bit word).
+ *
+ * A counter that would exceed what an SQL bigint can hold sets the sticky
+ * invalid flag instead of wrapping; reset cannot repair that.
+ */
+#define PWET_PGSTAT_KIND PGSTAT_KIND_EXPERIMENTAL
+#define PWET_TOTALS_HEADER_NAME "pg_wait_event_tracing totals header"
+#define PWET_TOTALS_LOCK_NAME "pg_wait_event_tracing totals"
+#define PWET_LEDGERS_NAME "pg_wait_event_tracing ledgers"
+#define PWET_NUM_TRANCHE_IDS 65536
+
+/* Reserved event_key values of the two overflow rows (no real key is < 0). */
+#define PWET_KEY_LWLOCK_OVERFLOW (-1)
+#define PWET_KEY_FLAT_OVERFLOW (-2)
+
+typedef struct PwetTotal
+{
+	uint64		calls;
+	uint64		total_ns;
+} PwetTotal;
+
+/* Dictionary cell of one admitted LWLock tranche; tranche_plus1 == 0: empty */
+typedef struct PwetLedgerCell
+{
+	uint32		tranche_plus1;
+	uint32		pad;
+	PwetTotal	total;
+} PwetLedgerCell;
+
+typedef struct PwetLedger
+{
+	pg_atomic_uint32 changecount;	/* seqlock: odd while being written */
+	uint32		invalid;		/* sticky: a counter would exceed bigint */
+	uint32		invalid_events; /* diagnostic, saturating: updates refused */
+	uint32		num_used;		/* dictionary cells in use */
+	PwetTotal	lwlock_overflow;	/* tranches that did not fit */
+	PwetTotal	flat_overflow;	/* events outside the flat table */
+	uint64		xact_commit;	/* captured transaction completions */
+	uint64		xact_abort;
+	uint64		xact_prepare;
+	PwetTotal	flat[PWET_NUM_EVENTS];
+	PwetLedgerCell cells[FLEXIBLE_ARRAY_MEMBER];	/* hash_size cells */
+} PwetLedger;
+
+/* Sum over all ledgers; see pwet_totals_scan(). */
+typedef struct PwetTotalsScan
+{
+	PwetTotal	lwlock_overflow;
+	PwetTotal	flat_overflow;
+	uint64		xact_commit;
+	uint64		xact_abort;
+	uint64		xact_prepare;
+	int64		invalid_ledgers;
+	bool		sum_overflow;	/* some sum exceeded what bigint can hold */
+	bool		overflow_sum_overflow;	/* ... one of the two overflow pairs */
+	PwetTotal	flat[PWET_NUM_EVENTS];
+	PwetTotal	tranche[PWET_NUM_TRANCHE_IDS];
+} PwetTotalsScan;
+
+/*
+ * Instance-wide control, protected (except incarnation, written once) by the
+ * totals lock: the reset generation, the wall-clock times of the scan that
+ * produced the baseline, and the baseline itself.  The lock protects the
+ * baseline, never the ledgers.
+ */
+typedef struct PwetTotalsHeader
+{
+	uint64		incarnation;	/* random, new at every shared memory init */
+	uint64		reset_generation;
+	TimestampTz reset_scan_start;	/* 0 until the first reset */
+	TimestampTz reset_scan_end;
+	PwetTotalsScan baseline;
+#ifdef USE_ASSERT_CHECKING
+	/* Test-only: suspend one reader between its scan and its generation check. */
+	pg_atomic_uint32 test_arm;
+	pg_atomic_uint32 test_waiting;
+	pg_atomic_uint32 test_release;
+	pg_atomic_uint32 test_retries;
+#endif
+} PwetTotalsHeader;
+
+/* What a read of the totals knows besides the sums. */
+typedef struct PwetReadMeta
+{
+	uint64		generation;
+	TimestampTz scan_start;
+	TimestampTz scan_end;
+	TimestampTz reset_scan_start;
+	TimestampTz reset_scan_end;
+} PwetReadMeta;
+
+typedef struct PwetPgStatShared
+{
+	uint32		unused;
+} PwetPgStatShared;
+
+static const struct config_enum_entry pwet_capture_options[] = {
+	{"off", PWET_CAPTURE_OFF, false},
+	{"stats", PWET_CAPTURE_STATS, false},
+	{"trace", PWET_CAPTURE_TRACE, false},
+	{NULL, 0, false}
+};
+
+static int	pwet_capture = PWET_CAPTURE_OFF;
+static int	pwet_max_tranches = 192;
+
+/*
+ * Per-backend trace ring size in KB (same default/min/max/unit as v6's
+ * wait_event_trace_ring_size).  PGC_POSTMASTER: every backend in this
+ * postmaster run, including an EXEC_BACKEND child re-running _PG_init(),
+ * ends up with the identical final value (latched at postmaster start,
+ * unlike pwet_capture), so pwet_trace_records_per_ring below is safe to
+ * (re)derive independently in every process -- there is no "decision made
+ * in the postmaster that a child must read back" here, unlike the
+ * server-process region's presence/bounds (see PwetRegionHeader).
+ */
+static int	pwet_trace_ring_size = 4096;
+
+/*
+ * GUC check hook for trace_ring_size: the ring's record count must be a
+ * power of two for the writer's mask-indexing (pos & ring_mask).  Each
+ * record is 32 bytes, so kb is a power of two iff the record count is.
+ */
+static bool
+pwet_check_trace_ring_size(int *newval, void **extra, GucSource source)
+{
+	int			v = *newval;
+
+	if (v <= 0 || (v & (v - 1)) != 0)
+	{
+		GUC_check_errdetail("pg_wait_event_tracing.trace_ring_size must be a positive power of two.");
+		return false;
+	}
+	return true;
+}
+
+/*
+ * guc.c's set_config_with_handle() calls a PGC_ENUM variable's assign_hook
+ * BEFORE storing the new value (assign_hook(newval, newextra) precedes
+ * *conf->variable = newval), so pwet_capture is still the *old* value for
+ * the whole duration of pwet_assign_capture(), including every function it
+ * calls synchronously (pwet_maybe_attach() and everything that reaches from
+ * there).  pwet_capture_effective mirrors pwet_capture except that
+ * pwet_assign_capture() updates it first, so code that needs the value
+ * capture is *becoming* -- not the value that is (still, momentarily)
+ * current -- can see it.
+ *
+ * THE RULE, stated once here for every call site to follow (found the hard
+ * way: CI run 34703751075 showed the trace regress test recording nothing
+ * for an entire session, root-caused to exactly one site below getting this
+ * backwards -- see pwet_maybe_attach()'s comment for the full story):
+ *
+ *   - An ATTACH decision -- may this process allocate/publish a stats
+ *     payload or a trace ring right now -- tests pwet_capture_effective.
+ *     pwet_can_attach(), pwet_can_attach_trace(), and pwet_maybe_attach()'s
+ *     own trace branch all do.  Getting this wrong makes an attach
+ *     triggered by "SET ... = trace" itself silently skip attaching (the
+ *     assign hook sees the stale old value), and if the caller then also
+ *     clears pwet_attach_needed unconditionally, nothing ever retries for
+ *     the rest of the session.
+ *   - A RECORDING decision -- given an already-attached payload, should
+ *     this hook or marker writer actually write to it right now -- tests
+ *     pwet_capture itself, EXCEPT for the wait-event begin/end hooks (see
+ *     below).  pwet_trace_write_marker(), and the post_parse_analyze/
+ *     ExecutorStart/ExecutorEnd/ProcessUtility hooks and the xact
+ *     callback, all do this deliberately: none of them are ever invoked
+ *     synchronously from inside pwet_assign_capture(), so pwet_capture is
+ *     always fully current by the time they run, and recording must
+ *     never start or stop based on a value that has not actually taken
+ *     effect yet.
+ *
+ *     pwet_wait_begin()/pwet_wait_end() are the one exception: they test
+ *     pwet_rec_stats/pwet_rec_trace (see pwet_update_rec_pointers()),
+ *     which ARE derived from pwet_capture_effective, because -- unlike
+ *     every other recording site above -- these two CAN run synchronously
+ *     from inside pwet_assign_capture(): pwet_maybe_attach() reaches
+ *     pwet_attach_stats()/pwet_attach_trace(), and both take an LWLock,
+ *     itself a timed wait.  Testing the stale, stored pwet_capture there
+ *     would just move the "recording starts before the SET has taken
+ *     effect" bug from this file's history (see the CI-run story above)
+ *     onto the exact same values used for attach decisions.  Instead,
+ *     pwet_assign_capture() masks pwet_stats_writes_disabled/
+ *     pwet_trace_writes_disabled for its own duration, so
+ *     pwet_rec_stats/pwet_rec_trace answer exactly what testing the
+ *     stored pwet_capture would have -- see pwet_assign_capture()'s own
+ *     comment for the precise masking rule.
+ *
+ * A server-side process is why this matters at all: it has no "next
+ * statement" to paper over a missed attach the way a client backend would
+ * (pwet_maybe_attach() also runs from post_parse_analyze_hook/
+ * ExecutorStart_hook, which a client backend reaches again almost
+ * immediately, by which point pwet_capture has long since been updated).
+ * With the reserved region absent, a server-side process depends entirely
+ * on the assign hook's own synchronous pwet_maybe_attach() call to attach
+ * via DSA; with the region present, a released fixed slot depends on
+ * pwet_wait_begin() re-claiming, which does not go through
+ * pwet_can_attach() at all, but the DSA fallback does, and a stale
+ * pwet_capture there would make pwet_can_attach() see the old (often OFF)
+ * value and refuse forever, since nothing else ever retries it for such a
+ * process.
+ */
+static int	pwet_capture_effective = PWET_CAPTURE_OFF;
+
+/* The control table: an array of PWET_NUM_SLOTS PwetSlots, nothing else. */
+static PwetSlot *pwet_ctl;
+static LWLock *pwet_lock;
+static dsa_area *pwet_stats_dsa;
+
+/*
+ * Set by pwet_shmem_request() from pwet_capture, in the postmaster only,
+ * immediately before conditionally requesting the region's bytes; read
+ * back by pwet_shmem_startup() in that same process, immediately after,
+ * to decide whether to record the region as present in the header (see
+ * PwetRegionHeader).  Meaningless in any other process: an EXEC_BACKEND
+ * child never calls shmem_request_hook at all (only the postmaster does,
+ * once, before shared memory exists), so this stays at its unused
+ * default there -- which is fine, since a child reads presence/bounds
+ * from the header, never from this.
+ */
+static bool pwet_region_requested;
+
+/*
+ * The reserved server-process region (plan section 4.2a).  NULL unless
+ * the header (see PwetRegionHeader) records it as present -- which the
+ * header can only ever say if capture was already non-off in the
+ * configuration at postmaster start (see pwet_shmem_request()/
+ * pwet_shmem_startup()).  [pwet_server_region_start,
+ * pwet_server_region_end) is R, a sub-range of ProcNumbers, read from the
+ * header the same way; pwet_server_stride is the byte size of one
+ * process's slice, computed once (from pwet_max_tranches, a
+ * PGC_POSTMASTER GUC) at the same time as the region itself and never
+ * recomputed, so every process addresses the region the same way it was
+ * originally sized.
+ */
+static char *pwet_server_region;
+static int	pwet_server_region_start;
+static int	pwet_server_region_end;
+static Size pwet_server_stride;
+
+static PwetStats *pwet_my_stats;
+static ProcNumber pwet_my_procno = INVALID_PROC_NUMBER;
+static Size pwet_stats_stride;
+static uint32 pwet_last_reset_generation;
+
+/*
+ * Lifetime ledgers (see the comment on PwetLedger).  pwet_ledger_bytes is
+ * what a reader copies; pwet_ledger_stride is the distance between two
+ * ledgers.  All of these are derived from PGC_POSTMASTER settings, so every
+ * process computes the same values.  pwet_my_ledger is cached on first use;
+ * pwet_ledger_closed is set by the exit drain and never cleared.
+ */
+static PwetTotalsHeader *pwet_totals_header;
+static LWLock *pwet_totals_lock;
+static char *pwet_ledgers;
+static Size pwet_ledger_bytes;
+static Size pwet_ledger_stride;
+static int	pwet_ledger_hash_size;
+static PwetLedger *pwet_my_ledger;
+static bool pwet_ledger_closed;
+
+/*
+ * The owning backend's in-flight wait: written only by that backend's own
+ * pwet_wait_begin_impl()/pwet_wait_end_impl(), and read by nobody else --
+ * confirmed by grepping every ->wait_start/->current_event site before
+ * this pair replaced PwetStats.wait_start/PwetStats.current_event (the
+ * cross-backend readers, pg_stat_get_wait_event_timing() and friends,
+ * copy only the events/lwlock_hash/overflow/reset_count parts of the
+ * payload -- see pwet_emit_timing_row() and the overflow SRF -- never
+ * these two).  That made them safe to move out of the DSA/fixed-region
+ * payload into ordinary process-local statics: there was never a second
+ * reader to keep in sync with the payload's memory, and moving them
+ * shrinks every stats payload by sizeof(instr_time) + sizeof(uint32)
+ * without changing any observable memory bound (t/001_memory.pl's checks
+ * are all footprint *inequalities*, not exact sizes).
+ */
+static instr_time pwet_wait_start;
+static uint32 pwet_current_event;
+
+/*
+ * The one-slot, backend-local pending-accounting buffer (v11 patch 0004
+ * fixup; see DECISION-deferred-accounting.md).  pwet_wait_end_impl() no
+ * longer does the count/total/max/histogram update and trace append
+ * itself: doing that inline made every wait_end() call, including one
+ * returning from inside LWLockAcquire()'s critical section, pay a
+ * shared-payload cache miss and (in trace mode) a seqlock append before
+ * the caller could proceed -- for a contended lock, every queued waiter
+ * pays that too, which is what made W3's collector overhead 40x its
+ * additive estimate. Instead, wait_end_impl() only reads the clock,
+ * computes the duration, and stashes (event, duration, timestamp) here;
+ * pwet_flush_pending() later runs the exact same accounting the old
+ * inline code did, against the STORED values, from a point where the
+ * cost no longer extends any lock's hold time -- see its own comment for
+ * the complete list of call sites and why each is safe/required.
+ *
+ * Single-slot, not a queue: at most one wait is ever in flight per
+ * backend (pwet_wait_start/pwet_current_event above), so at most one
+ * record is ever pending, and pwet_wait_begin_impl() flushes it before
+ * timing the next wait -- see pwet_flush_pending()'s comment.
+ *
+ * trace records pwet_rec_trace's answer at wait_end time (see
+ * pwet_wait_end_impl()): whether to append this wait to the trace ring
+ * is a RECORDING decision, made once, at wait_end, exactly like it was
+ * before this deferral existed -- pwet_flush_pending() later obeys that
+ * decision, together with a defensive check that the ring itself is
+ * still there to append to; it never re-derives the decision from
+ * whatever pwet_rec_trace happens to answer at the later flush.
+ */
+typedef struct PwetPendingWait
+{
+	uint32		event;
+	int64		duration_ns;
+	int64		timestamp_ns;	/* the wait_end clock read, stored verbatim */
+	bool		trace;			/* pwet_rec_trace != NULL, at wait_end time */
+} PwetPendingWait;
+
+static PwetPendingWait pwet_pending;
+static bool pwet_pending_valid;
+
+static dsa_area *pwet_trace_dsa;
+static PwetTraceState *pwet_my_trace;
+
+/*
+ * Records per ring, derived from pwet_trace_ring_size on first use and
+ * cached (PGC_POSTMASTER, so the value is the same in every process for
+ * the life of this postmaster run; see pwet_trace_ring_size's comment).
+ */
+static uint32 pwet_trace_records_per_ring;
+
+static bool pwet_active;
+static bool pwet_attach_needed;
+static bool pwet_exit_started;
+static bool pwet_stats_writes_disabled;
+static bool pwet_trace_writes_disabled;
+static bool pwet_exit_callback_registered;
+
+/*
+ * The single recording gate for each of the two levels, maintained by
+ * pwet_update_rec_pointers() from the inputs above (plus
+ * pwet_capture_effective): non-NULL if and only if this backend should
+ * actually record right now.  pwet_wait_begin_impl()/pwet_wait_end_impl()
+ * test only these, instead of re-deriving the same three-way test
+ * (capture level, the writes-disabled flag, and the payload pointer) on
+ * every wait; see pwet_update_rec_pointers()'s own comment for the exact
+ * equivalence and why it is safe.
+ */
+static PwetStats *pwet_rec_stats;
+static PwetTraceState *pwet_rec_trace;
+
+/*
+ * Query-marker state machine (plan sec 5.3, fix 6), per backend, advanced
+ * only while capture == trace.  Never touched by any hook the postmaster
+ * itself runs (post_parse_analyze/ExecutorStart/ExecutorEnd/
+ * ProcessUtility/the xact callback all fire only in a real backend), so
+ * this cannot be a case of the usual postmaster/fork trap:
+ * pwet_marker_state simply never leaves its zero-valued
+ * initial state (PWET_MARKER_IDLE) before any fork(), which is also the
+ * correct starting state for a freshly forked child.  See the comment on
+ * pwet_marker_query_start() and friends, further down, for the
+ * transition rules themselves.
+ */
+typedef enum PwetMarkerState
+{
+	PWET_MARKER_IDLE = 0,
+	PWET_MARKER_OPEN,
+	PWET_MARKER_AFTER_STATEMENT,
+} PwetMarkerState;
+
+static PwetMarkerState pwet_marker_state = PWET_MARKER_IDLE;
+
+/*
+ * Nesting depths.  The markers carry two of them: the executor depth, the
+ * number of this module's planner, ExecutorStart, ExecutorRun,
+ * ExecutorFinish and ExecutorEnd hook invocations active on this process's
+ * stack, and the utility depth, the number of pwet_ProcessUtility()
+ * invocations active on it.  The executor depth counts calls, not open
+ * executors, in the manner of pg_stat_statements' nesting_level, so it says
+ * what is running: a cursor opened by DECLARE adds nothing once DECLARE has
+ * returned, and SQL run while that cursor is fetched from, closed, or
+ * materialized at commit (a WITH HOLD cursor) is nested inside whatever
+ * call does it.  So is SQL that a function runs while a plan is made (a
+ * stable function evaluated for an estimate) or started (a stable function
+ * evaluated for initial partition pruning), and SQL that an extension's
+ * callback runs while a plan is ended (EndForeignScan, say).  The utility
+ * depth tells a transaction end inside a running utility statement (COMMIT
+ * or ROLLBACK in a procedure or DO block, the internal transactions of
+ * VACUUM or CREATE INDEX CONCURRENTLY) from one between statements, and
+ * keeps the Idle markers out of a running utility (a COPY FROM STDIN
+ * waiting for its next chunk).
+ *
+ * Neither depth is stored.  Each of those hooks, whatever the capture
+ * level, puts a PwetFrame on error_context_stack around its chained call
+ * and takes it off again when the call returns; a depth is the number of
+ * frames of its kind on that stack, counted only where a depth is needed
+ * (pwet_frame_depths(), trace level only).  An error that unwinds a hook
+ * needs no code here: every recovery point restores error_context_stack
+ * to its value when the recovery point was set up -- PG_CATCH and
+ * PG_FINALLY restore the value saved by PG_TRY, and the outermost
+ * handlers (PostgresMain(), the background-worker and autovacuum ones)
+ * set it to NULL -- and a frame pushed after that point is gone from the
+ * stack with it, whatever the code there then does with the error:
+ * re-throw it, roll back a subtransaction, or catch it and carry on (a
+ * PL/pgSQL EXCEPTION block; PL/Perl's return_next(), which carries on
+ * without a rollback).  Core's own error context callbacks rely on the
+ * same property, as their frames are on the C stack too.  So the counts
+ * are exactly this module's hook invocations still on the C stack, with
+ * no setjmp in any of these hooks and nothing to reset at transaction
+ * end.  They count only those invocations: SQL that another extension
+ * runs in its own hook before or after chaining to this module's, or in a
+ * hook that does not chain to it, is outside the count (attribution may
+ * suffer; nothing is left behind).
+ *
+ * A FATAL error ends the process without unwinding, but proc_exit()
+ * clears error_context_stack before its exit callbacks run; the
+ * transaction markers written during exit say depth 0 in any case
+ * (pwet_txn_marker_depth()), and no other marker that matters follows.
+ *
+ * One more place keeps a pointer into the stack: a parallel context saves
+ * error_context_stack when it is created, to report its workers' messages
+ * with it, so a context created inside a hook's call holds that hook's
+ * frame.  Core destroys every parallel context before the call that
+ * created it returns (Gather and Gather Merge run in parallel mode only
+ * for a complete ExecutorRun, which shuts them down before it ends; index
+ * builds and VACUUM end theirs in the same function), and on error at the
+ * (sub)transaction abort, which holds interrupts, so its workers' messages
+ * are not read in between.  The one exception is a caught error that is
+ * not followed by an abort (PL/Perl's return_next()); there the saved
+ * stack also holds core's own frames of the same dead calls (SPI's, a SQL
+ * or PL function's), so this module adds no new exposure.
+ *
+ * The cost per hook invocation is one push (a load and four stores) and
+ * one pop (a load and a store), in every mode; the chain is walked only
+ * for a marker, at the trace level.  The frame's callback does nothing, so
+ * the module adds no CONTEXT line to any message.  The frame kind is in
+ * the callback argument, not in two different callbacks, so that no
+ * linker can fold two identical empty functions into one.
+ *
+ * In an assertion-enabled build, a per-kind shadow counter and a check that
+ * each pop finds its own frame on top keep the frames honest
+ * (pwet_frame_push(), pwet_frame_pop() and pwet_frame_depths()); none of
+ * it exists in a production build.
+ */
+typedef enum PwetFrameKind
+{
+	PWET_FRAME_EXEC = 0,
+	PWET_FRAME_UTILITY = 1,
+} PwetFrameKind;
+
+#define PWET_FRAME_KINDS 2
+
+/* both depths, as pwet_frame_depths() returns them */
+typedef struct PwetDepths
+{
+	int			exec;
+	int			utility;
+} PwetDepths;
+
+typedef struct PwetFrame
+{
+	ErrorContextCallback cb;	/* must be first */
+#ifdef USE_ASSERT_CHECKING
+	int			shadow_saved;	/* pwet_shadow_depth[kind] at the push */
+#endif
+} PwetFrame;
+
+#ifdef USE_ASSERT_CHECKING
+/*
+ * Shadow counters, assertion-enabled builds only: raised at every push, set
+ * back to the frame's saved value at every normal pop; each push first
+ * lowers the counter to the frames found, repairing it after an unwound
+ * error.  The check is incomplete: a skipped pop leaves both the frame and
+ * its increment behind, so later walks can find depth == counter and stay
+ * quiet.  Such a frame is caught for sure only by an enclosing hook's pop
+ * (it is not on top), when there is one; otherwise a later walk may read
+ * its reused memory and crash, or count it without any assertion firing.
+ * Production builds have none of these checks.
+ */
+static int	pwet_shadow_depth[PWET_FRAME_KINDS];
+#endif
+
+/*
+ * The frame's error context callback.  It runs for every message reported
+ * while a frame is on the stack, and for GetErrorContextStack() (PL/pgSQL's
+ * GET DIAGNOSTICS ... PG_CONTEXT), so it must do nothing: no output, nothing
+ * that can fail.
+ */
+static void
+pwet_frame_callback(void *arg)
+{
+}
+
+/*
+ * Count the frames of each kind on error_context_stack.  Called at the trace
+ * level only, for a marker: the hooks themselves never walk the stack
+ * (except for the assertion checks of an assertion-enabled build).  Kept
+ * out of line, and returning its result by value, so that no hook has a
+ * loop, a local array or a local whose address is taken on its account,
+ * which would cost every hook call something even when the walk is not
+ * done (a larger prologue, a stack protector check).
+ */
+static pg_noinline PwetDepths
+pwet_frame_depths(void)
+{
+	ErrorContextCallback *e;
+	PwetDepths	d = {0, 0};
+
+	for (e = error_context_stack; e != NULL; e = e->previous)
+	{
+		if (e->callback != pwet_frame_callback)
+			continue;
+		if ((uintptr_t) e->arg == PWET_FRAME_EXEC)
+			d.exec++;
+		else
+			d.utility++;
+	}
+	Assert(d.exec <= pwet_shadow_depth[PWET_FRAME_EXEC]);
+	Assert(d.utility <= pwet_shadow_depth[PWET_FRAME_UTILITY]);
+	return d;
+}
+
+#ifdef USE_ASSERT_CHECKING
+static int
+pwet_frame_depth_of(PwetFrameKind kind)
+{
+	PwetDepths	d = pwet_frame_depths();
+
+	return kind == PWET_FRAME_EXEC ? d.exec : d.utility;
+}
+#endif
+
+static pg_always_inline void
+pwet_frame_push(PwetFrame *frame, PwetFrameKind kind)
+{
+#ifdef USE_ASSERT_CHECKING
+
+	/*
+	 * No address checks: a frame's address says nothing reliable about call
+	 * nesting (AddressSanitizer's fake stack, see stack_depth.c), so a frame
+	 * left behind by a hook that returned is caught only by the checks that
+	 * follow its pops.
+	 */
+	frame->shadow_saved = pwet_frame_depth_of(kind);
+	pwet_shadow_depth[kind] = frame->shadow_saved + 1;
+#endif
+	frame->cb.callback = pwet_frame_callback;
+	frame->cb.arg = (void *) (uintptr_t) kind;
+	frame->cb.previous = error_context_stack;
+	error_context_stack = &frame->cb;
+}
+
+/*
+ * Normal return of the hook that pushed the frame.  Whatever the chained
+ * call pushed has been popped by now (code that returns normally pops what
+ * it pushed; an error that was caught inside it restored the stack to a
+ * point above this frame), so the frame is on top.  elog.c's error
+ * recursion trouble is the one exception, as it can empty the whole stack;
+ * restoring the frame's previous pointer is right then too, as it is for
+ * core's callbacks.
+ */
+static pg_always_inline void
+pwet_frame_pop(PwetFrame *frame)
+{
+#ifdef USE_ASSERT_CHECKING
+	PwetFrameKind kind = (PwetFrameKind) (uintptr_t) frame->cb.arg;
+
+	Assert(error_context_stack == &frame->cb || error_context_stack == NULL);
+	/* the shadow counter, cross-checked: this frame and those below it */
+	if (error_context_stack == &frame->cb)
+		Assert(pwet_frame_depth_of(kind) == frame->shadow_saved + 1);
+	pwet_shadow_depth[kind] = frame->shadow_saved;
+#endif
+	error_context_stack = frame->cb.previous;
+}
+
+/*
+ * Per-process, computed at most once per process (see pwet_wait_begin()):
+ * does MyProcNumber fall inside the reserved server-process region?
+ * Cached because the answer can't change over a process's lifetime, and
+ * the begin/end hooks run on every wait event.
+ *
+ * Keyed by MyProcPid, not a bare "have we ever checked" bool, because a
+ * bare bool would survive fork() into every child with whatever value it
+ * had in the parent -- and the *postmaster* also calls the begin hook
+ * (its ServerLoop waits through the same WaitEventSetWait() timed pair),
+ * with MyProcNumber == INVALID_PROC_NUMBER, so it would cache
+ * eligible=false once, permanently, for itself; every child forked
+ * afterwards -- checkpointer, background writer, WAL writer, every
+ * ordinary backend -- inherits that exact memory image via fork() and
+ * would see the cache already "checked", never re-deriving its own real
+ * answer from its own MyProcNumber.  (An EXEC_BACKEND child does not
+ * have this problem: it starts from a fresh, zeroed image, not a forked
+ * copy, which is why this bug was invisible on Windows.)  Keying to
+ * MyProcPid makes every process -- forked or exec'd -- recompute on its
+ * own first call, since no live process shares another live process's
+ * pid.
+ */
+static int	pwet_fixed_slot_checked_pid;
+static bool pwet_fixed_slot_eligible;
+
+/*
+ * True once pwet_shmem_startup() has finished in this process, i.e. once
+ * pwet_server_region and its bounds are final.  False from process start
+ * (so also during core's own attach work before our startup hook runs),
+ * and set also when no server region was reserved.  A NULL
+ * pwet_server_region alone cannot say that: it is also the final answer
+ * when the region was not requested.  pwet_fixed_slot_eligible must not be
+ * decided before this is set.
+ */
+static bool pwet_shmem_attached;
+
+static wait_event_hook_type prev_wait_event_begin_hook;
+static wait_event_hook_type prev_wait_event_end_hook;
+
+/*
+ * Whether this process has installed the wait-event hooks for itself yet
+ * (see pwet_install_wait_hooks()).  Every process in the cluster runs
+ * _PG_init(), but the hooks are process-local globals, so a process that
+ * never turns capture on never has to pay their indirect-call overhead on
+ * every timed wait -- see pwet_install_wait_hooks()'s own comment for the
+ * installation rule and why the hooks are never removed again.
+ */
+static bool pwet_wait_hooks_installed;
+
+static post_parse_analyze_hook_type prev_post_parse_analyze_hook;
+static planner_hook_type prev_planner_hook;
+static ExecutorStart_hook_type prev_ExecutorStart_hook;
+static ExecutorRun_hook_type prev_ExecutorRun_hook;
+static ExecutorFinish_hook_type prev_ExecutorFinish_hook;
+static ExecutorEnd_hook_type prev_ExecutorEnd_hook;
+static ProcessUtility_hook_type prev_ProcessUtility_hook;
+static shmem_request_hook_type prev_shmem_request_hook;
+static shmem_startup_hook_type prev_shmem_startup_hook;
+
+static void pwet_wait_begin(uint32 wait_event_info);
+static void pwet_wait_begin_nochain(uint32 wait_event_info);
+static void pwet_wait_end(uint32 wait_event_info);
+static void pwet_wait_end_nochain(uint32 wait_event_info);
+static void pwet_flush_pending(void);
+static void pwet_install_wait_hooks(void);
+static void pwet_update_rec_pointers(void);
+static pg_always_inline void pwet_maybe_attach(void);
+static void pwet_maybe_attach_slow(void);
+static bool pwet_ensure_stats_dsa(void);
+static void pwet_release_stats(void);
+static void pwet_before_shmem_exit(int code, Datum arg);
+static void pwet_request_reset(int procnumber, int target_pid,
+							   TimestampTz target_start);
+static void pwet_check_reset_privileges(Oid target_role);
+static bool pwet_is_fixed_procnumber(int procnumber);
+static PwetStats *pwet_fixed_payload(int procnumber);
+static void pwet_claim_fixed_slot(void);
+static void pwet_release_fixed_slot(void);
+static bool pwet_ensure_trace_dsa(void);
+static bool pwet_attach_trace(void);
+static void pwet_release_trace(void);
+static void emit_wait_event_trace(int procnumber, ReturnSetInfo *rsinfo);
+static void pwet_orphan_trace(void);
+static void pwet_xact_callback(XactEvent event, void *arg);
+static void pwet_exit_drain(int code, Datum arg);
+static void pwet_pgstat_init_backend(void);
+static void pwet_pgstat_init_shmem(void *stats);
+static void pwet_pgstat_reset_all(TimestampTz ts);
+static void pwet_pgstat_snapshot(void);
+
+static Size
+pwet_control_size(int nslots)
+{
+	return mul_size(nslots, sizeof(PwetSlot));
+}
+
+static int
+pwet_hash_size_for(int max_entries)
+{
+	int			size = 32;
+
+	while (size < max_entries * 2)
+		size <<= 1;
+	return size;
+}
+
+static Size
+pwet_stats_payload_size(int max_entries)
+{
+	int			hash_size = pwet_hash_size_for(max_entries);
+
+	return add_size(sizeof(PwetStats),
+					add_size(mul_size(hash_size,
+									  sizeof(PwetLWLockHashEntry)),
+							 mul_size(max_entries,
+									  sizeof(PwetTimingEntry))));
+}
+
+static inline PwetLWLockHashEntry *
+pwet_lwlock_hash_entries(PwetStats *state)
+{
+	return (PwetLWLockHashEntry *)
+		((char *) state + sizeof(PwetStats));
+}
+
+static inline PwetTimingEntry *
+pwet_lwlock_hash_events(PwetStats *state)
+{
+	return (PwetTimingEntry *)
+		((char *) state + sizeof(PwetStats) +
+		 (Size) state->lwlock_hash.hash_size *
+		 sizeof(PwetLWLockHashEntry));
+}
+
+/* Offset of the first payload byte that a reinitialization may zero. */
+#define PWET_STATS_BODY_OFFSET offsetof(PwetStats, reset_count)
+
+/*
+ * Structural bracket (single writer, the owning backend): struct_seq is odd
+ * while the table structure -- which tranche a row belongs to, num_used --
+ * or the whole payload is being changed, so a lock-free reader can tell
+ * that a copy it took spans such a change and discard it.  Used only for
+ * the rare structural operations (tranche insertion, reset, payload
+ * (re)initialization), never for an ordinary counter update or lookup hit.
+ * Atomic accesses plus explicit barriers (the atomics themselves imply
+ * none); no ereport or allocation may happen inside.
+ */
+static inline void
+pwet_struct_begin(PwetStats *state)
+{
+	uint32		seq = pg_atomic_read_u32(&state->struct_seq);
+
+	Assert((seq & 1) == 0);
+	pg_atomic_write_u32(&state->struct_seq, seq + 1);
+	pg_write_barrier();
+}
+
+static inline void
+pwet_struct_end(PwetStats *state)
+{
+	uint32		seq = pg_atomic_read_u32(&state->struct_seq);
+
+	Assert((seq & 1) == 1);
+	pg_write_barrier();
+	pg_atomic_write_u32(&state->struct_seq, seq + 1);
+}
+
+static void
+pwet_lwlock_hash_clear(PwetStats *state)
+{
+	PwetLWLockHash *hash = &state->lwlock_hash;
+	PwetLWLockHashEntry *entries = pwet_lwlock_hash_entries(state);
+	PwetTimingEntry *events = pwet_lwlock_hash_events(state);
+	int			i;
+
+	hash->num_used = 0;
+	memset(events, 0,
+		   (Size) hash->max_entries * sizeof(PwetTimingEntry));
+	for (i = 0; i < hash->hash_size; i++)
+	{
+		entries[i].tranche_id = PWET_LWLOCK_EMPTY;
+		entries[i].dense_idx = 0;
+	}
+}
+
+/*
+ * Reset every statistic of the owner's own payload.  The whole reset is one
+ * structural bracket: a reader that sampled the table before it must not
+ * pair an old tranche row with counters of whatever is inserted into the
+ * same dense slot afterwards.
+ */
+static void
+pwet_stats_reset(PwetStats *state)
+{
+	pwet_struct_begin(state);
+	memset(state->events, 0, sizeof(state->events));
+	pwet_lwlock_hash_clear(state);
+	state->reset_count++;
+	state->lwlock_overflow_count = 0;
+	state->flat_overflow_count = 0;
+	pwet_struct_end(state);
+}
+
+/*
+ * (Re)initialize a payload for max_entries tranches, exactly as a new
+ * payload starts.  struct_seq is deliberately preserved and only advanced,
+ * so a reader that sampled it before a reinitialization by the same owner
+ * (fixed-slot disable then re-claim keeps the pid/start token) cannot match
+ * it afterwards.  The caller guarantees struct_seq was initialized.
+ */
+static void
+pwet_stats_reinit(PwetStats *payload, int max_entries)
+{
+	int			hash_size = pwet_hash_size_for(max_entries);
+	PwetLWLockHashEntry *entries;
+	int			i;
+
+	pwet_struct_begin(payload);
+	memset((char *) payload + PWET_STATS_BODY_OFFSET, 0,
+		   pwet_stats_payload_size(max_entries) - PWET_STATS_BODY_OFFSET);
+	payload->lwlock_hash.num_used = 0;
+	payload->lwlock_hash.hash_size = hash_size;
+	payload->lwlock_hash.max_entries = max_entries;
+	entries = pwet_lwlock_hash_entries(payload);
+	for (i = 0; i < hash_size; i++)
+		entries[i].tranche_id = PWET_LWLOCK_EMPTY;
+	pwet_struct_end(payload);
+}
+
+/*
+ * Find, or insert on first use, the row of tranche_id.  The loop is bounded
+ * by hash_size, not by a probe limit: with the table full, an admitted
+ * tranche can sit arbitrarily far from its home slot and must still be
+ * found, while a tranche not yet admitted ends at an EMPTY slot (half
+ * occupancy guarantees one) and is refused there.  An insertion is
+ * structural and runs inside the bracket, writing dense_idx before
+ * tranche_id; the hit path touches no sequence counter.
+ */
+static PwetTimingEntry *
+pwet_lwlock_lookup(PwetStats *state, uint16 tranche_id)
+{
+	PwetLWLockHash *hash = &state->lwlock_hash;
+	PwetLWLockHashEntry *entries = pwet_lwlock_hash_entries(state);
+	PwetTimingEntry *events = pwet_lwlock_hash_events(state);
+	uint32		hash_value = (uint32) tranche_id * 2654435761U;
+	int			slot = hash_value & (hash->hash_size - 1);
+	int			i;
+
+	for (i = 0; i < hash->hash_size; i++)
+	{
+		PwetLWLockHashEntry *entry = &entries[slot];
+
+		if (entry->tranche_id == tranche_id)
+			return &events[entry->dense_idx];
+
+		if (entry->tranche_id == PWET_LWLOCK_EMPTY)
+		{
+			int			dense_idx;
+
+			if (hash->num_used >= hash->max_entries)
+				return NULL;
+
+			pwet_struct_begin(state);
+			dense_idx = hash->num_used++;
+			entry->dense_idx = dense_idx;
+			entry->tranche_id = tranche_id;
+			pwet_struct_end(state);
+			return &events[dense_idx];
+		}
+
+		slot = (slot + 1) & (hash->hash_size - 1);
+	}
+
+	return NULL;
+}
+
+static int
+pwet_timing_index(uint32 wait_event_info)
+{
+	uint32		class_id = wait_event_info & PWET_WAIT_EVENT_CLASS_MASK;
+	int			event_id = wait_event_info & PWET_WAIT_EVENT_ID_MASK;
+	int			class_byte;
+	int			dense;
+
+	if (class_id == PG_WAIT_LWLOCK)
+		return PWET_IDX_LWLOCK;
+
+	class_byte = class_id >> 24;
+	if (class_byte >= PWET_RAW_CLASSES)
+		return -1;
+
+	dense = pwet_class_dense[class_byte];
+	if (dense < 0 || event_id >= pwet_class_nevents[dense])
+		return -1;
+
+	return pwet_class_offset[dense] + event_id;
+}
+
+static int
+pwet_timing_bucket(int64 duration_ns)
+{
+	int			bucket;
+
+	if (duration_ns < 1024)
+		return 0;
+
+	bucket = pg_leftmost_one_pos64((uint64) duration_ns) - 9;
+	if (bucket >= PWET_HISTOGRAM_BUCKETS)
+		bucket = PWET_HISTOGRAM_BUCKETS - 1;
+	return bucket;
+}
+
+/* ----------------------------------------------------------------------
+ * Lifetime ledgers: layout, writer and reader
+ * ----------------------------------------------------------------------
+ */
+
+static Size
+pwet_ledger_size(int max_entries)
+{
+	return add_size(offsetof(PwetLedger, cells),
+					mul_size(pwet_hash_size_for(max_entries),
+							 sizeof(PwetLedgerCell)));
+}
+
+/* Distance between consecutive ledgers: a multiple of the cache line size. */
+static Size
+pwet_ledger_stride_for(int max_entries)
+{
+	return TYPEALIGN(PG_CACHE_LINE_SIZE, pwet_ledger_size(max_entries));
+}
+
+static inline PwetLedger *
+pwet_ledger_at(int procnumber)
+{
+	return (PwetLedger *) (pwet_ledgers + (Size) procnumber * pwet_ledger_stride);
+}
+
+/*
+ * Seqlock write bracket, single writer (the owning process).  changecount
+ * is odd while the ledger is being changed.  Only non-throwing operations
+ * may sit inside, and no flush: a nested bracket would corrupt the count.
+ */
+static inline void
+pwet_ledger_begin(PwetLedger *l)
+{
+	uint32		cc = pg_atomic_read_u32(&l->changecount);
+
+	Assert((cc & 1) == 0);
+	pg_atomic_write_u32(&l->changecount, cc + 1);
+	pg_write_barrier();
+}
+
+static inline void
+pwet_ledger_end(PwetLedger *l)
+{
+	uint32		cc = pg_atomic_read_u32(&l->changecount);
+
+	Assert((cc & 1) == 1);
+	pg_write_barrier();
+	pg_atomic_write_u32(&l->changecount, cc + 1);
+}
+
+/*
+ * Find the dictionary cell of tranche_id.  The probe runs until a hit, an
+ * empty cell or a full cycle, so every admitted key is found however far
+ * from its home cell it sits (admitted keys never move and are never
+ * evicted).  Returns the cell and sets *insert = false for a hit; at an
+ * empty cell returns it with *insert = true if the dictionary still has
+ * room, else NULL (the tranche goes to the overflow pair).
+ */
+static PwetLedgerCell *
+pwet_ledger_find_cell(PwetLedger *l, uint16 tranche_id, bool *insert)
+{
+	int			hash_size = pwet_ledger_hash_size;
+	uint32		hash_value = (uint32) tranche_id * 2654435761U;
+	int			slot = hash_value & (hash_size - 1);
+	int			i;
+
+	*insert = false;
+	for (i = 0; i < hash_size; i++)
+	{
+		PwetLedgerCell *cell = &l->cells[slot];
+
+		if (cell->tranche_plus1 == (uint32) tranche_id + 1)
+			return cell;
+		if (cell->tranche_plus1 == 0)
+		{
+			if (l->num_used >= (uint32) pwet_max_tranches)
+				return NULL;
+			*insert = true;
+			return cell;
+		}
+		slot = (slot + 1) & (hash_size - 1);
+	}
+
+	return NULL;
+}
+
+/* Would adding (1, duration_ns) exceed what a bigint can hold? */
+static inline bool
+pwet_total_would_overflow(const PwetTotal *t, int64 duration_ns)
+{
+	return t->calls >= (uint64) PG_INT64_MAX ||
+		t->total_ns > (uint64) PG_INT64_MAX - (uint64) duration_ns;
+}
+
+/*
+ * The counter pair a completed wait of this event is added to: its flat
+ * entry, its tranche's dictionary cell (*insert says whether the cell is
+ * still to be claimed), or the matching overflow pair.
+ */
+static PwetTotal *
+pwet_ledger_target(PwetLedger *l, uint32 event, PwetLedgerCell **cell,
+				   bool *insert)
+{
+	int			idx = pwet_timing_index(event);
+
+	*cell = NULL;
+	*insert = false;
+	if (idx == PWET_IDX_LWLOCK)
+	{
+		*cell = pwet_ledger_find_cell(l, event & PWET_WAIT_EVENT_ID_MASK,
+									  insert);
+		return *cell != NULL ? &(*cell)->total : &l->lwlock_overflow;
+	}
+	if (idx >= 0)
+		return &l->flat[idx];
+	return &l->flat_overflow;
+}
+
+/*
+ * Add one completed wait to a ledger.  The target is looked up before the
+ * bracket; inside it only plain stores happen, so nothing can throw.  An
+ * addition that would exceed bigint is refused and marks the ledger invalid.
+ * Reachable from the begin hook through pwet_flush_pending(), so it obeys the
+ * hook rules: no allocation, locking, waiting or ereport.
+ */
+static void
+pwet_ledger_add(PwetLedger *l, uint32 event, int64 duration_ns)
+{
+	PwetLedgerCell *cell;
+	bool		insert;
+	PwetTotal  *pair = pwet_ledger_target(l, event, &cell, &insert);
+
+	pwet_ledger_begin(l);
+	if (insert)
+	{
+		cell->tranche_plus1 = (event & PWET_WAIT_EVENT_ID_MASK) + 1;
+		l->num_used++;
+	}
+	if (pwet_total_would_overflow(pair, duration_ns))
+	{
+		l->invalid = 1;
+		if (l->invalid_events < PG_UINT32_MAX)
+			l->invalid_events++;
+	}
+	else
+	{
+		pair->calls++;
+		pair->total_ns += (uint64) duration_ns;
+	}
+	pwet_ledger_end(l);
+}
+
+/*
+ * The ledger of this process, or NULL if it must not (or cannot) be written:
+ * after the exit drain, or when the process has no ProcNumber (postmaster).
+ */
+static inline PwetLedger *
+pwet_get_my_ledger(void)
+{
+	if (pwet_ledger_closed)
+		return NULL;
+	if (pwet_my_ledger == NULL)
+	{
+		if (pwet_ledgers == NULL || MyProcNumber == INVALID_PROC_NUMBER ||
+			MyProcNumber < 0 || MyProcNumber >= PWET_NUM_SLOTS)
+			return NULL;
+		pwet_my_ledger = pwet_ledger_at(MyProcNumber);
+	}
+	return pwet_my_ledger;
+}
+
+#ifdef USE_ASSERT_CHECKING
+/* Test-only hooks of the ledger reader; see pwet_ledger_read(). */
+static void (*pwet_test_ledger_copy_hook) (PwetLedger *src);
+static void (*pwet_test_ledger_retry_hook) (PwetLedger *src, int retries);
+static int	pwet_test_ledger_retries;
+#endif
+
+/*
+ * Copy one ledger into dst under the seqlock: accept the copy only if
+ * changecount was even before it and unchanged after it.  The reader holds
+ * no lock and checks for interrupts between retries, so a stalled writer
+ * cannot make it uncancellable.
+ */
+static void
+pwet_ledger_read(PwetLedger *src, PwetLedger *dst)
+{
+	int			retries = 0;
+
+	for (;;)
+	{
+		uint32		cc = pg_atomic_read_u32(&src->changecount);
+
+		if ((cc & 1) == 0)
+		{
+			pg_read_barrier();
+			memcpy(dst, src, pwet_ledger_bytes);
+#ifdef USE_ASSERT_CHECKING
+			if (pwet_test_ledger_copy_hook != NULL)
+				pwet_test_ledger_copy_hook(src);
+#endif
+			pg_read_barrier();
+			if (pg_atomic_read_u32(&src->changecount) == cc)
+				return;
+		}
+
+		retries++;
+#ifdef USE_ASSERT_CHECKING
+		pwet_test_ledger_retries++;
+		if (pwet_test_ledger_retry_hook != NULL)
+			pwet_test_ledger_retry_hook(src, retries);
+#endif
+		CHECK_FOR_INTERRUPTS();
+		if (retries > 100)
+			pg_usleep(100);
+	}
+}
+
+/* Add b to a; return false if the sum cannot be a bigint. */
+static bool
+pwet_total_sum(PwetTotal *a, const PwetTotal *b)
+{
+	if (a->calls > (uint64) PG_INT64_MAX - b->calls ||
+		a->total_ns > (uint64) PG_INT64_MAX - b->total_ns)
+		return false;
+	a->calls += b->calls;
+	a->total_ns += b->total_ns;
+	return true;
+}
+
+/*
+ * Sum every slot's ledger, occupied or not, into *scan (zeroed by the
+ * caller).  Each ledger is read as an accepted copy, never from live
+ * contents.  An invalid ledger is counted in invalid_ledgers (its values are
+ * still summed so the diagnostics stay visible); a sum that would exceed
+ * bigint sets sum_overflow and is left out.  Scratch is allocated in the
+ * caller's memory context.
+ */
+static void
+pwet_totals_scan(PwetTotalsScan *scan)
+{
+	PwetLedger *copy;
+	int			slot;
+
+	if (pwet_ledgers == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("pg_wait_event_tracing instance totals are not available")));
+
+	copy = palloc(pwet_ledger_bytes);
+	for (slot = 0; slot < PWET_NUM_SLOTS; slot++)
+	{
+		int			i;
+
+		/* Own pending completion first, so a session sees its own waits. */
+		if (slot == MyProcNumber)
+			pwet_flush_pending();
+
+		pwet_ledger_read(pwet_ledger_at(slot), copy);
+
+		if (copy->invalid)
+			scan->invalid_ledgers++;
+		if (!pwet_total_sum(&scan->lwlock_overflow, &copy->lwlock_overflow) ||
+			!pwet_total_sum(&scan->flat_overflow, &copy->flat_overflow))
+			scan->sum_overflow = scan->overflow_sum_overflow = true;
+		if (copy->xact_commit > (uint64) PG_INT64_MAX - scan->xact_commit ||
+			copy->xact_abort > (uint64) PG_INT64_MAX - scan->xact_abort ||
+			copy->xact_prepare > (uint64) PG_INT64_MAX - scan->xact_prepare)
+			scan->sum_overflow = true;
+		else
+		{
+			scan->xact_commit += copy->xact_commit;
+			scan->xact_abort += copy->xact_abort;
+			scan->xact_prepare += copy->xact_prepare;
+		}
+		for (i = 0; i < PWET_NUM_EVENTS; i++)
+			if (copy->flat[i].calls != 0 &&
+				!pwet_total_sum(&scan->flat[i], &copy->flat[i]))
+				scan->sum_overflow = true;
+		for (i = 0; i < pwet_ledger_hash_size; i++)
+		{
+			PwetLedgerCell *cell = &copy->cells[i];
+
+			if (cell->tranche_plus1 == 0 || cell->total.calls == 0)
+				continue;
+			if (cell->tranche_plus1 > PWET_NUM_TRANCHE_IDS ||
+				!pwet_total_sum(&scan->tranche[cell->tranche_plus1 - 1],
+								&cell->total))
+				scan->sum_overflow = true;
+		}
+	}
+	pfree(copy);
+}
+
+/* a -= b for one pair; false if it would go negative. */
+static bool
+pwet_total_sub(PwetTotal *a, const PwetTotal *b)
+{
+	if (a->calls < b->calls || a->total_ns < b->total_ns)
+		return false;
+	a->calls -= b->calls;
+	a->total_ns -= b->total_ns;
+	return true;
+}
+
+/* Subtract a baseline from a scan; false if anything would go negative. */
+static bool
+pwet_totals_subtract(PwetTotalsScan *scan, const PwetTotalsScan *base)
+{
+	bool		ok = true;
+	int			i;
+
+	ok &= pwet_total_sub(&scan->lwlock_overflow, &base->lwlock_overflow);
+	ok &= pwet_total_sub(&scan->flat_overflow, &base->flat_overflow);
+	if (scan->xact_commit < base->xact_commit ||
+		scan->xact_abort < base->xact_abort ||
+		scan->xact_prepare < base->xact_prepare)
+		ok = false;
+	else
+	{
+		scan->xact_commit -= base->xact_commit;
+		scan->xact_abort -= base->xact_abort;
+		scan->xact_prepare -= base->xact_prepare;
+	}
+	for (i = 0; i < PWET_NUM_EVENTS; i++)
+		ok &= pwet_total_sub(&scan->flat[i], &base->flat[i]);
+	for (i = 0; i < PWET_NUM_TRANCHE_IDS; i++)
+		ok &= pwet_total_sub(&scan->tranche[i], &base->tranche[i]);
+	return ok;
+}
+
+/*
+ * Count one captured transaction completion in this process's ledger, inside
+ * the write bracket; a counter that would exceed bigint marks the ledger
+ * invalid, like the wait pairs.  Not reachable from a wait-event hook.
+ */
+static void
+pwet_ledger_count_xact(PwetLedger *l, XactEvent event)
+{
+	uint64	   *counter;
+
+	switch (event)
+	{
+		case XACT_EVENT_COMMIT:
+			counter = &l->xact_commit;
+			break;
+		case XACT_EVENT_ABORT:
+			counter = &l->xact_abort;
+			break;
+		case XACT_EVENT_PREPARE:
+			counter = &l->xact_prepare;
+			break;
+		default:
+			return;
+	}
+
+	pwet_ledger_begin(l);
+	if (*counter >= (uint64) PG_INT64_MAX)
+	{
+		l->invalid = 1;
+		if (l->invalid_events < PG_UINT32_MAX)
+			l->invalid_events++;
+	}
+	else
+		(*counter)++;
+	pwet_ledger_end(l);
+}
+
+/* Initialize a freshly created control table: mark every slot empty. */
+static void
+pwet_control_init(PwetSlot *slots)
+{
+	int			i;
+
+	for (i = 0; i < PWET_NUM_SLOTS; i++)
+	{
+		slots[i].stats_ptr = InvalidDsaPointer;
+		slots[i].trace_ptr = InvalidDsaPointer;
+		slots[i].trace_state = PWET_TRACE_FREE;
+		slots[i].owner_pid = 0;
+		slots[i].owner_start = 0;
+		pg_atomic_init_u32(&slots[i].generation, 0);
+		pg_atomic_init_u32(&slots[i].reset_generation, 0);
+		slots[i].trace_owner_pid = 0;
+		slots[i].trace_owner_start = 0;
+	}
+}
+
+/*
+ * Compute R = [start, end), the sub-range of ProcNumbers server-side
+ * processes can occupy (plan section 4.2a).  Layout, verified on this
+ * master's proc.c (ProcGlobalShmemInit()): ProcNumbers are handed out in
+ * one array, [0, MaxConnections) client backends first, then autovacuum
+ * launcher/workers and the special workers
+ * (autovacuum_worker_slots + NUM_SPECIAL_WORKER_PROCS), then background
+ * workers -- which include parallel query workers and logical replication
+ * workers -- (max_worker_processes), then WAL senders (max_wal_senders),
+ * ending at MaxBackends; then auxiliary processes fill
+ * [MaxBackends, MaxBackends + NUM_AUXILIARY_PROCS) on a first-free linear
+ * search (InitAuxiliaryProcess()), not by type, so with at most
+ * PWET_NON_IO_AUX_PROCS + io_max_workers of them concurrently alive their
+ * ProcNumbers never reach MaxBackends + PWET_NON_IO_AUX_PROCS +
+ * io_max_workers.  io_max_workers is PGC_SIGHUP: if it is raised by a
+ * reload after postmaster start, workers beyond the region reserved here
+ * fall back to the DSA path once they reach a safe point (see
+ * pwet_can_attach()) -- this only shrinks the fixed-slot coverage, it does
+ * not let any process write outside the reserved bytes, since eligibility
+ * is decided against this stored range, not against "is this any kind of
+ * server-side process".  The clamp to MaxBackends + NUM_AUXILIARY_PROCS
+ * is therefore just defense in depth (io_max_workers's own GUC bound
+ * already keeps it <= MAX_IO_WORKERS).
+ */
+static void
+pwet_compute_server_region(int *start, int *end)
+{
+	int			raw_end = MaxBackends + PWET_NON_IO_AUX_PROCS + io_max_workers;
+	int			hard_max = MaxBackends + NUM_AUXILIARY_PROCS;
+
+	*start = MaxConnections;
+	*end = Min(raw_end, hard_max);
+}
+
+/*
+ * shmem_request_hook: request the always-resident control table, its
+ * LWLock tranche, the (also always-resident) region header, and -- only
+ * if capture is already configured on -- the reserved server-process
+ * region.
+ *
+ * MaxBackends and every GUC referenced by pwet_compute_server_region() are
+ * final by the time this runs, and pwet_capture already reflects
+ * postgresql.conf: postmaster.c calls, in order, SelectConfigFiles()
+ * (loads the config file), process_shared_preload_libraries() (runs every
+ * library's _PG_init(), including this one -- DefineCustomEnumVariable()
+ * applies any config-file value for pg_wait_event_tracing.capture right
+ * then), InitializeMaxBackends(), and only then process_shmem_requests()
+ * (which calls this hook).  Verified by reading postmaster.c directly,
+ * not inferred.
+ *
+ * R is never actually empty (MaxConnections is always < MaxBackends +
+ * PWET_NON_IO_AUX_PROCS + io_max_workers), so whether the region's bytes
+ * get requested here depends entirely on pwet_region_requested, i.e. on
+ * pwet_capture -- never on R's size.
+ */
+static void
+pwet_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	RequestAddinShmemSpace(pwet_control_size(PWET_NUM_SLOTS));
+	RequestNamedLWLockTranche(PWET_CONTROL_NAME, 1);
+	RequestNamedLWLockTranche(PWET_TOTALS_LOCK_NAME, 1);
+	RequestAddinShmemSpace(sizeof(PwetRegionHeader));
+	RequestAddinShmemSpace(sizeof(PwetTotalsHeader));
+	RequestAddinShmemSpace(mul_size(PWET_NUM_SLOTS,
+									pwet_ledger_stride_for(pwet_max_tranches)));
+
+	pwet_region_requested = (pwet_capture != PWET_CAPTURE_OFF);
+	if (pwet_region_requested)
+	{
+		int			start,
+					end;
+
+		pwet_compute_server_region(&start, &end);
+		RequestAddinShmemSpace(mul_size(end - start,
+										pwet_stats_payload_size(pwet_max_tranches)));
+	}
+}
+
+/*
+ * shmem_startup_hook: create or attach the control table, the region
+ * header, and, if the header says so, the server-process region.
+ *
+ * Runs once in the postmaster (CreateSharedMemoryAndSemaphores()) and,
+ * under EXEC_BACKEND, again in every child (AttachSharedMemoryStructs()) --
+ * verified in ipci.c, which calls shmem_startup_hook from both places, the
+ * same way pg_stat_statements relies on it to re-derive its own statics in
+ * every child.  pwet_ctl/pwet_lock/pwet_server_region are plain
+ * process-local pointers into shared memory, not stored in shared memory
+ * themselves, so each EXEC_BACKEND child must (and does) recompute them
+ * here; a fork()-based child instead simply inherits them from the
+ * postmaster.
+ *
+ * Whether the region exists, and its bounds, are decided exactly once,
+ * by whichever process creates the header (necessarily the postmaster,
+ * since EXEC_BACKEND children only ever attach to already-created shared
+ * memory): !found below is true only then, and only there do we consult
+ * pwet_region_requested/pwet_compute_server_region() at all.  Every other
+ * call -- an EXEC_BACKEND child, or a later re-entry -- finds the header
+ * already populated and just reads it.  This is required, not just
+ * simpler: a child re-running _PG_init() (and so redefining pwet_capture
+ * from whatever the config currently says, which can differ from its
+ * value at postmaster start if a reload happened in between) must not be
+ * able to change whether the region is treated as present -- the region
+ * itself was only actually allocated if the *original* decision, recorded
+ * here, was to request it.
+ */
+static void
+pwet_shmem_startup(void)
+{
+	bool		found;
+	PwetRegionHeader *hdr;
+
+	/*
+	 * Not attached until the very end of this function, whatever the
+	 * previous hook does.
+	 */
+	pwet_shmem_attached = false;
+
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
+
+	pwet_ctl = NULL;
+	pwet_server_region = NULL;
+
+	pwet_lock = &(GetNamedLWLockTranche(PWET_CONTROL_NAME))->lock;
+	pwet_totals_lock = &(GetNamedLWLockTranche(PWET_TOTALS_LOCK_NAME))->lock;
+
+	pwet_ctl = (PwetSlot *) ShmemInitStruct(PWET_CONTROL_STRUCT_NAME,
+											pwet_control_size(PWET_NUM_SLOTS),
+											&found);
+	if (!found)
+		pwet_control_init(pwet_ctl);
+
+	/*
+	 * Lifetime ledgers.  Zeroed, and given a new incarnation, only when the
+	 * shared memory is created (server start or crash restart); an
+	 * EXEC_BACKEND child only attaches.  A ledger is never reset anywhere
+	 * else.
+	 */
+	pwet_ledger_hash_size = pwet_hash_size_for(pwet_max_tranches);
+	pwet_ledger_bytes = pwet_ledger_size(pwet_max_tranches);
+	pwet_ledger_stride = pwet_ledger_stride_for(pwet_max_tranches);
+	pwet_my_ledger = NULL;
+	pwet_ledger_closed = false;
+
+	pwet_totals_header = (PwetTotalsHeader *)
+		ShmemInitStruct(PWET_TOTALS_HEADER_NAME, sizeof(PwetTotalsHeader),
+						&found);
+	if (!found)
+	{
+		uint64		incarnation;
+
+		if (!pg_strong_random(&incarnation, sizeof(incarnation)))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("could not generate a random incarnation for wait event totals")));
+		memset(pwet_totals_header, 0, sizeof(PwetTotalsHeader));
+		pwet_totals_header->incarnation = incarnation;
+#ifdef USE_ASSERT_CHECKING
+		pg_atomic_init_u32(&pwet_totals_header->test_arm, 0);
+		pg_atomic_init_u32(&pwet_totals_header->test_waiting, 0);
+		pg_atomic_init_u32(&pwet_totals_header->test_release, 0);
+		pg_atomic_init_u32(&pwet_totals_header->test_retries, 0);
+#endif
+	}
+
+	pwet_ledgers = (char *) ShmemInitStruct(PWET_LEDGERS_NAME,
+											mul_size(PWET_NUM_SLOTS,
+													 pwet_ledger_stride),
+											&found);
+	if (!found)
+	{
+		int			slot;
+
+		memset(pwet_ledgers, 0, mul_size(PWET_NUM_SLOTS, pwet_ledger_stride));
+		for (slot = 0; slot < PWET_NUM_SLOTS; slot++)
+			pg_atomic_init_u32(&pwet_ledger_at(slot)->changecount, 0);
+	}
+
+	hdr = (PwetRegionHeader *) ShmemInitStruct(PWET_REGION_HEADER_NAME,
+											   sizeof(PwetRegionHeader),
+											   &found);
+	if (!found)
+	{
+		/* We are the postmaster, creating this for the first time. */
+		hdr->server_region_present = pwet_region_requested;
+		if (pwet_region_requested)
+			pwet_compute_server_region(&hdr->server_region_start,
+									   &hdr->server_region_end);
+		else
+		{
+			hdr->server_region_start = 0;
+			hdr->server_region_end = 0;
+		}
+	}
+
+	pwet_server_region_start = hdr->server_region_start;
+	pwet_server_region_end = hdr->server_region_end;
+
+	if (hdr->server_region_present)
+	{
+		pwet_server_stride = pwet_stats_payload_size(pwet_max_tranches);
+		pwet_server_region = (char *) ShmemInitStruct(PWET_SERVER_REGION_NAME,
+													  mul_size(pwet_server_region_end -
+															   pwet_server_region_start,
+															   pwet_server_stride),
+													  &found);
+		/*
+		 * ShmemInitStruct()'s underlying allocation is zeroed on creation;
+		 * only the structural counters need a proper atomic initialization.
+		 */
+		if (!found)
+		{
+			int			procnumber;
+
+			for (procnumber = pwet_server_region_start;
+				 procnumber < pwet_server_region_end; procnumber++)
+				pg_atomic_init_u32(&pwet_fixed_payload(procnumber)->struct_seq, 0);
+		}
+	}
+
+	/* Last: only now is the eligibility of a ProcNumber final. */
+	pwet_shmem_attached = true;
+}
+
+/*
+ * Lazily attach this backend to the stats DSA area.  GetNamedDSA() manages
+ * its own tranche and creation lock; we only need to remember the result.
+ */
+static bool
+pwet_ensure_stats_dsa(void)
+{
+	bool		found;
+
+	if (pwet_stats_dsa != NULL)
+		return true;
+
+	pwet_stats_dsa = GetNamedDSA(PWET_STATS_DSA_NAME, &found);
+	return pwet_stats_dsa != NULL;
+}
+
+/*
+ * Is procnumber inside the reserved server-process region, with the
+ * region actually present?  (It exists only when capture was already
+ * configured on at postmaster start; see pwet_shmem_request().)  A
+ * ProcNumber failing this check always means "not eligible for the fixed
+ * path right now", never "out of bounds": every caller already knows
+ * procnumber < PWET_NUM_SLOTS from other bounds checks.
+ */
+static bool
+pwet_is_fixed_procnumber(int procnumber)
+{
+	return pwet_server_region != NULL &&
+		procnumber >= pwet_server_region_start &&
+		procnumber < pwet_server_region_end;
+}
+
+/* Address of procnumber's slice of the server-process region. */
+static PwetStats *
+pwet_fixed_payload(int procnumber)
+{
+	Assert(pwet_is_fixed_procnumber(procnumber));
+	return (PwetStats *) (pwet_server_region +
+						  (Size) (procnumber - pwet_server_region_start) *
+						  pwet_server_stride);
+}
+
+/*
+ * Is this process at a point where attaching anything (allocating,
+ * locking, erroring) is safe?  Identity- and mode-related only -- says
+ * nothing about whether capture wants an attach at all, or which of the
+ * two payload paths (DSA vs. the fixed server-process region) applies.
+ * Shared by pwet_can_attach() (the DSA stats path) and
+ * pwet_can_attach_trace(): both need exactly this, plus their own
+ * capture-level and path-specific tests layered on top.
+ */
+static bool
+pwet_at_safe_point(void)
+{
+	if (pwet_exit_started || !pwet_active)
+		return false;
+	if (MyProc == NULL || MyProcNumber == INVALID_PROC_NUMBER)
+		return false;
+	if (MyProcNumber < 0 || MyProcNumber >= PWET_NUM_SLOTS)
+		return false;
+	if (!IsNormalProcessingMode() || CritSectionCount > 0)
+		return false;
+	if (MyProc->lwWaiting != LW_WS_NOT_WAITING)
+		return false;
+	return true;
+}
+
+/*
+ * May this process take the DSA stats path right now?  See
+ * pwet_capture_effective's comment for why that, not pwet_capture.
+ */
+static bool
+pwet_can_attach(void)
+{
+	if (!pwet_at_safe_point())
+		return false;
+	if (pwet_capture_effective == PWET_CAPTURE_OFF)
+		return false;
+
+	/*
+	 * A ProcNumber inside the reserved region never takes the DSA path
+	 * while that region exists, even before this process has claimed its
+	 * fixed slot: pwet_attach_stats() would publish stats_ptr under
+	 * pwet_lock and point pwet_my_stats at the DSA payload, but readers
+	 * for a ProcNumber in R always consult the fixed region instead (see
+	 * pwet_is_fixed_procnumber() call sites), so anything recorded there
+	 * would silently never be shown.  When the region does not exist
+	 * (capture was off at postmaster start), this is unreachable and
+	 * today's DSA-at-next-reload behaviour is unchanged.  This is why
+	 * this test is here, not folded into pwet_at_safe_point(): a
+	 * fixed-region process IS at a safe point (it can still attach
+	 * trace, which never uses this region -- see pwet_can_attach_trace()),
+	 * it just may not use the DSA stats path.
+	 */
+	if (pwet_is_fixed_procnumber(MyProcNumber))
+		return false;
+
+	return true;
+}
+
+/*
+ * May this process attach (or reclaim) a trace ring right now?  Trace
+ * never uses the fixed server-process region (plan sec 4.2a/5.2's own
+ * scope note), so unlike pwet_can_attach() there is no fixed-procnumber
+ * exclusion here -- a fixed-slot process is exactly as eligible for the
+ * (always-DSA) trace path as any client backend, PROVIDED it already has
+ * a ProcNumber identity established (pwet_my_procno), which for such a
+ * process only the begin hook's pwet_claim_fixed_slot() can set (this
+ * function is only ever called from safe points, never the hook itself,
+ * so it cannot establish that identity on its own).
+ */
+static bool
+pwet_can_attach_trace(void)
+{
+	if (!pwet_at_safe_point())
+		return false;
+	if (pwet_capture_effective != PWET_CAPTURE_TRACE)
+		return false;
+	if (pwet_my_procno == INVALID_PROC_NUMBER)
+		return false;
+	return true;
+}
+
+/*
+ * Recompute pwet_rec_stats/pwet_rec_trace, the single recording-gate
+ * pointer for each level, from their six inputs.  Called at every site
+ * that assigns any of pwet_capture_effective, pwet_stats_writes_disabled,
+ * pwet_my_stats, pwet_trace_writes_disabled, or pwet_my_trace (find them
+ * all with:
+ *   grep -n 'pwet_stats_writes_disabled =\|pwet_trace_writes_disabled =\|pwet_my_stats =\|pwet_my_trace =\|pwet_capture_effective ='
+ * ), so the pointers are never stale by the time pwet_wait_begin_impl()/
+ * pwet_wait_end_impl() next read them.
+ *
+ * pwet_rec_stats is non-NULL exactly when a test against the STORED
+ * pwet_capture -- (pwet_capture != OFF, !pwet_stats_writes_disabled,
+ * pwet_my_stats != NULL) -- would answer yes; pwet_rec_trace, exactly
+ * when the equivalent trace-specific test (pwet_capture == TRACE,
+ * !pwet_trace_writes_disabled, pwet_my_trace != NULL) would.  This
+ * function computes both from pwet_capture_effective, the "becoming"
+ * value, not from pwet_capture, the stored one -- deliberately, so the
+ * assign hook itself, which sets pwet_capture_effective before guc.c
+ * stores the new value, can call this function and get the right
+ * in-progress answer, exactly like every other attach decision (see
+ * pwet_capture_effective's own comment).
+ *
+ * Outside the assign hook's own synchronous call chain,
+ * pwet_capture_effective == pwet_capture always (guc.c has, by then,
+ * finished storing the value), so substituting one for the other changes
+ * nothing there.  INSIDE that chain, the two genuinely differ, and this
+ * is NOT merely academic: pwet_wait_begin_impl()/pwet_wait_end_impl() can
+ * run synchronously from inside it, because pwet_maybe_attach() (called
+ * from pwet_assign_capture() when capture is becoming non-off) reaches
+ * pwet_attach_stats()/pwet_attach_trace(), and both take an LWLock to
+ * publish the new payload/ring -- itself a timed wait.  Naively deriving
+ * the gate from pwet_capture_effective there would start recording
+ * mid-assign-hook, before the SET has actually taken effect (e.g. "off ->
+ * stats" would count the attach's own LWLock wait).  pwet_assign_capture()
+ * is what keeps this function's answer correct in that window too: it
+ * masks pwet_stats_writes_disabled/pwet_trace_writes_disabled, for its
+ * own duration only, to reproduce exactly what testing the STORED value
+ * would have answered (see its own comment for the precise rule and
+ * why).  This function does not need to know, from its five inputs
+ * alone, whether it is being called from inside that masked window --
+ * the masking is what makes the answer right either way.
+ *
+ * The set of recorded waits is therefore unchanged, byte for byte, in
+ * both cases: outside the chain by the pwet_capture_effective ==
+ * pwet_capture identity, and inside it by the assign hook's masking.
+ */
+static void
+pwet_update_rec_pointers(void)
+{
+	pwet_rec_stats = (pwet_capture_effective != PWET_CAPTURE_OFF &&
+					  !pwet_stats_writes_disabled &&
+					  pwet_my_stats != NULL)
+		? pwet_my_stats : NULL;
+
+	pwet_rec_trace = (pwet_capture_effective == PWET_CAPTURE_TRACE &&
+					  !pwet_trace_writes_disabled &&
+					  pwet_my_trace != NULL)
+		? pwet_my_trace : NULL;
+}
+
+/*
+ * Claim this process's slot in the reserved server-process region, from
+ * inside the begin hook (plan section 4.2a's claim protocol).  Called at
+ * most once per process (see pwet_wait_begin()'s cached eligibility
+ * check), so there is never a second live process contending for the same
+ * slot concurrently -- the previous occupant, if any, is long gone by the
+ * time a ProcNumber is reused.  The only concurrent observers are the
+ * lock-free readers (pg_stat_get_wait_event_timing() and friends), which
+ * is why ownership is published in the exact order below rather than in
+ * one step.
+ *
+ * Obeys the hook rules: no allocation, no lock, no wait, no ereport --
+ * only plain loads/stores, one memset on already-mapped fixed shared
+ * memory, and write barriers.
+ */
+static void
+pwet_claim_fixed_slot(void)
+{
+	PwetSlot   *slot = &pwet_ctl[MyProcNumber];
+	PwetStats  *payload = pwet_fixed_payload(MyProcNumber);
+	bool		same_owner;
+
+	same_owner = (slot->owner_pid == MyProcPid &&
+				  slot->owner_start == MyStartTimestamp);
+
+	/* (1) Unpublish before touching anything a reader might be copying. */
+	slot->owner_pid = 0;
+	pg_write_barrier();
+
+	/* (2) Fresh owner: reset the payload exactly as a new DSA slot starts. */
+	if (!same_owner)
+	{
+		/*
+		 * A structural change that also advances struct_seq: a disable
+		 * followed by a re-claim by the same process restores the same
+		 * pid/start token, which alone cannot show a reader that the
+		 * payload was reinitialized in between.
+		 */
+		pwet_stats_reinit(payload, pwet_max_tranches);
+	}
+
+	/* (3) Publish the new owner: start timestamp first, pid last. */
+	slot->owner_start = MyStartTimestamp;
+	pg_write_barrier();
+	slot->owner_pid = MyProcPid;
+
+	/*
+	 * Bumped on every ownership change (section 4.1), same as the DSA
+	 * attach path; nothing reads this yet, but pg_atomic_fetch_add_u32()
+	 * is a plain atomic op, allowed in the hook.
+	 */
+	pg_atomic_fetch_add_u32(&slot->generation, 1);
+
+	/* (4) Cache the pointer the hooks use. */
+	pwet_my_stats = payload;
+	pwet_my_procno = MyProcNumber;
+	pwet_last_reset_generation = pg_atomic_read_u32(&slot->reset_generation);
+	pwet_update_rec_pointers();
+
+	/*
+	 * Deliberately no before_shmem_exit() registration here: this runs from
+	 * the begin hook, and before_shmem_exit() raises FATAL when its fixed
+	 * array is full, which a hook must never do.  A fixed-slot process does
+	 * not need an exit callback for the per-backend payload: the slot's
+	 * ownership is validated by readers against the process's beentry (pid
+	 * and start timestamp, see pwet_fixed_owner_matches()), so a dead owner's
+	 * stats simply stop being visible, and the next owner of this ProcNumber
+	 * resets the payload (the same_owner test above).  A trace ring is not
+	 * kept in this region; it can only exist after pwet_maybe_attach() ran
+	 * in this process, and that registers pwet_before_shmem_exit() at a safe
+	 * point.  The last pending wait of a stats-only fixed-slot process that
+	 * never reaches pwet_maybe_attach() is not lost: pwet_exit_drain(),
+	 * registered at process start (see pwet_pgstat_init_backend()), flushes
+	 * it into the lifetime ledger on every orderly exit after BaseInit().
+	 * Only an abrupt death can still lose it, and a crash restart
+	 * reinitializes shared memory anyway.  The per-backend view of such a
+	 * process is gone with the process in any case.
+	 */
+}
+
+/*
+ * Stop writing to a claimed fixed slot (assign hook, capture -> off).
+ * The region is never freed -- it is reserved for the process's entire
+ * lifetime -- so this only withdraws ownership; the reader's beentry
+ * check then makes the row disappear, matching the DSA release path's
+ * user-visible effect.  Re-enabling capture re-claims at the next begin
+ * hook (pwet_can_attach() already refuses the DSA path for this
+ * ProcNumber, so pwet_maybe_attach() is a no-op here and
+ * pwet_claim_fixed_slot() is what picks it back up).
+ *
+ * No lock: owner_pid/owner_start for a slot in the server region are only
+ * ever written by the process that owns MyProcNumber, whether from the
+ * begin hook or from here -- never by another backend, which only ever
+ * touches reset_generation (under pwet_lock; see pwet_request_reset()).
+ *
+ * Flushes the pending wait, if any, before withdrawing ownership: once
+ * pwet_my_stats is cleared below, pwet_flush_pending() would have nowhere
+ * left to account it (see its own comment on the payload-gone case), so
+ * this is the last chance to record it.
+ */
+static void
+pwet_release_fixed_slot(void)
+{
+	pwet_flush_pending();
+	pwet_my_stats = NULL;
+	pwet_update_rec_pointers();
+	if (pwet_my_procno != INVALID_PROC_NUMBER)
+	{
+		PwetSlot   *slot = &pwet_ctl[pwet_my_procno];
+
+		slot->owner_pid = 0;
+		/* Bumped on every ownership change (section 4.1), as on attach. */
+		pg_atomic_fetch_add_u32(&slot->generation, 1);
+	}
+}
+
+/*
+ * Lazily attach this backend to the trace DSA area, exactly like
+ * pwet_ensure_stats_dsa() but for the trace ring; a separate named DSA
+ * area so trace's much larger per-backend footprint (a few MiB versus
+ * ~200 KiB for stats) is a distinct GetNamedDSA() consumer from stats.
+ */
+static bool
+pwet_ensure_trace_dsa(void)
+{
+	bool		found;
+
+	if (pwet_trace_dsa != NULL)
+		return true;
+
+	pwet_trace_dsa = GetNamedDSA(PWET_TRACE_DSA_NAME, &found);
+	return pwet_trace_dsa != NULL;
+}
+
+/*
+ * Attach this backend's trace ring, at a safe point (assign hook or
+ * post_parse_analyze/ExecutorStart -- see pwet_maybe_attach()), never from
+ * the begin/end wait hooks.  Requires stats identity to already be
+ * established (pwet_my_procno set, by whichever mechanism -- DSA attach or
+ * the fixed-region claim -- pwet_maybe_attach() used): trace "implies
+ * stats" (plan sec 5.1), and this function only needs to know which
+ * control slot is ours, not how its stats payload got there.
+ *
+ * If the slot's trace_state is not FREE (ORPHANED from a predecessor that
+ * exited without anyone reclaiming it yet, or, defensively, an
+ * unexpected stale ACTIVE), the old ring is freed and replaced: since
+ * ProcNumbers are exclusively owned one process at a time and
+ * pwet_my_procno already identifies THIS process as the current
+ * occupant, any pre-existing ring at this slot can only belong to a
+ * predecessor, never a live peer -- see the comment on PwetSlot for why
+ * trace_owner_pid/start (not owner_pid/start) is what the predecessor's
+ * identity is read from before we overwrite it here.  This is also
+ * where fix 3's orphan reclaim happens; nothing runs at backend init to
+ * do it earlier, so EXEC_BACKEND start order cannot matter (contrast
+ * v6's now-removed clear-orphan-at-init step).
+ */
+static bool
+pwet_attach_trace(void)
+{
+	static bool in_attach;
+	PwetSlot   *slot;
+	PwetTraceState *ts = NULL;
+	dsa_pointer ring_ptr = InvalidDsaPointer;
+
+	if (pwet_my_trace != NULL)
+		return true;
+	if (in_attach || !pwet_can_attach_trace())
+		return false;
+
+	in_attach = true;
+	PG_TRY();
+	{
+		if (pwet_ensure_trace_dsa())
+		{
+			Size		alloc_size;
+
+			if (pwet_trace_records_per_ring == 0)
+				pwet_trace_records_per_ring =
+					(uint32) pwet_trace_ring_size * 1024U /
+					(uint32) sizeof(PwetTraceRecord);
+
+			alloc_size = add_size(offsetof(PwetTraceState, records),
+								  mul_size(pwet_trace_records_per_ring,
+										   sizeof(PwetTraceRecord)));
+			ring_ptr = dsa_allocate_extended(pwet_trace_dsa, alloc_size,
+											 DSA_ALLOC_ZERO |
+											 DSA_ALLOC_NO_OOM);
+			if (DsaPointerIsValid(ring_ptr))
+			{
+				ts = dsa_get_address(pwet_trace_dsa, ring_ptr);
+				pg_atomic_init_u64(&ts->write_pos, 0);
+				ts->ring_mask = pwet_trace_records_per_ring - 1;
+
+				slot = &pwet_ctl[pwet_my_procno];
+				LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+				if (DsaPointerIsValid(slot->trace_ptr))
+					dsa_free(pwet_trace_dsa, slot->trace_ptr);
+				slot->trace_ptr = ring_ptr;
+				slot->trace_state = PWET_TRACE_ACTIVE;
+				slot->trace_owner_pid = MyProcPid;
+				slot->trace_owner_start = MyStartTimestamp;
+				pg_atomic_fetch_add_u32(&slot->generation, 1);
+				LWLockRelease(pwet_lock);
+
+				pwet_my_trace = ts;
+				pwet_update_rec_pointers();
+
+				/*
+				 * Fresh ring: restart the marker state machine so a
+				 * previous trace session's leftover OPEN/AFTER_STATEMENT
+				 * state (from an earlier enable/disable cycle on this same
+				 * backend) can't misattribute the first waits of the new
+				 * session.
+				 */
+				pwet_marker_state = PWET_MARKER_IDLE;
+
+				/*
+				 * The transaction callback is registered at process start
+				 * (pwet_pgstat_init_backend()), not here; it checks
+				 * pwet_capture/pwet_my_trace on every call and is a cheap
+				 * no-op unless this ring exists.
+				 */
+			}
+		}
+	}
+	PG_FINALLY();
+	{
+		in_attach = false;
+	}
+	PG_END_TRY();
+
+	return pwet_my_trace != NULL;
+}
+
+/*
+ * Release this backend's trace ring back to DSA immediately: called on a
+ * live step-down (capture moving away from trace while this process is
+ * still running -- see pwet_assign_capture()), never on process exit
+ * (exit orphans the ring instead; see pwet_orphan_trace(), added in the
+ * fix-3 commit).  The operator has affirmatively disabled trace, so,
+ * like v6, we honour that and reclaim the memory immediately rather than
+ * leaving a multi-MiB ring pinned for the rest of the session.
+ *
+ * Flushes the pending wait, if any, before the ring is freed: a pending
+ * record's trace half can only be appended while pwet_my_trace still
+ * points at a live ring, so this is the last chance to write it (the
+ * stats half, if the payload is still attached, is unaffected by trace
+ * being released and is accounted the same way regardless).
+ */
+static void
+pwet_release_trace(void)
+{
+	PwetSlot   *slot;
+	ProcNumber	procno = pwet_my_procno;
+	bool		was_disabled = pwet_trace_writes_disabled;
+
+	pwet_flush_pending();
+
+	if (pwet_my_trace == NULL || pwet_trace_dsa == NULL ||
+		procno == INVALID_PROC_NUMBER)
+	{
+		pwet_my_trace = NULL;
+		pwet_update_rec_pointers();
+		return;
+	}
+
+	pwet_trace_writes_disabled = true;
+	pwet_my_trace = NULL;
+	pwet_update_rec_pointers();
+	slot = &pwet_ctl[procno];
+
+	LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+	if (DsaPointerIsValid(slot->trace_ptr))
+	{
+		dsa_free(pwet_trace_dsa, slot->trace_ptr);
+		slot->trace_ptr = InvalidDsaPointer;
+		slot->trace_state = PWET_TRACE_FREE;
+		slot->trace_owner_pid = 0;
+		slot->trace_owner_start = 0;
+		pg_atomic_fetch_add_u32(&slot->generation, 1);
+	}
+	LWLockRelease(pwet_lock);
+
+	if (!pwet_exit_started)
+	{
+		pwet_trace_writes_disabled = was_disabled;
+		pwet_update_rec_pointers();
+	}
+}
+
+/*
+ * Append one query-attribution marker record.  Same seqlock protocol and
+ * hook-rule compliance as the wait-record writer in pwet_wait_end() (no
+ * allocation, no lock, no wait, no ereport): called from
+ * post_parse_analyze/ExecutorStart/ExecutorEnd/ProcessUtility and the
+ * transaction callback -- all safe
+ * points already, so this is not strictly hook-restricted code, but the
+ * begin hook's Idle synthesis (see pwet_wait_begin()) reuses the very
+ * same function from inside the hook, so it is held to the hook's rules
+ * throughout for uniformity.
+ *
+ * query_id/depth: QueryStart, ExecStart, ExecEnd, UtilityStart and
+ * UtilityEnd carry the executor depth (see PwetFrame) in effect at the
+ * marker; TxnCommit and TxnAbort carry the utility depth
+ * (pwet_txn_marker_depth()); Idle and IdleInTransaction pass 0.  query_id
+ * is whatever the caller has on hand -- 0 for a
+ * utility statement when compute_query_id is off (this module
+ * deliberately never calls EnableQueryId(); see pwet_post_parse_analyze()'s
+ * comment) and always 0 for TxnCommit/TxnAbort/Idle, which are pure
+ * interval boundaries with no statement of their own to name.
+ */
+static void
+pwet_trace_write_marker(uint8 record_type, int64 query_id, int64 depth)
+{
+	uint64		pos;
+	PwetTraceRecord *rec;
+	uint32		seq;
+	instr_time	now;
+
+	if (pwet_capture != PWET_CAPTURE_TRACE || pwet_trace_writes_disabled ||
+		pwet_my_trace == NULL)
+		return;
+
+	pos = pg_atomic_read_u64(&pwet_my_trace->write_pos);
+	pg_atomic_write_u64(&pwet_my_trace->write_pos, pos + 1);
+	rec = &pwet_my_trace->records[pos & pwet_my_trace->ring_mask];
+	seq = (uint32) (pos * 2 + 1);
+
+	rec->seq = seq;
+	pg_write_barrier();
+	INSTR_TIME_SET_CURRENT(now);
+	rec->record_type = record_type;
+	rec->timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+	rec->data.marker.query_id = query_id;
+	rec->data.marker.depth = depth;
+	pg_write_barrier();
+	rec->seq = seq + 1;
+}
+
+/*
+ * Query-marker state machine (plan sec 5.3):
+ *
+ *   IDLE --(QueryStart|UtilityStart|ExecStart)--> OPEN
+ *   OPEN --(ExecEnd at depth 0|UtilityEnd|TxnCommit or TxnAbort outside
+ *       any utility statement)--> AFTER_STATEMENT
+ *   AFTER_STATEMENT --(first ClientRead wait outside any utility statement,
+ *       in the begin hook)--> IDLE, emitting a synthetic Idle marker, or
+ *       IdleInTransaction when a transaction that can still commit is
+ *       open (see pwet_wait_begin_impl())
+ *   AFTER_STATEMENT --(QueryStart|UtilityStart)--> OPEN, no Idle emitted
+ *       (a pipelined batch, a multi-statement simple-query string, or an
+ *       explicit transaction whose next statement is already buffered --
+ *       there was no idle time to mark)
+ *
+ * The functions below are the only writers of pwet_marker_state; each
+ * always emits its own marker record first (pwet_trace_write_marker() is
+ * itself a no-op outside capture == trace, so the FSM and the ring can
+ * never disagree about whether markers are being recorded at all) and
+ * then applies exactly the transition above -- "OPEN" is entered
+ * unconditionally by all three start-markers (whichever one is called
+ * first out of IDLE or AFTER_STATEMENT is the one that opens the
+ * interval; note EXECUTE of an already-PREPAREd statement can reach
+ * pwet_marker_exec_start() with no preceding QueryStart at all, since
+ * post_parse_analyze does not run again for it).
+ */
+/*
+ * QueryStart's depth is the executor depth at the moment it fires, not
+ * always 0: post_parse_analyze also runs for a query parsed via SPI
+ * inside an already-executing outer statement (a SQL/PL function calling
+ * a dynamically-built query, for instance), so QueryStart can itself be
+ * nested.  Likewise UtilityStart is written with the current depth and
+ * does not raise it, so the statements a top-level DO, CALL, EXECUTE or
+ * CREATE TABLE AS runs show markers at depth 0 too, and so does the
+ * executor a DECLARE CURSOR starts.
+ * pg_wait_event_trace_by_statement() therefore does not open a bucket on
+ * every depth-0 start marker: it also tracks a utility level (raised by
+ * UtilityStart, lowered by UtilityEnd, reset by Idle, IdleInTransaction
+ * and a TxnAbort written outside any utility statement) and
+ * treats only depth-0 starts at utility level 0 as top-level; of those,
+ * QueryStart always opens a bucket, while UtilityStart and ExecStart do
+ * unless the previous top-level start marker, with no Idle or
+ * transaction end in between, was a QueryStart or UtilityStart (the same
+ * statement, already open).  An ExecStart with no QueryStart (EXECUTE of
+ * a prepared statement over the extended protocol) thus opens a bucket,
+ * as it moves the state machine above to OPEN.  Waits between a
+ * request's arrival and its opening marker are attributed to that
+ * statement as its 'pre' phase; see the extension script for the full rule.
+ */
+static void
+pwet_marker_query_start(int64 query_id)
+{
+	PwetDepths	d = pwet_frame_depths();
+
+	pwet_trace_write_marker(PWET_TRACE_QUERY_START, query_id, d.exec);
+	pwet_marker_state = PWET_MARKER_OPEN;
+}
+
+/*
+ * ExecStart and ExecEnd are written outside the hook's own count, each with
+ * the depth of the calls around it at that moment.  These can differ: a
+ * cursor started inside a function can be ended by a top-level CLOSE or at
+ * commit.
+ */
+static void
+pwet_marker_exec_start(int64 query_id)
+{
+	PwetDepths	d = pwet_frame_depths();
+
+	pwet_trace_write_marker(PWET_TRACE_EXEC_START, query_id, d.exec);
+	pwet_marker_state = PWET_MARKER_OPEN;
+}
+
+/*
+ * ExecEnd and UtilityEnd end the statement only when nothing that runs
+ * them is left on the stack: no executor or planner call (a SHOW or a
+ * DECLARE that a function runs while a plan executes), and no utility
+ * statement (a COPY whose trigger ran a statement).  Otherwise the outer
+ * statement goes on, and a pause in the middle of it (a portal suspended
+ * by an Execute with a row limit) must not produce an idle marker.
+ */
+static void
+pwet_marker_exec_end(int64 query_id)
+{
+	PwetDepths	d = pwet_frame_depths();
+
+	pwet_trace_write_marker(PWET_TRACE_EXEC_END, query_id, d.exec);
+	if (d.exec == 0 && d.utility == 0)
+		pwet_marker_state = PWET_MARKER_AFTER_STATEMENT;
+}
+
+/* See pwet_marker_query_start()'s comment: same nested-depth rationale. */
+static void
+pwet_marker_utility_start(int64 query_id)
+{
+	PwetDepths	d = pwet_frame_depths();
+
+	pwet_trace_write_marker(PWET_TRACE_UTILITY_START, query_id, d.exec);
+	pwet_marker_state = PWET_MARKER_OPEN;
+}
+
+/*
+ * UtilityEnd carries the executor depth around the utility statement, so
+ * pg_wait_event_trace_by_statement() can tell the end of a top-level
+ * utility statement from that of one run while a plan is made or executed.
+ */
+static void
+pwet_marker_utility_end(int64 query_id)
+{
+	PwetDepths	d = pwet_frame_depths();
+
+	pwet_trace_write_marker(PWET_TRACE_UTILITY_END, query_id, d.exec);
+	if (d.exec == 0 && d.utility == 0)
+		pwet_marker_state = PWET_MARKER_AFTER_STATEMENT;
+}
+
+/*
+ * TxnCommit/TxnAbort carry the utility nesting depth: nonzero when the
+ * transaction ended inside a utility statement that keeps running (COMMIT
+ * or ROLLBACK in a procedure or DO block, the internal transactions of
+ * VACUUM or CREATE INDEX CONCURRENTLY).  That is not the end of a
+ * statement, so the state machine stays where it is.  The one exception is
+ * process exit: a FATAL error calls proc_exit() without unwinding the
+ * utility statement that was running, while exit callbacks abort the
+ * transaction or run cleanup transactions of their own (temporary-table
+ * removal); no statement is running then, so those markers say depth 0
+ * without looking at the stack (which proc_exit() has emptied anyway).
+ *
+ * Nothing needs a reset at any transaction end: a depth is counted from
+ * the frames on the stack each time (see PwetFrame).
+ */
+static int64
+pwet_txn_marker_depth(void)
+{
+	if (proc_exit_inprogress)
+		return 0;
+	return pwet_frame_depths().utility;
+}
+
+static void
+pwet_marker_txn_commit(void)
+{
+	int64		depth = pwet_txn_marker_depth();
+
+	pwet_trace_write_marker(PWET_TRACE_TXN_COMMIT, 0, depth);
+	if (depth == 0)
+		pwet_marker_state = PWET_MARKER_AFTER_STATEMENT;
+}
+
+static void
+pwet_marker_txn_abort(void)
+{
+	int64		depth = pwet_txn_marker_depth();
+
+	pwet_trace_write_marker(PWET_TRACE_TXN_ABORT, 0, depth);
+	if (depth == 0)
+		pwet_marker_state = PWET_MARKER_AFTER_STATEMENT;
+}
+
+/*
+ * XactCallback: mark the end of the transaction (fix 6).  The commit
+ * WAL-flush wait (and any other end-of-transaction wait) precedes this
+ * call and so is correctly attributed to the last statement, not to
+ * "after the transaction" -- see the attribution rule on
+ * pg_wait_event_trace_by_statement() in the extension script.  (Work
+ * after this marker and before an Idle stays with the statement too,
+ * except when the next request was already buffered and starts before
+ * any Idle: the rule then counts it as that request's 'pre' phase.)
+ * XACT_EVENT_PREPARE (two-phase commit's PREPARE TRANSACTION) is treated
+ * as a commit-like boundary: the local transaction branch is over.
+ *
+ * Each marker-writing branch below flushes the pending wait first: the
+ * commit WAL-flush wait this comment already describes as preceding the
+ * call is, under deferred accounting, sitting in the pending buffer, not
+ * yet in the trace ring -- flushing it before the marker is what keeps it
+ * ordered (and attributed) before TxnCommit/TxnAbort, exactly as if
+ * accounting had not been deferred.
+ */
+static void
+pwet_xact_callback(XactEvent event, void *arg)
+{
+	/*
+	 * Count the transaction completion first, if capture is on right now.
+	 * The callback runs before end-of-transaction GUC restoration, so the
+	 * setting in effect is the transaction's own (a SET LOCAL one included).
+	 * Parallel workers are skipped: they also run ordinary initialization
+	 * transactions, and the leader counts the query's transaction.  Only the
+	 * counters change here; a pending wait is not flushed.
+	 */
+	if (pwet_capture != PWET_CAPTURE_OFF && !IsParallelWorker())
+	{
+		PwetLedger *ledger = pwet_get_my_ledger();
+
+		if (ledger != NULL)
+			pwet_ledger_count_xact(ledger, event);
+	}
+
+	if (pwet_capture != PWET_CAPTURE_TRACE || pwet_my_trace == NULL)
+		return;
+
+	switch (event)
+	{
+		case XACT_EVENT_COMMIT:
+		case XACT_EVENT_PARALLEL_COMMIT:
+		case XACT_EVENT_PREPARE:
+			pwet_flush_pending();
+			pwet_marker_txn_commit();
+			break;
+		case XACT_EVENT_ABORT:
+		case XACT_EVENT_PARALLEL_ABORT:
+			pwet_flush_pending();
+			pwet_marker_txn_abort();
+			break;
+		default:
+			break;
+	}
+}
+
+static bool
+pwet_attach_stats(void)
+{
+	static bool in_attach;
+	PwetSlot   *slot;
+	PwetStats  *state = NULL;
+	dsa_pointer stats_ptr = InvalidDsaPointer;
+
+	if (pwet_my_stats != NULL)
+		return true;
+	if (in_attach || !pwet_can_attach())
+		return false;
+
+	/*
+	 * pwet_ctl/pwet_lock are set up by pwet_shmem_startup() before any
+	 * user code can run (the module requires shared_preload_libraries, so
+	 * that hook always fires first); only the DSA payload area is created
+	 * lazily, on demand, here.
+	 */
+	Assert(pwet_ctl != NULL && pwet_lock != NULL);
+
+	in_attach = true;
+	PG_TRY();
+	{
+		if (pwet_ensure_stats_dsa())
+		{
+			pwet_stats_stride = pwet_stats_payload_size(pwet_max_tranches);
+			stats_ptr = dsa_allocate_extended(pwet_stats_dsa,
+											  pwet_stats_stride,
+											  DSA_ALLOC_ZERO |
+											  DSA_ALLOC_NO_OOM);
+			if (DsaPointerIsValid(stats_ptr))
+			{
+				state = dsa_get_address(pwet_stats_dsa, stats_ptr);
+
+				/*
+				 * Not yet published (no reader can reach it before the slot
+				 * update below, under pwet_lock), so the bracket inside is
+				 * only for uniformity: it leaves struct_seq even.
+				 */
+				pg_atomic_init_u32(&state->struct_seq, 0);
+				pwet_stats_reinit(state, pwet_max_tranches);
+
+				slot = &pwet_ctl[MyProcNumber];
+				LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+				if (DsaPointerIsValid(slot->stats_ptr))
+					dsa_free(pwet_stats_dsa, slot->stats_ptr);
+				slot->stats_ptr = stats_ptr;
+				slot->owner_pid = MyProcPid;
+				slot->owner_start = MyStartTimestamp;
+				pg_atomic_fetch_add_u32(&slot->generation, 1);
+				pwet_last_reset_generation =
+					pg_atomic_read_u32(&slot->reset_generation);
+				LWLockRelease(pwet_lock);
+
+				pwet_my_stats = state;
+				pwet_my_procno = MyProcNumber;
+				pwet_update_rec_pointers();
+			}
+		}
+	}
+	PG_FINALLY();
+	{
+		in_attach = false;
+	}
+	PG_END_TRY();
+
+	return pwet_my_stats != NULL;
+}
+
+/*
+ * The steady-state path reaches this from every parsed and executed query.
+ * Keep its no-attachment-needed case to one backend-local flag test,
+ * avoiding an out-of-line call into the attachment machinery.
+ */
+static pg_always_inline void
+pwet_maybe_attach(void)
+{
+	if (pwet_attach_needed)
+		pwet_maybe_attach_slow();
+}
+
+static void
+pwet_maybe_attach_slow(void)
+{
+	bool		ready;
+
+	/*
+	 * The outer gate is "am I at a safe point at all", not
+	 * pwet_can_attach() (DSA-stats-path eligibility specifically): a
+	 * ProcNumber in the fixed server-process region fails
+	 * pwet_can_attach() unconditionally (see its comment), but it can
+	 * still be eligible to attach a TRACE ring (pwet_can_attach_trace()),
+	 * which never uses that region.  Gating on pwet_can_attach() here
+	 * made the trace branch below permanently unreachable for every
+	 * fixed-slot process -- checkpointer, walwriter, background writer,
+	 * startup, WAL receiver, I/O workers, autovacuum workers, WAL
+	 * senders -- exactly the processes plan sec 4.2a/5.2 say should be
+	 * able to trace after a reload.
+	 */
+	if (!pwet_at_safe_point())
+		return;
+
+	/*
+	 * Register before attempting to attach anything, on any path,
+	 * including a fixed-slot process: whichever attach below succeeds
+	 * needs pwet_before_shmem_exit() to run at
+	 * process exit, to release the DSA stats payload and orphan a trace
+	 * ring (pwet_orphan_trace()).  Registering only after a successful
+	 * pwet_attach_stats() call, as a previous version of this function
+	 * did, left a fixed-slot process permanently unregistered (its stats
+	 * "attach" never goes through pwet_attach_stats() at all), so its trace
+	 * ring would stay ACTIVE forever after that process exited, invisible
+	 * to pg_stat_clear_orphaned_wait_event_rings()'s sweep.  This is the
+	 * only registration point: the begin hook must not register, see
+	 * pwet_claim_fixed_slot().  Harmless to register even when nothing
+	 * ends up attaching this call: both pwet_release_stats() and
+	 * pwet_orphan_trace() are no-ops when there is nothing to release.
+	 */
+	if (!pwet_exit_callback_registered)
+	{
+		before_shmem_exit(pwet_before_shmem_exit, (Datum) 0);
+		pwet_exit_callback_registered = true;
+	}
+
+	/*
+	 * Attach stats via DSA only if not already attached and eligible.
+	 * For a ProcNumber in the fixed server-process region,
+	 * pwet_can_attach() is always false, so pwet_my_stats stays NULL
+	 * here until pwet_claim_fixed_slot() (from the begin hook) sets it --
+	 * that is not a failure to retry for, just "nothing for this
+	 * function to do for this process's stats", so fall through to the
+	 * trace section below regardless.
+	 */
+	if (pwet_my_stats == NULL && pwet_can_attach() && !pwet_attach_stats())
+		return;
+
+	/*
+	 * This is an ATTACH decision: test pwet_capture_effective, not
+	 * pwet_capture -- see the RULE on pwet_capture_effective's own
+	 * declaration for why, and for the CI-found bug (empty trace ring for
+	 * an entire session, every platform) that this line used to cause by
+	 * testing pwet_capture here instead.
+	 */
+	ready = true;
+	if (pwet_capture_effective == PWET_CAPTURE_TRACE)
+	{
+		/*
+		 * pwet_can_attach_trace() requires pwet_my_procno to already be
+		 * set.  For a fixed-region process that has not yet taken its
+		 * first wait event, that identity does not exist yet (only the
+		 * begin hook's pwet_claim_fixed_slot() can create it), so no ring
+		 * can be attributed yet -- an accepted, documented limitation of
+		 * the assign-hook-only attach point for that class of process, no
+		 * different in kind from the stats-only gap plan sec 4.2a already
+		 * describes.
+		 */
+		ready = pwet_can_attach_trace() && pwet_attach_trace();
+	}
+
+	/*
+	 * Clear pwet_attach_needed only once everything this capture level
+	 * requires is actually attached; otherwise leave it set so the next
+	 * safe point (client backends: their very next statement; a
+	 * server-side process: the next reload) retries instead of silently
+	 * giving up for the rest of the session, as the bug above did.
+	 */
+	if (ready)
+		pwet_attach_needed = false;
+}
+
+/*
+ * Flushes the pending wait, if any, before the payload is freed: once
+ * pwet_my_stats is cleared below, there is nowhere left to account it
+ * (see pwet_flush_pending()'s comment on the payload-gone case).
+ */
+static void
+pwet_release_stats(void)
+{
+	PwetSlot   *slot;
+	ProcNumber	procno = pwet_my_procno;
+	bool		was_disabled = pwet_stats_writes_disabled;
+
+	pwet_flush_pending();
+
+	if (pwet_my_stats == NULL || pwet_stats_dsa == NULL || pwet_ctl == NULL ||
+		procno == INVALID_PROC_NUMBER)
+	{
+		pwet_my_stats = NULL;
+		pwet_update_rec_pointers();
+		return;
+	}
+
+	pwet_stats_writes_disabled = true;
+	pwet_my_stats = NULL;
+	pwet_update_rec_pointers();
+	slot = &pwet_ctl[procno];
+
+	LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+	if (DsaPointerIsValid(slot->stats_ptr))
+	{
+		dsa_free(pwet_stats_dsa, slot->stats_ptr);
+		slot->stats_ptr = InvalidDsaPointer;
+		slot->owner_pid = 0;
+		slot->owner_start = 0;
+		pg_atomic_fetch_add_u32(&slot->generation, 1);
+	}
+	LWLockRelease(pwet_lock);
+
+	if (!pwet_exit_started)
+	{
+		pwet_stats_writes_disabled = was_disabled;
+		pwet_update_rec_pointers();
+	}
+}
+
+static void
+pwet_before_shmem_exit(int code, Datum arg)
+{
+	/*
+	 * First thing, while pwet_my_stats/pwet_my_trace are both still
+	 * attached and nothing below has touched either of them yet: the last
+	 * pending wait, if any, gets both halves (stats and, if trace is
+	 * active, the trace record) accounted here, exactly once, before exit
+	 * cleanup begins.  pwet_orphan_trace()/pwet_release_stats() below each
+	 * flush again on their own (every release/orphan site does; see their
+	 * comments), which is harmless -- pwet_flush_pending() is a no-op once
+	 * there is nothing pending -- but this call is what makes that true
+	 * for both of them here, rather than leaving it to whichever runs
+	 * first.
+	 */
+	pwet_flush_pending();
+	pwet_exit_started = true;
+	pwet_stats_writes_disabled = true;
+	pwet_trace_writes_disabled = true;
+	pwet_update_rec_pointers();
+	pwet_orphan_trace();
+	pwet_release_stats();
+	pwet_my_procno = INVALID_PROC_NUMBER;
+}
+
+/*
+ * Exit drain and transaction callback registration, at process start.
+ *
+ * pwet_before_shmem_exit() is registered only when a process first reaches a
+ * safe point to attach, and a fixed-slot-only process (a server-side process
+ * that records through the reserved region and never runs a query) may never
+ * get there, so by itself it cannot guarantee that the last completed wait
+ * of every process reaches its lifetime ledger.  A registration from inside
+ * the begin hook is not allowed either: before_shmem_exit() raises FATAL
+ * when its array is full.  So this module registers a custom cumulative-
+ * statistics kind in _PG_init() whose only functional purpose is its
+ * init_backend_cb: pgstat_initialize() calls it once in every process that
+ * runs BaseInit(), where before_shmem_exit() and RegisterXactCallback() are
+ * both legal (the exit array is empty, and the callback list is allocated in
+ * TopMemoryContext).  The kind's other callbacks are the trivial ones core
+ * requires for a fixed-amount kind; none of them may touch the ledgers.
+ *
+ * Coverage, verified on this tree: client backends and walsenders
+ * (postgres.c, PostgresMain(), via InitPostgres()'s BaseInit() call),
+ * autovacuum launcher and workers (autovacuum.c), background and parallel
+ * workers (bgworker.c, StartBackgroundWorker()), and the auxiliary processes
+ * through AuxiliaryProcessMainCommon() (auxprocess.c): checkpointer,
+ * background writer, WAL writer, startup, WAL receiver, archiver, WAL
+ * summarizer and I/O workers.  Not covered: the postmaster and the logger,
+ * which have no ledger anyway.  A standalone backend works the same way
+ * (postgres.c), and under EXEC_BACKEND a child reloads this registration in
+ * launch_backend.c before BaseInit().
+ *
+ * Experimental kind ID: for development only; a final ID would be reserved
+ * on https://wiki.postgresql.org/wiki/CustomCumulativeStats.  A duplicate ID
+ * or name makes pgstat_register_kind() fail startup with core's own error;
+ * registration is never skipped silently, since a skipped registration would
+ * quietly bring the exit loss back.
+ */
+static const PgStat_KindInfo pwet_pgstat_kind = {
+	.name = "pg_wait_event_tracing",
+	.fixed_amount = true,
+	.write_to_file = false,
+	.shared_size = sizeof(PwetPgStatShared),
+	.shared_data_off = 0,
+	.shared_data_len = sizeof(PwetPgStatShared),
+	.init_backend_cb = pwet_pgstat_init_backend,
+	.init_shmem_cb = pwet_pgstat_init_shmem,
+	.reset_all_cb = pwet_pgstat_reset_all,
+	.snapshot_cb = pwet_pgstat_snapshot,
+};
+
+/* The three callbacks below must never touch the lifetime ledgers. */
+static void
+pwet_pgstat_init_shmem(void *stats)
+{
+}
+
+static void
+pwet_pgstat_reset_all(TimestampTz ts)
+{
+}
+
+static void
+pwet_pgstat_snapshot(void)
+{
+}
+
+/*
+ * Once per process.  Keyed by pid, not a bare flag, like
+ * pwet_fixed_slot_checked_pid: a flag set in a process would be inherited by
+ * anything it forks.
+ */
+static void
+pwet_pgstat_init_backend(void)
+{
+	static int	registered_pid = 0;
+
+	if (registered_pid == MyProcPid)
+		return;
+	registered_pid = MyProcPid;
+
+	before_shmem_exit(pwet_exit_drain, (Datum) 0);
+	RegisterXactCallback(pwet_xact_callback, NULL);
+}
+
+/*
+ * Exit drain: flush the pending completion once, then permanently stop this
+ * process's recording and reattachment and drop the in-flight wait, for every
+ * process kind including fixed-slot-only ones.  It frees no legacy resources;
+ * the existing cleanup does that.
+ *
+ * Callbacks run in reverse registration order, and this one is registered
+ * first in a process, so it runs after pwet_before_shmem_exit() (which
+ * flushes and disables recording itself) and after everything registered
+ * later, and the result is the same whether or not that one ever ran.  After
+ * this flush nothing can create a new pending completion (recording is
+ * disabled, and the begin hook returns early once the writes-disabled flags
+ * are set), and the ledger is closed so it is never written again, which is
+ * what makes the ownership argument on PwetLedger hold up to the moment the
+ * PGPROC is released.
+ */
+static void
+pwet_exit_drain(int code, Datum arg)
+{
+	pwet_flush_pending();
+	pwet_ledger_closed = true;
+
+	pwet_exit_started = true;
+	pwet_stats_writes_disabled = true;
+	pwet_trace_writes_disabled = true;
+	INSTR_TIME_SET_ZERO(pwet_wait_start);
+	pwet_current_event = 0;
+	pwet_pending_valid = false;
+	pwet_update_rec_pointers();
+
+	/*
+	 * Withdraw a fixed-slot ownership token at an orderly exit.  The token is
+	 * the only identity a reader has for a process without a backend-status
+	 * entry (see pwet_slot_owner_is_live()), and the PGPROC pid it is
+	 * compared with can be reused; with the token gone before the PGPROC is
+	 * released (this callback runs before ProcKill()/AuxiliaryProcKill()), a
+	 * successor of the slot can never be taken for its predecessor.  Only this
+	 * process writes its own slot's owner token, so no lock is needed; the
+	 * payload stays (the region is never freed) and the successor's claim
+	 * reinitializes it.  An abrupt death takes the whole cluster through a
+	 * crash restart, which reinitializes shared memory.
+	 */
+	if (pwet_ctl != NULL && MyProcNumber != INVALID_PROC_NUMBER &&
+		MyProcNumber < PWET_NUM_SLOTS &&
+		pwet_is_fixed_procnumber(MyProcNumber) &&
+		pwet_ctl[MyProcNumber].owner_pid == MyProcPid)
+	{
+		pwet_ctl[MyProcNumber].owner_pid = 0;
+		pg_atomic_fetch_add_u32(&pwet_ctl[MyProcNumber].generation, 1);
+	}
+}
+
+static void
+pwet_assign_capture(int newval, void *extra)
+{
+	int			old_stored = pwet_capture;
+	bool		saved_stats_disabled = pwet_stats_writes_disabled;
+	bool		saved_trace_disabled = pwet_trace_writes_disabled;
+
+	/*
+	 * Flush the pending wait, if any, before anything below masks
+	 * recording or releases/reattaches a payload: pwet_my_stats/
+	 * pwet_my_trace are both still exactly what they were when the wait
+	 * was stashed, so this is the last point before this function can
+	 * change either of them out from under a still-pending record.
+	 */
+	pwet_flush_pending();
+
+	/*
+	 * Lazily install this process's own wait hooks the moment capture
+	 * becomes non-off in it, before any attach logic below runs (that
+	 * logic can itself run synchronously from here -- see
+	 * pwet_maybe_attach() further down -- and the hooks must already be in
+	 * place by the time any wait completes).  See
+	 * pwet_install_wait_hooks() for why this never happens in _PG_init()
+	 * instead, and why the hooks, once installed, are never removed.
+	 */
+	if (newval != PWET_CAPTURE_OFF)
+		pwet_install_wait_hooks();
+
+	/*
+	 * Mask recording, for the rest of this function only, to exactly what
+	 * old_stored (the value guc.c has NOT yet overwritten pwet_capture
+	 * with) would have permitted -- even though pwet_rec_stats/
+	 * pwet_rec_trace are computed from pwet_capture_effective, the
+	 * "becoming" value set below, not old_stored.
+	 *
+	 * This matters because pwet_maybe_attach() below can run synchronously
+	 * from inside this very function (see its own call further down), and
+	 * pwet_attach_stats()/pwet_attach_trace() take an LWLock to publish
+	 * the new payload/ring -- itself a timed wait, i.e. something
+	 * pwet_wait_begin()/pwet_wait_end() can observe before this function
+	 * returns.  Before pwet_rec_stats/pwet_rec_trace existed, the hot path
+	 * tested pwet_capture directly, which guc.c does not store until
+	 * AFTER this function returns (see the RULE comment on
+	 * pwet_capture_effective): so for the whole duration of this
+	 * function, the old code's recording gate saw old_stored, never
+	 * newval, no matter what got attached in the meantime.  Deriving the
+	 * gate from pwet_capture_effective instead (which THIS function sets
+	 * to newval, below) would, without the mask here, start recording
+	 * mid-function the instant an attach triggered by the incoming value
+	 * completes -- e.g. off -> stats would count the attach's own LWLock
+	 * wait in stats, and off -> trace or stats -> trace would trace waits
+	 * that occur before this SET has actually taken effect.  Masking
+	 * reproduces the old gate's answer exactly:
+	 *
+	 *   - Trace is masked (writes disabled) unconditionally: old_stored
+	 *     can be TRACE only if capture was already trace before this call,
+	 *     in which case this is not an off/stats -> trace transition, and
+	 *     the block below either releases pwet_my_trace outright (moving
+	 *     away from trace) or leaves it untouched (newval == TRACE, a
+	 *     no-op SET) -- neither creates a NEW ring to trace into during
+	 *     this function, so there is nothing this mask could be hiding
+	 *     that the old, stored-pwet_capture gate would have shown anyway.
+	 *   - Stats is masked only when old_stored == OFF: that is the one
+	 *     case where the old gate would have refused to record no matter
+	 *     what (pwet_capture == OFF outright).  When old_stored is
+	 *     already STATS or TRACE, a payload already exists and the old
+	 *     gate already counted this function's own waits under it -- e.g.
+	 *     stats -> trace or trace -> stats -- so leaving stats unmasked
+	 *     here reproduces that.
+	 *
+	 * The window between this function returning and guc.c actually
+	 * storing newval into pwet_capture contains no wait sites (nothing in
+	 * set_config_with_handle() between the assign_hook call and the store
+	 * waits on anything), so masking exactly the inside of this function,
+	 * and restoring on every exit (below), is sufficient: the set of
+	 * recorded waits is byte-for-byte identical to testing the stored
+	 * pwet_capture throughout, exactly as before pwet_rec_stats/
+	 * pwet_rec_trace existed.  Deferred accounting (v11 patch 0004 fixup;
+	 * see DECISION-deferred-accounting.md) does not change this: both
+	 * halves of the recording decision for a wait are still taken here
+	 * and in pwet_wait_end_impl(), at wait_end time, exactly as before --
+	 * pwet_pending.trace records what pwet_rec_trace answered at that
+	 * instant (see pwet_wait_end_impl()'s comment), so nothing about a
+	 * wait recorded (or not) during this masked window depends on when
+	 * pwet_flush_pending() later happens to run; only the bookkeeping
+	 * itself -- writing the counters, appending the ring record -- is
+	 * deferred, never the decision of whether to.
+	 */
+	pwet_trace_writes_disabled = true;
+	if (old_stored == PWET_CAPTURE_OFF)
+		pwet_stats_writes_disabled = true;
+
+	/*
+	 * Update the "becoming" value first, before anything below can call
+	 * pwet_can_attach() (see pwet_capture_effective's comment): guc.c has
+	 * not yet stored newval into pwet_capture itself at this point.
+	 */
+	pwet_capture_effective = newval;
+	pwet_update_rec_pointers();
+
+	if (pwet_my_stats != NULL)
+	{
+		INSTR_TIME_SET_ZERO(pwet_wait_start);
+		pwet_current_event = 0;
+	}
+
+	if (pwet_active && !pwet_exit_started)
+	{
+		/*
+		 * Trace is released here on ANY move away from trace, live (not
+		 * just to off): stepping down to stats should not leave a
+		 * multi-MiB ring pinned, and this call is a harmless no-op when
+		 * pwet_my_trace is already NULL.  Exiting the process is handled
+		 * separately, by pwet_before_shmem_exit() (which orphans, rather
+		 * than frees, from the fix-3 commit on).
+		 */
+		if (newval != PWET_CAPTURE_TRACE)
+			pwet_release_trace();
+
+		if (newval == PWET_CAPTURE_OFF)
+		{
+			/*
+			 * pwet_release_stats() only knows how to release a DSA payload
+			 * (it checks slot->stats_ptr, which a fixed-slot owner never
+			 * sets); a process holding a claimed fixed slot instead has
+			 * pwet_fixed_slot_eligible set (see pwet_wait_begin()), and
+			 * needs pwet_release_fixed_slot() to withdraw ownership from
+			 * the control table.
+			 */
+			if (pwet_fixed_slot_eligible)
+				pwet_release_fixed_slot();
+			else
+				pwet_release_stats();
+			pwet_attach_needed = false;
+		}
+		else
+		{
+			pwet_attach_needed = true;
+			/*
+			 * Attach right away if this is a safe point; otherwise the
+			 * post_parse_analyze/ExecutorStart hooks pick it up for a
+			 * client backend, or the next begin hook re-claims for a
+			 * server-side process (pwet_can_attach() refuses the DSA path
+			 * for a ProcNumber in the reserved region, so
+			 * pwet_maybe_attach() below is a no-op for those; see
+			 * pwet_claim_fixed_slot()).
+			 */
+			if (IsNormalProcessingMode())
+				pwet_maybe_attach();
+		}
+	}
+
+	/*
+	 * Unmask: restore both writes-disabled flags to what they were on
+	 * entry, so the mask above is scoped to exactly this function's own
+	 * duration, on every exit path (there is only this one).
+	 * pwet_release_stats()/pwet_release_trace() above may themselves have
+	 * already toggled these same flags true and back as part of their own
+	 * release protocol; that nesting composes correctly because each of
+	 * them restores to "whatever it saw on entry to itself", which by
+	 * then is our masked value -- so after they return, the flag is back
+	 * to our masked value, and this restores it one level further out, to
+	 * the value from before we masked it.  If this process is exiting,
+	 * leave both true instead, matching pwet_before_shmem_exit() (which
+	 * sets pwet_exit_started before this hook could even be reached
+	 * again, but a defensive match costs nothing).
+	 */
+	if (pwet_exit_started)
+	{
+		pwet_stats_writes_disabled = true;
+		pwet_trace_writes_disabled = true;
+	}
+	else
+	{
+		pwet_stats_writes_disabled = saved_stats_disabled;
+		pwet_trace_writes_disabled = saved_trace_disabled;
+	}
+	pwet_update_rec_pointers();
+}
+
+/*
+ * Flush the one pending completed-wait record, if any, running exactly the
+ * accounting pwet_wait_end_impl() used to run inline before the deferred-
+ * accounting change (v11 patch 0004 fixup; see
+ * DECISION-deferred-accounting.md and pwet_pending's own comment for why).
+ * Called at every point where ordering or a payload's/ring's lifetime
+ * matters -- enumerated in full in the commit message, in outline here:
+ *
+ *   - pwet_wait_begin_impl(), before timing the next wait;
+ *   - before every pwet_trace_write_marker() call site: post_parse_analyze,
+ *     ExecutorStart/End, both of ProcessUtility's markers, the xact
+ *     callback, and wait_begin's own Idle marker synthesis (already
+ *     covered by wait_begin's own flush above, since nothing in between
+ *     can create a new pending record, but restated there for the reader
+ *     rather than relied on implicitly);
+ *   - pwet_assign_capture(), before it masks recording or releases/
+ *     reattaches anything;
+ *   - pwet_release_stats(), pwet_release_fixed_slot(), pwet_release_trace(),
+ *     pwet_orphan_trace(), before each does its work;
+ *   - pwet_before_shmem_exit(), first thing;
+ *   - pwet_reset_own(), before zeroing;
+ *   - the SQL readers of the CALLING backend's own data:
+ *     pg_get_backend_wait_event_trace(), the calling backend's own row in
+ *     pg_stat_get_wait_event_timing()'s and
+ *     pg_stat_get_wait_event_timing_overflow()'s sweeps, and
+ *     pg_get_wait_event_trace() when given the caller's own procnumber
+ *     (which covers pg_wait_event_trace_by_statement() too, since it is
+ *     built on that function in the extension script) -- a cross-backend
+ *     reader instead sees whatever the owning backend's own next flush
+ *     point produced, the bounded latency the decision document accepts.
+ *
+ * Must obey the hook rules (no allocation, no lock, no wait, no ereport):
+ * wait_begin_impl calls this from inside the hook itself, so the rule is
+ * upheld unconditionally here, even though most other call sites above are
+ * ordinary safe points that would not themselves require it.
+ *
+ * Both recording decisions for this record -- whether to count it in
+ * stats at all, and whether to append it to the trace ring -- were
+ * already made at wait_end time, exactly as they were before this
+ * deferral existed: the record is only ever stashed when pwet_rec_stats
+ * was non-NULL then (see pwet_wait_end_impl()), and pwet_pending.trace
+ * records what pwet_rec_trace answered at that same instant.  This
+ * function only carries those decisions out later; it never re-derives
+ * either one from whatever pwet_rec_stats/pwet_rec_trace happen to
+ * answer now, at flush time, which can differ from their wait_end-time
+ * answer during pwet_assign_capture()'s own masked window (see its
+ * comment) -- re-deriving there would let this later moment's masking,
+ * meant for a different question (should a NEW wait be recorded right
+ * now), silently override a decision already made for this one.
+ *
+ * The one exception is pwet_my_stats/pwet_my_trace themselves: a pending
+ * record's payload or ring can have been genuinely released between
+ * wait_end and this flush (which cannot happen on the normal path, since
+ * every release/orphan site above flushes first) -- pwet_my_stats == NULL
+ * drops the stats half, and pwet_my_trace == NULL drops the trace half
+ * even when pwet_pending.trace is true, there being nowhere left to put
+ * either one.
+ */
+static void
+pwet_flush_pending(void)
+{
+	uint32		event;
+	int64		duration_ns;
+	int64		timestamp_ns;
+	PwetStats  *state;
+
+	if (!pwet_pending_valid)
+		return;
+
+	event = pwet_pending.event;
+	duration_ns = pwet_pending.duration_ns;
+	timestamp_ns = pwet_pending.timestamp_ns;
+	pwet_pending_valid = false;
+
+	/*
+	 * The lifetime ledger takes every completion that exists, whatever the
+	 * state of the legacy payload (attached or not, reset or not, overflowing
+	 * or not).  Eligibility for creating a pending completion is unchanged:
+	 * wait end still requires pwet_rec_stats.  The update is a seqlock write
+	 * of this process's own ledger and nothing in it can throw.
+	 */
+	{
+		PwetLedger *ledger = pwet_get_my_ledger();
+
+		if (ledger != NULL)
+			pwet_ledger_add(ledger, event, duration_ns);
+	}
+
+	/*
+	 * Stats eligibility needs no separate field to check here: this
+	 * record was only ever stashed by pwet_wait_end_impl() while
+	 * pwet_rec_stats was non-NULL, so the recording decision is already
+	 * implied by the record's mere existence -- only whether the payload
+	 * is still there to write into (pwet_my_stats) remains to be checked.
+	 */
+	state = pwet_my_stats;
+	if (state != NULL)
+	{
+		uint32		reset_generation;
+		int			idx;
+		PwetTimingEntry *entry = NULL;
+
+		/*
+		 * reset_generation lives in the always-mapped control slot, not the
+		 * DSA payload (see pwet_request_reset()), so this is a plain
+		 * lock-free atomic read: the owner is the only reader, and the
+		 * requester only ever increments it under the control lock.  Same
+		 * position in the sequence as the pre-deferral code: immediately
+		 * before this record's own values are applied to state->events,
+		 * i.e. the reset always lands before the record it would otherwise
+		 * have been clobbered by is accounted.
+		 */
+		reset_generation =
+			pg_atomic_read_u32(&pwet_ctl[pwet_my_procno].reset_generation);
+		if (reset_generation != pwet_last_reset_generation)
+		{
+			pwet_stats_reset(state);
+			pwet_last_reset_generation = reset_generation;
+		}
+
+		idx = pwet_timing_index(event);
+		if (idx == PWET_IDX_LWLOCK)
+			entry = pwet_lwlock_lookup(state, event & PWET_WAIT_EVENT_ID_MASK);
+		else if (idx >= 0)
+			entry = &state->events[idx];
+
+		if (entry != NULL)
+		{
+			entry->count++;
+			entry->total_ns += duration_ns;
+			if (duration_ns > entry->max_ns)
+				entry->max_ns = duration_ns;
+			entry->histogram[pwet_timing_bucket(duration_ns)]++;
+		}
+		else if (idx == PWET_IDX_LWLOCK)
+			state->lwlock_overflow_count++;
+		else
+			state->flat_overflow_count++;
+	}
+
+	/*
+	 * Trace: append one 32-byte record for this completed wait, using the
+	 * STORED timestamp -- the same wait_end clock read the duration above
+	 * was computed from, per the decision document's "the trace record's
+	 * timestamp is the same wait_end clock read" invariant -- rather than a
+	 * fresh one.  No allocation, no lock, no wait, no ereport -- single
+	 * writer, lock-free, exactly like the stats accounting above.
+	 *
+	 * pwet_pending.trace is the recording decision, taken at wait_end
+	 * time (see pwet_wait_end_impl()); pwet_my_trace != NULL here only
+	 * guards the ring's continued existence, not a second recording
+	 * decision -- every release/orphan site flushes before nulling
+	 * pwet_my_trace, so on the normal path a record with trace == true
+	 * always finds pwet_my_trace still non-NULL.
+	 */
+	if (pwet_pending.trace && pwet_my_trace != NULL)
+	{
+		PwetTraceState *trace = pwet_my_trace;
+		uint64		pos;
+		PwetTraceRecord *rec;
+		uint32		seq;
+
+		pos = pg_atomic_read_u64(&trace->write_pos);
+		pg_atomic_write_u64(&trace->write_pos, pos + 1);
+		rec = &trace->records[pos & trace->ring_mask];
+		seq = (uint32) (pos * 2 + 1);
+
+		/*
+		 * Test hazard window for t/010_trace_seqlock.pl (the
+		 * position-encoded identity seqlock, ported from v6): at this
+		 * instant, write_pos has already advanced past this position, but
+		 * rec->seq has not been touched yet -- it still holds whatever a
+		 * PREVIOUS cycle at this same ring slot last completed it to (an
+		 * even value, but the wrong one for THIS position).  A
+		 * cross-backend reader that reads write_pos right now and walks
+		 * back exactly one ring's worth of positions lands on this slot
+		 * and, without an identity check (the expected seq for this exact
+		 * position, not just parity), would emit that stale prior-cycle
+		 * record as if it belonged to the new cycle.  INJECTION_POINT()
+		 * compiles to nothing unless this build was configured with
+		 * injection points (see utils/injection_point.h), and even then is
+		 * a cheap no-op unless a test has explicitly attached an action to
+		 * this exact point name from another session -- which is the only
+		 * reason an INJECTION_POINT() call is acceptable here, in a
+		 * function that must obey the same no-allocation/no-lock/no-wait/
+		 * no-ereport rules as the wait-event hooks themselves (see this
+		 * function's own comment above): unlike before this change, this
+		 * code no longer runs only from inside wait_event_end_hook, but
+		 * from every flush point enumerated there, several of which are
+		 * ordinary safe points -- the rule is upheld everywhere regardless.
+		 * pwet_trace_write_marker() stamps a marker record's seq with the
+		 * same two-store bracketing pattern as below, but is not
+		 * separately instrumented: one hazard-window test is enough to
+		 * cover the shared protocol.
+		 */
+		INJECTION_POINT("pg-wait-event-tracing-trace-after-write-pos", NULL);
+
+		rec->seq = seq;
+		pg_write_barrier();
+		rec->record_type = PWET_TRACE_WAIT;
+		rec->timestamp_ns = timestamp_ns;
+		rec->data.wait.event = event;
+		rec->data.wait.pad2 = 0;
+		rec->data.wait.duration_ns = duration_ns;
+		pg_write_barrier();
+		rec->seq = seq + 1;
+	}
+}
+
+/*
+ * Body of the wait_event_begin_hook, shared by the chaining and
+ * non-chaining wrappers below (pwet_install_wait_hooks() picks whichever
+ * one applies to this process, once, at install time).  chain is always a
+ * compile-time constant at each call site, so the inlined body has no
+ * previous-hook NULL test on either path: pwet_install_wait_hooks() only
+ * ever wires up the chain=true wrapper when prev_wait_event_begin_hook is
+ * known non-NULL, so there is nothing to test here.
+ */
+static pg_always_inline void
+pwet_wait_begin_impl(uint32 wait_event_info, bool chain)
+{
+	if (chain)
+		prev_wait_event_begin_hook(wait_event_info);
+
+	/*
+	 * Flush the previous wait's pending record, if any, before this wait's
+	 * own clock read below (see pwet_flush_pending()'s comment for the
+	 * complete list of flush points): this is the primary one, what keeps
+	 * the deferred accounting's cost out of the interval this wait itself
+	 * measures, and, when the PREVIOUS wait ended inside a critical
+	 * section (e.g. LWLockAcquire()'s), out of the caller's lock hold time
+	 * too -- that caller has already returned from LWLockAcquire() by the
+	 * time any NEW wait begins.  Unconditional: must run even when
+	 * pwet_rec_stats is NULL right now, since the pending record's own
+	 * recording decisions were already made, for both halves, back when
+	 * it was stashed at wait_end time -- see pwet_flush_pending()'s
+	 * comment for why it carries those decisions out from pwet_my_stats/
+	 * pwet_pending.trace/pwet_my_trace, never re-deriving either one from
+	 * pwet_rec_stats/pwet_rec_trace as they stand now.  Cheap when
+	 * nothing is pending: one boolean test.
+	 */
+	pwet_flush_pending();
+
+	/*
+	 * The attached, capturing case (the overwhelming majority of calls once
+	 * any backend anywhere is capturing) is one pointer test.  Everything
+	 * below, up to and including the not-yet-attached slow path, is
+	 * unchanged in what it decides -- only the top-level test changed, from
+	 * three separate conditions to the one pwet_rec_stats pointer that
+	 * pwet_update_rec_pointers() keeps in sync with them (see its comment).
+	 */
+	if (pwet_rec_stats == NULL)
+	{
+		/* The original three conditions, tested individually. */
+		if (pwet_capture == PWET_CAPTURE_OFF || pwet_stats_writes_disabled)
+			return;
+
+		if (pwet_my_stats == NULL)
+		{
+			/*
+			 * A server-side process never reaches post_parse_analyze_hook or
+			 * ExecutorStart_hook, so this is the only place it can attach; a
+			 * client backend attaches through those hooks (or the assign
+			 * hook) instead, since pwet_is_fixed_procnumber() is never true
+			 * for a ProcNumber below MaxConnections.  Computed at most once
+			 * per process (see pwet_fixed_slot_checked_pid's comment for why
+			 * this is keyed by pid rather than a bare "already checked"
+			 * flag): the answer cannot change over a process's lifetime once
+			 * it has one, and this hook runs on every wait event.
+			 *
+			 * MyProcNumber can itself still be INVALID_PROC_NUMBER here: the
+			 * postmaster never has one (its own ServerLoop reaches this hook
+			 * too), and any process, right after fork/exec, technically could
+			 * call this before InitProcess()/InitAuxiliaryProcess() has run.
+			 * Neither claims nor caches in that case, so a later call -- once
+			 * (if ever) MyProcNumber becomes valid -- retries; this costs a
+			 * few extra branches per wait in the postmaster for its entire
+			 * lifetime (it never gets a ProcNumber), which is fine since the
+			 * postmaster's own waits are not a hot path.
+			 *
+			 * The same retry applies while pwet_shmem_startup() has not
+			 * finished in this process.  Under fork() the postmaster ran it
+			 * and the flag is inherited, but an EXEC_BACKEND child runs it
+			 * itself, from AttachSharedMemoryStructs(), after InitProcess()
+			 * or InitAuxiliaryProcess() has already given it a ProcNumber.
+			 * That function takes ShmemIndexLock first for core's
+			 * ShmemAttachRequested(), then once per ShmemInitStruct() of
+			 * ours; any of these can sleep on an LWLock, which reaches this
+			 * hook while pwet_server_region is still NULL.  An answer cached
+			 * then would be "not eligible" for the life of the process, and
+			 * a server-side process would never record.
+			 * pwet_shmem_startup() assigns the region bounds before the
+			 * region pointer, and sets pwet_shmem_attached last, so
+			 * "attached" implies final values.  The previous begin hook has
+			 * been called before this return (see the top of this function).
+			 */
+			if (pwet_fixed_slot_checked_pid != MyProcPid)
+			{
+				if (MyProcNumber == INVALID_PROC_NUMBER ||
+					!pwet_shmem_attached)
+					return;
+
+				pwet_fixed_slot_checked_pid = MyProcPid;
+				pwet_fixed_slot_eligible = pwet_is_fixed_procnumber(MyProcNumber);
+			}
+
+			if (pwet_fixed_slot_eligible)
+				pwet_claim_fixed_slot();
+
+			if (pwet_my_stats == NULL)
+				return;
+		}
+
+		/*
+		 * Recompute unconditionally, whichever of the three paths above was
+		 * taken (already attached; just claimed a fixed slot; still not
+		 * attached at all), so pwet_rec_stats is guaranteed fresh before
+		 * the hot path below reads it -- pwet_claim_fixed_slot() already
+		 * calls this itself too (it is one of the sites
+		 * pwet_update_rec_pointers()'s own comment enumerates), but calling
+		 * it again here is cheap and idempotent, and means this block does
+		 * not have to know which path it took.  Return, not fall through,
+		 * if the three conditions still do not all hold.
+		 */
+		pwet_update_rec_pointers();
+		if (pwet_rec_stats == NULL)
+			return;
+	}
+
+	/*
+	 * Idle marker synthesis (fix 6, plan sec 5.3): the backend is waiting
+	 * for the client with no statement open (AFTER_STATEMENT) -- this is
+	 * the explicit, unambiguous end of the previous statement's interval,
+	 * and it can only be recognised here, at the first ClientRead wait,
+	 * not at any parse/executor/utility/xact hook (none of them fire
+	 * while a backend is simply waiting for its next message).  Obeys the
+	 * hook rules: pwet_trace_write_marker() only appends to an
+	 * already-allocated ring, no allocation/lock/wait/ereport.  The
+	 * pending wait, if any, was already flushed by this function's own
+	 * flush call above, before this or anything else in this function
+	 * could write a marker -- see pwet_flush_pending()'s comment, which
+	 * lists this Idle marker as one of the ordering points it covers.
+	 *
+	 * Not inside a running utility statement: a COPY FROM STDIN whose trigger
+	 * has just finished a nested statement (AFTER_STATEMENT) is waiting for
+	 * its next chunk of data, not for the next statement.  Counting the
+	 * utility frames walks error_context_stack, so it comes last, after the
+	 * three tests that rule out every other wait: no other wait, and no wait
+	 * at all below the trace level, ever walks the stack.  The walk only
+	 * reads backend-local memory: no lock, allocation or ereport.
+	 *
+	 * IdleInTransaction instead of Idle when a valid transaction that can
+	 * still commit is open: an explicit transaction block, or the implicit
+	 * transaction of the extended protocol waiting for its Sync.  An aborted
+	 * transaction block does not count (no commit can follow).
+	 * IsTransactionState() only reads the process-local transaction state,
+	 * which exists before any hook can run: no lock, allocation, catalog
+	 * access or ereport, so it is allowed here.
+	 */
+	if (pwet_capture == PWET_CAPTURE_TRACE &&
+		pwet_marker_state == PWET_MARKER_AFTER_STATEMENT &&
+		wait_event_info == WAIT_EVENT_CLIENT_READ &&
+		pwet_frame_depths().utility == 0)
+	{
+		pwet_trace_write_marker(IsTransactionState() ?
+								PWET_TRACE_IDLE_IN_XACT : PWET_TRACE_IDLE,
+								0, 0);
+		pwet_marker_state = PWET_MARKER_IDLE;
+	}
+
+	INSTR_TIME_SET_CURRENT(pwet_wait_start);
+	pwet_current_event = wait_event_info;
+}
+
+static void
+pwet_wait_begin(uint32 wait_event_info)
+{
+	pwet_wait_begin_impl(wait_event_info, true);
+}
+
+static void
+pwet_wait_begin_nochain(uint32 wait_event_info)
+{
+	pwet_wait_begin_impl(wait_event_info, false);
+}
+
+/*
+ * Body of the wait_event_end_hook; see pwet_wait_begin_impl()'s comment.
+ *
+ * Before the deferred-accounting change (v11 patch 0004 fixup; see
+ * DECISION-deferred-accounting.md), this function did the reset-generation
+ * check, the count/total/max/histogram update, and the trace append
+ * itself, all before returning to the caller -- for an LWLock wait, that
+ * caller is still inside LWLockAcquire()'s critical section, so every one
+ * of those nanoseconds, including a cache miss on the shared payload,
+ * directly extended the lock's hold time and was paid by every queued
+ * waiter (the v11 finding this fixup addresses).  Now it does only the
+ * cheap, unavoidable part -- read the clock, compute the duration -- and
+ * stashes (event, duration, timestamp, and whether to trace) in the
+ * one-slot pending buffer pwet_pending (see its own comment) for
+ * pwet_flush_pending() to account, unchanged, from a point that no
+ * longer extends any lock's hold time.  Durations are still measured
+ * between the same two instants as before, and the stored timestamp is
+ * still this same wait_end clock read, so every value that eventually
+ * reaches the stats payload or a trace record is identical to what
+ * immediate accounting would have produced -- only when it gets there
+ * is deferred.  Both recording decisions -- whether to count this wait
+ * in stats at all (the pwet_rec_stats test below, unchanged from
+ * before), and whether to append it to the trace ring
+ * (pwet_pending.trace, capturing pwet_rec_trace's answer right here) --
+ * are still made at this exact instant, exactly as they were before
+ * deferral; pwet_flush_pending() only carries them out later.
+ */
+static pg_always_inline void
+pwet_wait_end_impl(uint32 wait_event_info, bool chain)
+{
+	/*
+	 * pwet_rec_stats is non-NULL exactly when the old three-way test
+	 * (pwet_capture != OFF, !pwet_stats_writes_disabled, pwet_my_stats !=
+	 * NULL) held -- see pwet_update_rec_pointers()'s comment -- so this one
+	 * pointer read replaces that test without changing which waits get
+	 * recorded.
+	 */
+	if (pwet_rec_stats != NULL)
+	{
+		uint32		event = pwet_current_event;
+
+		if (event != 0 && !INSTR_TIME_IS_ZERO(pwet_wait_start))
+		{
+			instr_time	now;
+			int64		duration_ns;
+
+			INSTR_TIME_SET_CURRENT(now);
+			duration_ns = INSTR_TIME_GET_NANOSEC(now) -
+				INSTR_TIME_GET_NANOSEC(pwet_wait_start);
+			if (duration_ns < 0)
+				duration_ns = 0;
+
+			/*
+			 * Defend against nesting: pwet_wait_start/pwet_current_event
+			 * form a single in-flight-wait slot that pwet_wait_begin_impl()
+			 * always (re)writes before a new wait can start, and that same
+			 * function unconditionally flushes pwet_pending before doing
+			 * so (see its comment) -- so a record should never already be
+			 * pending here.  If it somehow were anyway, flush the old one
+			 * now rather than silently overwriting (losing) it.
+			 */
+			if (pwet_pending_valid)
+				pwet_flush_pending();
+
+			pwet_pending.event = event;
+			pwet_pending.duration_ns = duration_ns;
+			pwet_pending.timestamp_ns = INSTR_TIME_GET_NANOSEC(now);
+			/* The trace recording decision, taken here, not at flush. */
+			pwet_pending.trace = (pwet_rec_trace != NULL);
+			pwet_pending_valid = true;
+
+			INSTR_TIME_SET_ZERO(pwet_wait_start);
+		}
+	}
+
+	if (chain)
+		prev_wait_event_end_hook(wait_event_info);
+}
+
+static void
+pwet_wait_end(uint32 wait_event_info)
+{
+	pwet_wait_end_impl(wait_event_info, true);
+}
+
+static void
+pwet_wait_end_nochain(uint32 wait_event_info)
+{
+	pwet_wait_end_impl(wait_event_info, false);
+}
+
+/*
+ * Lazily install this process's wait_event_begin_hook/wait_event_end_hook,
+ * the first time (in this process) capture becomes non-off -- called from
+ * pwet_assign_capture(), never from _PG_init() (see its own comment).
+ * Idempotent (pwet_wait_hooks_installed guards it) and, deliberately,
+ * never undone: a later consumer that chains onto us (prev_*_hook here)
+ * may itself have saved our function pointer as ITS previous hook by the
+ * time capture drops back to off in this process; uninstalling ourselves
+ * here would silently cut that consumer out of the chain for the rest of
+ * the process's life, with no way for it to notice.  Leaving the hooks
+ * installed adds no cost beyond the hook call itself on each timed wait:
+ * pwet_wait_begin()/pwet_wait_end() return early whenever pwet_capture is
+ * off.
+ *
+ * Which of the two wrapper pairs (chaining vs. non-chaining) gets wired up
+ * is decided once, right here, from whether this process already had
+ * another module's hook installed: a NULL previous pointer means there is
+ * nothing to chain to, ever, for the rest of this process's life (nothing
+ * later sets wait_event_begin_hook/wait_event_end_hook back to NULL), so
+ * the non-chaining variant drops the previous-hook test from the hot path
+ * entirely instead of testing a pointer that will forever be NULL.
+ */
+static void
+pwet_install_wait_hooks(void)
+{
+	if (pwet_wait_hooks_installed)
+		return;
+
+	prev_wait_event_begin_hook = wait_event_begin_hook;
+	prev_wait_event_end_hook = wait_event_end_hook;
+
+	wait_event_begin_hook = (prev_wait_event_begin_hook != NULL)
+		? pwet_wait_begin : pwet_wait_begin_nochain;
+	wait_event_end_hook = (prev_wait_event_end_hook != NULL)
+		? pwet_wait_end : pwet_wait_end_nochain;
+
+	pwet_wait_hooks_installed = true;
+}
+
+/*
+ * post_parse_analyze_hook: QueryStart (fix 6).  Fires once per parsed
+ * statement -- including a utility statement, since parse_analyze()
+ * wraps those in a Query too -- marking "a statement is open" before
+ * either the executor or ProcessUtility has actually started running it
+ * (extended protocol: at Parse, before Bind/Execute).
+ *
+ * Deliberately does NOT call EnableQueryId(): that would force query
+ * jumbling on every server that merely preloads this library, even with
+ * capture off, which is a cluster-wide behavior change no server operator
+ * asked for.  QueryStart is therefore emitted unconditionally (once
+ * capture == trace), carrying whatever query->queryId already is -- 0
+ * unless compute_query_id is on or another loaded module (e.g.
+ * pg_stat_statements) already turned jumbling on for its own reasons.
+ * The documentation notes this trade-off; a 0 query_id here does not
+ * mean "no statement", it means "no id available for this statement".
+ *
+ * Flushes the pending wait before the marker: a wait completed since the
+ * last flush point (typically the backend's own ClientRead, ending as
+ * this statement's bytes arrived) must land in the trace ring before
+ * QueryStart, not after, to preserve the recorded order.
+ */
+static void
+pwet_post_parse_analyze(ParseState *pstate, Query *query,
+						const JumbleState *jstate)
+{
+	if (prev_post_parse_analyze_hook != NULL)
+		prev_post_parse_analyze_hook(pstate, query, jstate);
+
+	pwet_maybe_attach();
+
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+	{
+		pwet_flush_pending();
+		pwet_marker_query_start(query->queryId);
+	}
+}
+
+/*
+ * ExecutorStart_hook / ExecutorEnd_hook: ExecStart/ExecEnd (fix 6), with
+ * the executor nesting depth (0 = top-level, >0 = a nested invocation
+ * from inside a SQL-language function, PL/pgSQL, a trigger, etc.).
+ * ExecStart is emitted before calling into the standard/chained
+ * implementation and ExecEnd after it returns, both outside the hook's own
+ * count, so a nested invocation's own ExecStart/ExecEnd pair is correctly
+ * bracketed inside the outer one's.
+ *
+ * All five hooks keep an executor PwetFrame on error_context_stack around
+ * the chained call (see PwetFrame); the planner, ExecutorRun and
+ * ExecutorFinish hooks do nothing else.  No PG_TRY: an error that unwinds
+ * a hook takes its frame off the stack with it.
+ *
+ * Each flushes the pending wait immediately before its own marker write,
+ * for the same ordering reason as pwet_post_parse_analyze(): ExecutorEnd's
+ * flush in particular is what orders a wait completed during execution
+ * itself before the ExecEnd marker that closes the statement's interval.
+ */
+static PlannedStmt *
+pwet_planner(Query *parse, const char *query_string, int cursorOptions,
+			 ParamListInfo boundParams, ExplainState *es)
+{
+	PwetFrame	frame;
+	PlannedStmt *result;
+
+	pwet_frame_push(&frame, PWET_FRAME_EXEC);
+	if (prev_planner_hook != NULL)
+		result = prev_planner_hook(parse, query_string, cursorOptions,
+								   boundParams, es);
+	else
+		result = standard_planner(parse, query_string, cursorOptions,
+								  boundParams, es);
+	pwet_frame_pop(&frame);
+
+	return result;
+}
+
+static void
+pwet_ExecutorStart(QueryDesc *queryDesc, int eflags)
+{
+	PwetFrame	frame;
+
+	pwet_maybe_attach();
+
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+	{
+		pwet_flush_pending();
+		pwet_marker_exec_start(queryDesc->plannedstmt->queryId);
+	}
+
+	pwet_frame_push(&frame, PWET_FRAME_EXEC);
+	if (prev_ExecutorStart_hook != NULL)
+		prev_ExecutorStart_hook(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+	pwet_frame_pop(&frame);
+}
+
+static void
+pwet_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
+{
+	PwetFrame	frame;
+
+	pwet_frame_push(&frame, PWET_FRAME_EXEC);
+	if (prev_ExecutorRun_hook != NULL)
+		prev_ExecutorRun_hook(queryDesc, direction, count);
+	else
+		standard_ExecutorRun(queryDesc, direction, count);
+	pwet_frame_pop(&frame);
+}
+
+static void
+pwet_ExecutorFinish(QueryDesc *queryDesc)
+{
+	PwetFrame	frame;
+
+	pwet_frame_push(&frame, PWET_FRAME_EXEC);
+	if (prev_ExecutorFinish_hook != NULL)
+		prev_ExecutorFinish_hook(queryDesc);
+	else
+		standard_ExecutorFinish(queryDesc);
+	pwet_frame_pop(&frame);
+}
+
+static void
+pwet_ExecutorEnd(QueryDesc *queryDesc)
+{
+	int64		query_id = queryDesc->plannedstmt->queryId;
+	PwetFrame	frame;
+
+	pwet_frame_push(&frame, PWET_FRAME_EXEC);
+	if (prev_ExecutorEnd_hook != NULL)
+		prev_ExecutorEnd_hook(queryDesc);
+	else
+		standard_ExecutorEnd(queryDesc);
+	pwet_frame_pop(&frame);
+
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+	{
+		pwet_flush_pending();
+		pwet_marker_exec_end(query_id);
+	}
+}
+
+/*
+ * ProcessUtility_hook: UtilityStart/UtilityEnd (fix 6).  A utility PwetFrame
+ * is on error_context_stack around the chained call, in every mode (see
+ * PwetFrame).
+ *
+ * UtilityEnd is written on error too, from the PG_CATCH below: an error
+ * raised inside a nested utility statement can be caught by an EXCEPTION
+ * block of the procedure or DO block around it, and that statement would
+ * otherwise stay open in the utility level pg_wait_event_trace_by_statement()
+ * computes from the markers (TxnAbort closes the interval of an error that
+ * reaches the top, either way).  ExecEnd has no such counterpart: an
+ * execution error skips it.  The PG_TRY is there only when capture was
+ * already trace when the statement started, that is, only for a statement
+ * whose UtilityStart was written: the decision is taken once, at entry
+ * (pwet_ProcessUtility_traced() or not), and the error path follows it
+ * even if capture changes meanwhile.  At any other level no setjmp is
+ * done at all, and a statement during which capture was switched to
+ * trace, which has no UtilityStart in the ring, gets no UtilityEnd on
+ * error either.  (One that returns normally gets one, as before: the
+ * trailing UtilityEnd of a SET that switches capture on.)  The traced
+ * path is a function of its own, so that the sigjmp_buf and the stack
+ * protector check it brings stay out of the hook at the other levels.
+ *
+ * The frame is pushed inside the PG_TRY, so the PG_CATCH, which restores
+ * error_context_stack to its value at PG_TRY, has already taken it off the
+ * stack when it writes UtilityEnd: that marker sees the depths around the
+ * statement, as on the normal path.
+ *
+ * Two separate flush points, one before each marker: UtilityStart's flush
+ * orders a wait already pending when the utility begins (same reasoning
+ * as post_parse_analyze's); UtilityEnd's flush is required separately
+ * because the utility's own execution, in between, can itself complete
+ * waits that must be ordered before UtilityEnd closes the interval.
+ * Neither the flush nor the marker write can throw, so both are safe in
+ * the PG_CATCH.
+ */
+static pg_noinline void
+pwet_ProcessUtility_traced(PlannedStmt *pstmt, const char *queryString,
+						   bool readOnlyTree, ProcessUtilityContext context,
+						   ParamListInfo params, QueryEnvironment *queryEnv,
+						   DestReceiver *dest, QueryCompletion *qc)
+{
+	int64		query_id = pstmt->queryId;
+	PwetFrame	frame;
+
+	pwet_flush_pending();
+	pwet_marker_utility_start(query_id);
+
+	PG_TRY();
+	{
+		pwet_frame_push(&frame, PWET_FRAME_UTILITY);
+		if (prev_ProcessUtility_hook != NULL)
+			prev_ProcessUtility_hook(pstmt, queryString, readOnlyTree,
+									 context, params, queryEnv, dest, qc);
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree,
+									context, params, queryEnv, dest, qc);
+		pwet_frame_pop(&frame);
+	}
+	PG_CATCH();
+	{
+		if (pwet_capture == PWET_CAPTURE_TRACE)
+		{
+			pwet_flush_pending();
+			pwet_marker_utility_end(query_id);
+		}
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* pstmt may be freed by now (ROLLBACK and the like): not used below */
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+	{
+		pwet_flush_pending();
+		pwet_marker_utility_end(query_id);
+	}
+}
+
+static void
+pwet_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
+					bool readOnlyTree, ProcessUtilityContext context,
+					ParamListInfo params, QueryEnvironment *queryEnv,
+					DestReceiver *dest, QueryCompletion *qc)
+{
+	int64		query_id;
+	PwetFrame	frame;
+
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+	{
+		pwet_ProcessUtility_traced(pstmt, queryString, readOnlyTree, context,
+								   params, queryEnv, dest, qc);
+		return;
+	}
+
+	query_id = pstmt->queryId;
+	pwet_frame_push(&frame, PWET_FRAME_UTILITY);
+	if (prev_ProcessUtility_hook != NULL)
+		prev_ProcessUtility_hook(pstmt, queryString, readOnlyTree, context,
+								 params, queryEnv, dest, qc);
+	else
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+	pwet_frame_pop(&frame);
+
+	/*
+	 * pstmt may be freed by now (ROLLBACK and the like): not used below.
+	 * Capture can have been switched to trace by this very statement (SET).
+	 */
+	if (pwet_capture == PWET_CAPTURE_TRACE)
+	{
+		pwet_flush_pending();
+		pwet_marker_utility_end(query_id);
+	}
+}
+
+/*
+ * Resolve the optional pid SRF argument to a ProcNumber range
+ * [out_start, out_end).  Returns false if the SRF should emit zero rows
+ * (unknown pid -- silent no-op).  Auxiliary processes are included here:
+ * unlike the reset functions, reading their stats is not a control action.
+ */
+static bool
+pwet_pid_range(FunctionCallInfo fcinfo, int argnum,
+			  int *out_start, int *out_end)
+{
+	if (PG_ARGISNULL(argnum))
+	{
+		*out_start = 0;
+		*out_end = PWET_NUM_SLOTS;
+		return true;
+	}
+	else
+	{
+		int			target_pid = PG_GETARG_INT32(argnum);
+		PGPROC	   *proc;
+		int			procnumber;
+
+		proc = BackendPidGetProc(target_pid);
+		if (proc == NULL)
+			proc = AuxiliaryPidGetProc(target_pid);
+		if (proc == NULL)
+			return false;
+
+		procnumber = GetNumberFromPGProc(proc);
+		if (procnumber < 0 || procnumber >= PWET_NUM_SLOTS)
+			return false;
+
+		*out_start = procnumber;
+		*out_end = procnumber + 1;
+		return true;
+	}
+}
+
+static void
+pwet_emit_timing_row(ReturnSetInfo *rsinfo, PgBackendStatus *beentry,
+					 int procnumber, uint32 wait_event_info,
+					 PwetTimingEntry *entry, ArrayType *histogram,
+					 int64 *histogram_data)
+{
+	Datum		values[10];
+	bool		nulls[10] = {0};
+	const char *event_type;
+	const char *event_name;
+	int			i;
+
+	event_type = pgstat_get_wait_event_type(wait_event_info);
+	event_name = pgstat_get_wait_event(wait_event_info);
+	if (event_type == NULL || event_name == NULL)
+		return;
+
+	values[0] = Int32GetDatum(beentry->st_procpid);
+	values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
+	values[2] = Int32GetDatum(procnumber);
+	values[3] = CStringGetTextDatum(event_type);
+	values[4] = CStringGetTextDatum(event_name);
+	values[5] = Int64GetDatum(entry->count);
+	values[6] = Float8GetDatum((double) entry->total_ns / 1000000.0);
+	values[7] = Float8GetDatum(entry->count > 0
+							   ? (double) entry->total_ns /
+							   entry->count / 1000.0 : 0.0);
+	values[8] = Float8GetDatum((double) entry->max_ns / 1000.0);
+	for (i = 0; i < PWET_HISTOGRAM_BUCKETS; i++)
+		histogram_data[i] = entry->histogram[i];
+	values[9] = PointerGetDatum(histogram);
+
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+/*
+ * Lock-free read of a fixed slot's owner token (plan section 4.2a): read
+ * both fields, then a read barrier before the caller looks at the
+ * payload, so a concurrent pwet_claim_fixed_slot() -- whose step (1)
+ * clears owner_pid before touching the payload -- is guaranteed visible
+ * first.  Returns false immediately (without touching the payload at all)
+ * if the slot does not currently belong to beentry.
+ */
+static bool
+pwet_fixed_owner_matches(PwetSlot *slot, PgBackendStatus *beentry,
+						 int *out_pid, TimestampTz *out_start)
+{
+	int			pid = slot->owner_pid;
+	TimestampTz start = slot->owner_start;
+
+	pg_read_barrier();
+
+	if (pid != beentry->st_procpid || start != beentry->st_proc_start_timestamp)
+		return false;
+
+	*out_pid = pid;
+	*out_start = start;
+	return true;
+}
+
+/*
+ * Second half of the double read: re-read the owner token after copying
+ * the payload (with a read barrier first, pairing with
+ * pwet_claim_fixed_slot()'s step (3) write barrier) and confirm it still
+ * matches what pwet_fixed_owner_matches() saw.  A mismatch means a claim
+ * raced with the copy and the payload may be torn or already belong to a
+ * new owner; the caller must discard it.
+ */
+static bool
+pwet_fixed_owner_unchanged(PwetSlot *slot, int pid, TimestampTz start)
+{
+	pg_read_barrier();
+	return slot->owner_pid == pid && slot->owner_start == start;
+}
+
+#ifdef USE_ASSERT_CHECKING
+/* Test-only: runs between the copy and the closing sequence check. */
+static void (*pwet_test_copy_hook) (PwetStats *src);
+#endif
+
+/*
+ * Copy len bytes of a payload into dst, accepting the copy only if no
+ * structural change (tranche insertion, reset, reinitialization) overlapped
+ * it: the SHARED struct_seq must be even before the copy and unchanged after
+ * it (the copied value is meaningless).  The read barriers order the
+ * copy's source loads after the first and before the second sequence read,
+ * for the compiler and the CPU alike.  Counter fields are NOT covered: they
+ * remain approximate within a row, by design.  On false the caller must
+ * discard dst and may retry.
+ */
+static bool
+pwet_copy_stable(PwetStats *src, void *dst, Size len)
+{
+	uint32		seq = pg_atomic_read_u32(&src->struct_seq);
+
+	if (seq & 1)
+		return false;
+	pg_read_barrier();
+	memcpy(dst, src, len);
+#ifdef USE_ASSERT_CHECKING
+	if (pwet_test_copy_hook != NULL)
+		pwet_test_copy_hook(src);
+#endif
+	pg_read_barrier();
+	return pg_atomic_read_u32(&src->struct_seq) == seq;
+}
+
+/*
+ * Same protocol for the three scalar fields the overflow view needs, so
+ * they and reset_count come from one structural epoch.
+ */
+static bool
+pwet_read_counters_stable(PwetStats *src, int64 *lwlock_overflow,
+						  int64 *flat_overflow, int64 *reset_count)
+{
+	uint32		seq = pg_atomic_read_u32(&src->struct_seq);
+
+	if (seq & 1)
+		return false;
+	pg_read_barrier();
+	*lwlock_overflow = src->lwlock_overflow_count;
+	*flat_overflow = src->flat_overflow_count;
+	*reset_count = src->reset_count;
+	pg_read_barrier();
+	return pg_atomic_read_u32(&src->struct_seq) == seq;
+}
+
+/*
+ * Validate an accepted copy before indexing with its dimensions: they must
+ * equal what the (PGC_POSTMASTER) configuration dictates, num_used must be
+ * in range, and every occupied hash row must name a dense slot below
+ * num_used, with exactly num_used rows occupied.  A stable copy always
+ * passes; this guards the reader against ever indexing out of bounds.
+ */
+static bool
+pwet_snapshot_valid(PwetStats *snapshot)
+{
+	PwetLWLockHash *hash = &snapshot->lwlock_hash;
+	PwetLWLockHashEntry *entries;
+	int			used = 0;
+	int			i;
+
+	if (hash->max_entries != pwet_max_tranches ||
+		hash->hash_size != pwet_hash_size_for(pwet_max_tranches) ||
+		hash->num_used < 0 || hash->num_used > hash->max_entries)
+		return false;
+
+	entries = pwet_lwlock_hash_entries(snapshot);
+	for (i = 0; i < hash->hash_size; i++)
+	{
+		if (entries[i].tranche_id == PWET_LWLOCK_EMPTY)
+			continue;
+		if (entries[i].dense_idx >= hash->num_used)
+			return false;
+		used++;
+	}
+
+	return used == hash->num_used;
+}
+
+/*
+ * Lock-free read of a claimed fixed slot's full payload into *snapshot.
+ * See pwet_fixed_owner_matches()/pwet_fixed_owner_unchanged() for the
+ * double-read protocol this brackets the copy with.  A copy that overlapped
+ * a structural change is retried, with the owner token re-read each time:
+ * a re-claim by the same process keeps the token but advances struct_seq.
+ */
+static bool
+pwet_read_fixed_slot(int procnumber, PgBackendStatus *beentry,
+					 PwetStats *snapshot)
+{
+	PwetSlot   *slot = &pwet_ctl[procnumber];
+
+	for (;;)
+	{
+		int			pid;
+		TimestampTz start;
+
+		if (!pwet_fixed_owner_matches(slot, beentry, &pid, &start))
+			return false;
+
+		if (pwet_copy_stable(pwet_fixed_payload(procnumber), snapshot,
+							 pwet_server_stride))
+			return pwet_fixed_owner_unchanged(slot, pid, start);
+
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+/*
+ * SQL function: pg_stat_get_wait_event_timing(pid int4, OUT ...)
+ *
+ * One row per (backend, wait_event) with a non-zero count.  pid is
+ * optional: NULL means every backend; a non-NULL value restricts the sweep
+ * to that backend (silently empty for an unknown pid).
+ *
+ * The sweep below flushes the CALLING backend's own pending wait, if the
+ * sweep reaches its own procnumber (pid was NULL, or exactly this
+ * backend's pid), so a session reading its own row always sees its own
+ * just-completed waits -- see the module comment / commit message for why
+ * this is one of the required flush points.  A cross-backend row is read
+ * from whatever the owner last flushed itself, unaffected by this.
+ */
+Datum
+pg_stat_get_wait_event_timing(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	ArrayType  *histogram;
+	int64	   *histogram_data;
+	PwetStats  *snapshot;
+	int			start_idx;
+	int			end_idx;
+	int			procnumber;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (!pwet_pid_range(fcinfo, 0, &start_idx, &end_idx))
+		PG_RETURN_VOID();
+	if (!pwet_ensure_stats_dsa())
+		PG_RETURN_VOID();
+
+	pwet_stats_stride = pwet_stats_payload_size(pwet_max_tranches);
+	snapshot = palloc(pwet_stats_stride);
+
+	{
+		Datum		zeros[PWET_HISTOGRAM_BUCKETS];
+
+		memset(zeros, 0, sizeof(zeros));
+		histogram = construct_array_builtin(zeros,
+											PWET_HISTOGRAM_BUCKETS,
+											INT8OID);
+		histogram_data = (int64 *) ARR_DATA_PTR(histogram);
+	}
+
+	for (procnumber = start_idx; procnumber < end_idx; procnumber++)
+	{
+		PgBackendStatus *beentry;
+		bool		matched;
+		int			i;
+
+		beentry = pgstat_get_beentry_by_proc_number(procnumber);
+		if (beentry == NULL || beentry->st_procpid == 0 ||
+			!PWET_HAS_STATS_PRIVS(beentry->st_userid))
+			continue;
+
+		/* Own row: flush before reading it (see the function comment). */
+		if (procnumber == MyProcNumber)
+			pwet_flush_pending();
+
+		if (pwet_is_fixed_procnumber(procnumber))
+		{
+			/* Lock-free: the region is never freed, so this never races
+			 * with anything but the owner's own claim. */
+			matched = pwet_read_fixed_slot(procnumber, beentry, snapshot);
+		}
+		else
+		{
+			PwetSlot   *slot = &pwet_ctl[procnumber];
+
+			matched = false;
+			for (;;)
+			{
+				bool		owned;
+				bool		stable = false;
+
+				LWLockAcquire(pwet_lock, LW_SHARED);
+				owned = DsaPointerIsValid(slot->stats_ptr) &&
+					slot->owner_pid == beentry->st_procpid &&
+					slot->owner_start == beentry->st_proc_start_timestamp;
+				if (owned)
+					stable = pwet_copy_stable(dsa_get_address(pwet_stats_dsa,
+															  slot->stats_ptr),
+											  snapshot, pwet_stats_stride);
+				LWLockRelease(pwet_lock);
+
+				if (!owned)
+					break;
+				if (stable)
+				{
+					matched = true;
+					break;
+				}
+
+				/* Overlapped a structural change; retry, but stay cancelable. */
+				CHECK_FOR_INTERRUPTS();
+			}
+		}
+
+		if (!matched || !pwet_snapshot_valid(snapshot))
+			continue;
+
+		for (i = 0; i < PWET_DENSE_CLASSES; i++)
+		{
+			int			base = pwet_class_offset[i];
+			int			nevents = pwet_class_nevents[i];
+			uint32		class_id = pwet_dense_to_classid[i];
+			int			j;
+
+			for (j = 0; j < nevents; j++)
+			{
+				PwetTimingEntry *entry = &snapshot->events[base + j];
+
+				if (entry->count == 0)
+					continue;
+				pwet_emit_timing_row(rsinfo, beentry, procnumber,
+									 ((uint32) class_id << 24) | (uint32) j,
+									 entry, histogram, histogram_data);
+			}
+		}
+
+		{
+			PwetLWLockHashEntry *entries =
+				pwet_lwlock_hash_entries(snapshot);
+			PwetTimingEntry *events =
+				pwet_lwlock_hash_events(snapshot);
+
+			for (i = 0; i < snapshot->lwlock_hash.hash_size; i++)
+			{
+				PwetLWLockHashEntry *hash_entry = &entries[i];
+				PwetTimingEntry *entry;
+
+				if (hash_entry->tranche_id == PWET_LWLOCK_EMPTY)
+					continue;
+				entry = &events[hash_entry->dense_idx];
+				if (entry->count == 0)
+					continue;
+				pwet_emit_timing_row(rsinfo, beentry, procnumber,
+									 PG_WAIT_LWLOCK |
+									 hash_entry->tranche_id,
+									 entry, histogram, histogram_data);
+			}
+		}
+	}
+
+	pfree(snapshot);
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_stat_get_wait_event_timing_overflow(pid int4, OUT ...)
+ *
+ * One row per backend that has an attached stats payload, exposing the
+ * truncation counters the recording path maintains.  pid has the same
+ * optional semantics as pg_stat_get_wait_event_timing().
+ *
+ * Flushes the calling backend's own pending record before emitting its
+ * row, same rule and same reason as pg_stat_get_wait_event_timing()'s own
+ * sweep (see pwet_flush_pending()'s comment): reset_count in particular
+ * is only ever advanced by a flush noticing reset_generation has moved,
+ * so a caller reading its own row here must not be left looking at a
+ * stale count merely because nothing else has flushed for it yet.
+ */
+Datum
+pg_stat_get_wait_event_timing_overflow(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int			start_idx;
+	int			end_idx;
+	int			procnumber;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (!pwet_pid_range(fcinfo, 0, &start_idx, &end_idx))
+		PG_RETURN_VOID();
+	if (!pwet_ensure_stats_dsa())
+		PG_RETURN_VOID();
+
+	for (procnumber = start_idx; procnumber < end_idx; procnumber++)
+	{
+		PgBackendStatus *beentry;
+		Datum		values[6];
+		bool		nulls[6] = {0};
+		int64		lwlock_overflow = 0;
+		int64		flat_overflow = 0;
+		int64		reset_count = 0;
+		bool		matched = false;
+
+		beentry = pgstat_get_beentry_by_proc_number(procnumber);
+		if (beentry == NULL || beentry->st_procpid == 0 ||
+			!PWET_HAS_STATS_PRIVS(beentry->st_userid))
+			continue;
+
+		/* Own row: flush before reading it (see the function comment). */
+		if (procnumber == MyProcNumber)
+			pwet_flush_pending();
+
+		if (pwet_is_fixed_procnumber(procnumber))
+		{
+			PwetSlot   *slot = &pwet_ctl[procnumber];
+			int			pid;
+			TimestampTz start;
+
+			for (;;)
+			{
+				if (!pwet_fixed_owner_matches(slot, beentry, &pid, &start))
+					break;
+				if (pwet_read_counters_stable(pwet_fixed_payload(procnumber),
+											  &lwlock_overflow,
+											  &flat_overflow, &reset_count))
+				{
+					matched = pwet_fixed_owner_unchanged(slot, pid, start);
+					break;
+				}
+				CHECK_FOR_INTERRUPTS();
+			}
+		}
+		else
+		{
+			PwetSlot   *slot = &pwet_ctl[procnumber];
+
+			for (;;)
+			{
+				bool		owned;
+				bool		stable = false;
+
+				LWLockAcquire(pwet_lock, LW_SHARED);
+				owned = DsaPointerIsValid(slot->stats_ptr) &&
+					slot->owner_pid == beentry->st_procpid &&
+					slot->owner_start == beentry->st_proc_start_timestamp;
+				if (owned)
+					stable = pwet_read_counters_stable(dsa_get_address(pwet_stats_dsa,
+																	   slot->stats_ptr),
+													   &lwlock_overflow,
+													   &flat_overflow,
+													   &reset_count);
+				LWLockRelease(pwet_lock);
+
+				if (!owned)
+					break;
+				if (stable)
+				{
+					matched = true;
+					break;
+				}
+				CHECK_FOR_INTERRUPTS();
+			}
+		}
+
+		if (!matched)
+			continue;
+
+		values[0] = Int32GetDatum(beentry->st_procpid);
+		values[1] = CStringGetTextDatum(GetBackendTypeDesc(beentry->st_backendType));
+		values[2] = Int32GetDatum(procnumber);
+		values[3] = Int64GetDatum(lwlock_overflow);
+		values[4] = Int64GetDatum(flat_overflow);
+		values[5] = Int64GetDatum(reset_count);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * Instance totals: SQL surface.
+ *
+ * event_key is the full 32-bit wait_event_info code (class in the top byte,
+ * event or LWLock tranche id below), so it is never negative; the two
+ * overflow rows use the reserved keys -1 (LWLock tranches that did not fit
+ * the dictionary) and -2 (events outside the flat table), which no wait
+ * event can have.  Events that did not fit are merged into these rows, with
+ * both count and time, never dropped.
+ *
+ * Names are resolved only for keys known to resolve.  Built-in classes never
+ * raise an error in the resolvers.  A LWLock tranche id enters a ledger only
+ * from a completed wait on a lock of that tranche, and tranche registrations
+ * are never removed, so it resolves as well.  A custom (Extension or
+ * InjectionPoint) event id is resolved only through the table of names
+ * currently registered; the resolver that takes an id raises an error for an
+ * unknown one, so an id missing from that table gets a placeholder name.
+ */
+typedef struct PwetCustomName
+{
+	uint32		info;
+	const char *name;
+} PwetCustomName;
+
+/* Lazily built table of the registered custom event names. */
+typedef struct PwetNameContext
+{
+	PwetCustomName *custom;
+	int			ncustom;
+	bool		have_custom;
+} PwetNameContext;
+
+static int
+pwet_collect_custom_names(PwetCustomName **map)
+{
+	static const uint32 classes[] = {PG_WAIT_EXTENSION, PG_WAIT_INJECTIONPOINT};
+	PwetCustomName *result = NULL;
+	int			n = 0;
+	int			c;
+
+	for (c = 0; c < lengthof(classes); c++)
+	{
+		int			count;
+		char	  **names = GetWaitEventCustomNames(classes[c], &count);
+		int			k;
+
+		if (count == 0)
+			continue;
+		result = result == NULL ?
+			palloc_array(PwetCustomName, n + count) :
+			repalloc_array(result, PwetCustomName, n + count);
+		for (k = 0; k < count; k++)
+		{
+			/* The name exists, so this finds it and never allocates an id. */
+			result[n].info = classes[c] == PG_WAIT_EXTENSION ?
+				WaitEventExtensionNew(names[k]) :
+				WaitEventInjectionPointNew(names[k]);
+			result[n].name = names[k];
+			n++;
+		}
+	}
+
+	*map = result;
+	return n;
+}
+
+/* Type and name of an event code that has captured waits. */
+static void
+pwet_event_names(uint32 info, PwetNameContext *ctx, const char **type,
+				 const char **name)
+{
+	*type = pgstat_get_wait_event_type(info);
+	*name = NULL;
+
+	/*
+	 * The unnamed built-in Extension event is not in the custom-name table;
+	 * core resolves it as "Extension".
+	 */
+	if (info == PG_WAIT_EXTENSION)
+		*name = "Extension";
+	else if ((info & PWET_WAIT_EVENT_CLASS_MASK) == PG_WAIT_EXTENSION ||
+			 (info & PWET_WAIT_EVENT_CLASS_MASK) == PG_WAIT_INJECTIONPOINT)
+	{
+		int			k;
+
+		if (!ctx->have_custom)
+		{
+			ctx->ncustom = pwet_collect_custom_names(&ctx->custom);
+			ctx->have_custom = true;
+		}
+		for (k = 0; k < ctx->ncustom; k++)
+			if (ctx->custom[k].info == info)
+				*name = ctx->custom[k].name;
+	}
+	else
+		*name = pgstat_get_wait_event(info);
+
+	if (*name == NULL)
+		*name = psprintf("unknown_%u", info & PWET_WAIT_EVENT_ID_MASK);
+}
+
+/*
+ * Iterate over the events of a scan that have calls, in key order: flat
+ * events by index, then LWLock tranches by id.  The callback gets the code.
+ */
+typedef void (*PwetEventVisitor) (uint32 info, const PwetTotal *t, void *arg);
+
+static void
+pwet_visit_events(const PwetTotalsScan *scan, PwetEventVisitor visit, void *arg)
+{
+	int			i;
+	int			j;
+	int			id;
+
+	for (i = 0; i < PWET_DENSE_CLASSES; i++)
+	{
+		uint32		class_id = pwet_dense_to_classid[i];
+		int			base = pwet_class_offset[i];
+
+		for (j = 0; j < pwet_class_nevents[i]; j++)
+			if (scan->flat[base + j].calls != 0)
+				visit((class_id << 24) | (uint32) j, &scan->flat[base + j], arg);
+	}
+	for (id = 0; id < PWET_NUM_TRANCHE_IDS; id++)
+		if (scan->tranche[id].calls != 0)
+			visit(PG_WAIT_LWLOCK | (uint32) id, &scan->tranche[id], arg);
+}
+
+static void
+pwet_totals_put_row(ReturnSetInfo *rsinfo, const char *type, const char *name,
+					int64 key, const PwetTotal *t)
+{
+	Datum		values[6];
+	bool		nulls[6] = {0};
+
+	values[0] = CStringGetTextDatum(type);
+	values[1] = CStringGetTextDatum(name);
+	values[2] = Int64GetDatum(key);
+	values[3] = Int64GetDatum((int64) t->calls);
+	values[4] = Float8GetDatum((double) t->total_ns / 1000000.0);
+	if (t->calls > 0)
+		values[5] = Float8GetDatum((double) t->total_ns / (double) t->calls /
+								   1000.0);
+	else
+		nulls[5] = true;
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+typedef struct PwetRowsArg
+{
+	ReturnSetInfo *rsinfo;
+	PwetNameContext names;
+} PwetRowsArg;
+
+static void
+pwet_totals_row_visitor(uint32 info, const PwetTotal *t, void *arg)
+{
+	PwetRowsArg *ra = (PwetRowsArg *) arg;
+	const char *type;
+	const char *name;
+
+	pwet_event_names(info, &ra->names, &type, &name);
+	pwet_totals_put_row(ra->rsinfo, type, name, (int64) info, t);
+}
+
+/*
+ * The totals since the last reset: the sum over all ledgers minus the
+ * baseline the last reset published.
+ *
+ * Read the generation under a short shared lock, scan without the lock (the
+ * scan is interruptible and takes as long as it takes), then take the lock
+ * again: if the generation moved, a reset published a new baseline during
+ * the scan, so start over; otherwise subtract the baseline, which cannot
+ * change while the lock is held.  The lock protects the baseline, not the
+ * coherence of the ledgers.  scan_start/scan_end are wall-clock times around
+ * the scan that produced the result.  *negative is set if a pair came out
+ * negative after subtraction, which only a bug could cause; callers decide
+ * whether that is an error.
+ */
+#ifdef USE_ASSERT_CHECKING
+/*
+ * Test-only: if armed, the next reader to get here waits (interruptibly,
+ * holding no lock) until released, so a test can publish a reset while a
+ * scan is in flight.
+ */
+static void
+pwet_test_read_barrier(void)
+{
+	uint32		expected = 1;
+
+	if (pg_atomic_compare_exchange_u32(&pwet_totals_header->test_arm,
+									   &expected, 0))
+	{
+		pg_atomic_write_u32(&pwet_totals_header->test_waiting, 1);
+		PG_TRY();
+		{
+			while (pg_atomic_read_u32(&pwet_totals_header->test_release) == 0)
+			{
+				CHECK_FOR_INTERRUPTS();
+				pg_usleep(1000);
+			}
+		}
+		PG_FINALLY();
+		{
+			/* also when canceled: the flag must not stay set */
+			pg_atomic_write_u32(&pwet_totals_header->test_waiting, 0);
+		}
+		PG_END_TRY();
+	}
+}
+#endif
+
+static void
+pwet_totals_read(PwetTotalsScan *scan, PwetReadMeta *meta, bool *negative)
+{
+	for (;;)
+	{
+		uint64		gen;
+
+		LWLockAcquire(pwet_totals_lock, LW_SHARED);
+		gen = pwet_totals_header->reset_generation;
+		meta->reset_scan_start = pwet_totals_header->reset_scan_start;
+		meta->reset_scan_end = pwet_totals_header->reset_scan_end;
+		LWLockRelease(pwet_totals_lock);
+
+		memset(scan, 0, sizeof(PwetTotalsScan));
+		meta->scan_start = GetCurrentTimestamp();
+		pwet_totals_scan(scan);
+		meta->scan_end = GetCurrentTimestamp();
+#ifdef USE_ASSERT_CHECKING
+		pwet_test_read_barrier();
+#endif
+
+		LWLockAcquire(pwet_totals_lock, LW_SHARED);
+		if (pwet_totals_header->reset_generation == gen)
+		{
+			*negative = !scan->sum_overflow &&
+				!pwet_totals_subtract(scan, &pwet_totals_header->baseline);
+			LWLockRelease(pwet_totals_lock);
+			meta->generation = gen;
+			return;
+		}
+		LWLockRelease(pwet_totals_lock);
+#ifdef USE_ASSERT_CHECKING
+		pg_atomic_fetch_add_u32(&pwet_totals_header->test_retries, 1);
+#endif
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+/* Raise the errors totals, snapshot and reset share. */
+static void
+pwet_totals_check(const PwetTotalsScan *scan, bool negative)
+{
+	if (scan->invalid_ledgers > 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("wait event totals are invalid: %lld lifetime ledger(s) exceeded the bigint range",
+						(long long) scan->invalid_ledgers),
+				 errhint("See pg_stat_wait_event_totals_info; the totals are valid again only after a server restart.")));
+	if (scan->sum_overflow)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("wait event totals exceed the bigint range")));
+	if (negative)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("wait event totals went below the reset baseline"),
+				 errdetail("This is a bug: lifetime ledgers never decrease.")));
+}
+
+/*
+ * SQL function: pg_stat_get_wait_event_totals()
+ *
+ * One row per event that has completed at least one captured wait since
+ * the last reset (or server start), summed over all processes that ever ran,
+ * plus the two overflow rows (always present).  ERRORs if any contributing
+ * ledger is invalid or a sum cannot be represented.
+ */
+Datum
+pg_stat_get_wait_event_totals(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	PwetTotalsScan *scan;
+	PwetReadMeta meta;
+	PwetRowsArg ra;
+	bool		negative;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	scan = palloc(sizeof(PwetTotalsScan));
+	pwet_totals_read(scan, &meta, &negative);
+	pwet_totals_check(scan, negative);
+
+	memset(&ra, 0, sizeof(ra));
+	ra.rsinfo = rsinfo;
+	pwet_visit_events(scan, pwet_totals_row_visitor, &ra);
+
+	pwet_totals_put_row(rsinfo, "LWLock", "(overflow)",
+						PWET_KEY_LWLOCK_OVERFLOW, &scan->lwlock_overflow);
+	pwet_totals_put_row(rsinfo, "(overflow)", "(overflow)",
+						PWET_KEY_FLAT_OVERFLOW, &scan->flat_overflow);
+
+	pfree(scan);
+	PG_RETURN_VOID();
+}
+
+/*
+ * Does slot i hold a collection payload whose owner is the live process of
+ * that ProcNumber?  As in the per-backend readers, the owner token is
+ * checked against the backend-status entry (or, for a process without one,
+ * against the PGPROC).  A fixed-slot process withdraws its token in
+ * pwet_exit_drain() at an orderly exit, so a token that is still there
+ * belongs to a live process (an abrupt death restarts the cluster); a payload
+ * itself is never freed and is reinitialized by the next claimant.  The
+ * count is advisory.  One rare case can still count a slot wrongly: a
+ * fixed-slot process that claims its slot and then fails during start-up,
+ * before its exit callback is registered, leaves the token behind, and a
+ * later process that reuses the same PID in the same slot is taken for its
+ * predecessor until it claims the slot itself.
+ */
+static bool
+pwet_slot_owner_is_live(int slot)
+{
+	PgBackendStatus *beentry = pgstat_get_beentry_by_proc_number(slot);
+	int			pid = pwet_ctl[slot].owner_pid;
+
+	if (pid == 0)
+		return false;
+	if (beentry != NULL)
+		return beentry->st_procpid == pid &&
+			beentry->st_proc_start_timestamp == pwet_ctl[slot].owner_start;
+
+	/*
+	 * No backend-status entry: a worker without a database connection has
+	 * none.  Then the slot's PGPROC must still be held by the owner's pid.
+	 * The pid alone could be reused by a successor of the slot, so this
+	 * relies on the token being withdrawn by pwet_exit_drain() before the
+	 * PGPROC is released: a token still present belongs to a live process.
+	 */
+	return GetPGProcByNumber(slot)->pid == pid;
+}
+
+/*
+ * SQL function: pg_stat_get_wait_event_totals_info()
+ *
+ * One row of bookkeeping: the incarnation (random, new for every shared
+ * memory initialization, so a change means the totals restarted from zero),
+ * the overflow pairs, the number of invalid ledgers, the number of ledger
+ * slots, the number of backends currently holding a collection payload
+ * (advisory: read without a lock; exited processes are not counted), the
+ * reset generation and the times of the last reset's scan, and the captured
+ * transaction completions.  Unlike the totals it never raises for invalid
+ * accounting, so the diagnostics stay readable; a column whose sum cannot be
+ * represented, or that came out negative, is NULL.
+ */
+Datum
+pg_stat_get_wait_event_totals_info(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	PwetTotalsScan *scan;
+	PwetReadMeta meta;
+	Datum		values[14];
+	bool		nulls[14] = {0};
+	int			capturing = 0;
+	bool		negative;
+	bool		unusable;
+	int			i;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	scan = palloc(sizeof(PwetTotalsScan));
+	pwet_totals_read(scan, &meta, &negative);
+	unusable = scan->sum_overflow || negative;
+
+	for (i = 0; i < PWET_NUM_SLOTS; i++)
+		if (pwet_slot_owner_is_live(i))
+			capturing++;
+
+	values[0] = CStringGetTextDatum(psprintf("%016" PRIx64,
+											 pwet_totals_header->incarnation));
+	if (unusable)
+		nulls[1] = nulls[2] = nulls[3] = nulls[4] = true;
+	else
+	{
+		values[1] = Int64GetDatum((int64) scan->lwlock_overflow.calls);
+		values[2] = Float8GetDatum((double) scan->lwlock_overflow.total_ns /
+								   1000000.0);
+		values[3] = Int64GetDatum((int64) scan->flat_overflow.calls);
+		values[4] = Float8GetDatum((double) scan->flat_overflow.total_ns /
+								   1000000.0);
+	}
+	values[5] = Int64GetDatum(scan->invalid_ledgers);
+	values[6] = Int32GetDatum(PWET_NUM_SLOTS);
+	values[7] = Int32GetDatum(capturing);
+	values[8] = Int64GetDatum((int64) meta.generation);
+	if (meta.reset_scan_end == 0)
+		nulls[9] = nulls[10] = true;
+	else
+	{
+		values[9] = TimestampTzGetDatum(meta.reset_scan_end);
+		values[10] = TimestampTzGetDatum(meta.reset_scan_start);
+	}
+	if (unusable)
+		nulls[11] = nulls[12] = nulls[13] = true;
+	else
+	{
+		values[11] = Int64GetDatum((int64) scan->xact_commit);
+		values[12] = Int64GetDatum((int64) scan->xact_abort);
+		values[13] = Int64GetDatum((int64) scan->xact_prepare);
+	}
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+	pfree(scan);
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_stat_reset_wait_event_totals()
+ *
+ * Superuser only.  Lifetime ledgers are never modified.  A reset scans all
+ * ledgers without the control lock into scratch, then takes the lock
+ * exclusively, checks that no other reset published meanwhile (else scans
+ * again), publishes the scan as the new baseline together with its
+ * wall-clock times, and bumps the generation.  It is therefore a scan-based
+ * cut, not an instantaneous global one: a completion that had not been
+ * flushed into its ledger when the scan read that ledger is counted after
+ * the reset.  Refuses to run while any ledger is invalid.
+ */
+Datum
+pg_stat_reset_wait_event_totals(PG_FUNCTION_ARGS)
+{
+	PwetTotalsScan *scan;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to reset wait event totals"),
+				 errdetail("Only roles with the %s attribute may reset wait event totals.",
+						   "SUPERUSER")));
+
+	scan = palloc(sizeof(PwetTotalsScan));
+	for (;;)
+	{
+		uint64		gen;
+		TimestampTz start;
+		TimestampTz end;
+
+		LWLockAcquire(pwet_totals_lock, LW_SHARED);
+		gen = pwet_totals_header->reset_generation;
+		LWLockRelease(pwet_totals_lock);
+
+		memset(scan, 0, sizeof(PwetTotalsScan));
+		start = GetCurrentTimestamp();
+		pwet_totals_scan(scan);
+		end = GetCurrentTimestamp();
+
+		/* Invalid or unrepresentable accounting cannot be a baseline. */
+		pwet_totals_check(scan, false);
+
+		LWLockAcquire(pwet_totals_lock, LW_EXCLUSIVE);
+		if (pwet_totals_header->reset_generation == gen)
+		{
+			memcpy(&pwet_totals_header->baseline, scan, sizeof(PwetTotalsScan));
+			pwet_totals_header->reset_scan_start = start;
+			pwet_totals_header->reset_scan_end = end;
+			pwet_totals_header->reset_generation = gen + 1;
+			LWLockRelease(pwet_totals_lock);
+			break;
+		}
+		LWLockRelease(pwet_totals_lock);
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	pfree(scan);
+	PG_RETURN_VOID();
+}
+
+/* ---- snapshot ---- */
+
+static void
+pwet_json_key(JsonbInState *state, const char *key)
+{
+	JsonbValue	k;
+
+	k.type = jbvString;
+	k.val.string.val = pstrdup(key);
+	k.val.string.len = strlen(key);
+	pushJsonbValue(state, WJB_KEY, &k);
+}
+
+static void
+pwet_json_int(JsonbInState *state, const char *key, int64 v)
+{
+	JsonbValue	val;
+
+	pwet_json_key(state, key);
+	val.type = jbvNumeric;
+	val.val.numeric = int64_to_numeric(v);
+	pushJsonbValue(state, WJB_VALUE, &val);
+}
+
+static void
+pwet_json_str(JsonbInState *state, const char *key, const char *v)
+{
+	JsonbValue	val;
+
+	pwet_json_key(state, key);
+	val.type = jbvString;
+	val.val.string.val = pstrdup(v);
+	val.val.string.len = strlen(v);
+	pushJsonbValue(state, WJB_VALUE, &val);
+}
+
+static void
+pwet_json_pair(JsonbInState *state, const char *key, const PwetTotal *t)
+{
+	pwet_json_key(state, key);
+	pushJsonbValue(state, WJB_BEGIN_OBJECT, NULL);
+	pwet_json_int(state, "calls", (int64) t->calls);
+	pwet_json_int(state, "total_ns", (int64) t->total_ns);
+	pushJsonbValue(state, WJB_END_OBJECT, NULL);
+}
+
+typedef struct PwetSnapshotArg
+{
+	JsonbInState *state;
+	PwetNameContext names;
+} PwetSnapshotArg;
+
+static void
+pwet_snapshot_visitor(uint32 info, const PwetTotal *t, void *arg)
+{
+	PwetSnapshotArg *sa = (PwetSnapshotArg *) arg;
+	const char *type;
+	const char *name;
+
+	pwet_event_names(info, &sa->names, &type, &name);
+	pushJsonbValue(sa->state, WJB_BEGIN_OBJECT, NULL);
+	pwet_json_int(sa->state, "event_key", (int64) info);
+	pwet_json_str(sa->state, "type", type);
+	pwet_json_str(sa->state, "name", name);
+	pwet_json_int(sa->state, "calls", (int64) t->calls);
+	pwet_json_int(sa->state, "total_ns", (int64) t->total_ns);
+	pushJsonbValue(sa->state, WJB_END_OBJECT, NULL);
+}
+
+/*
+ * SQL function: pg_wait_event_snapshot() RETURNS jsonb
+ *
+ * The totals since the last reset as one document with exact integers:
+ * schema_version, incarnation, reset_generation, scan_start and scan_end
+ * (wall-clock microseconds since 2000-01-01, taken before and after the
+ * scan), the transaction counters, the two overflow pairs and the events
+ * [{event_key, type, name, calls, total_ns}].  Valid with zero events.
+ * Errors like the totals view.
+ */
+Datum
+pg_wait_event_snapshot(PG_FUNCTION_ARGS)
+{
+	PwetTotalsScan *scan = palloc(sizeof(PwetTotalsScan));
+	PwetReadMeta meta;
+	bool		negative;
+	JsonbInState state;
+	PwetSnapshotArg sa;
+
+	pwet_totals_read(scan, &meta, &negative);
+	pwet_totals_check(scan, negative);
+
+	memset(&state, 0, sizeof(state));
+	pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+	pwet_json_int(&state, "schema_version", 1);
+	pwet_json_str(&state, "incarnation",
+				  psprintf("%016" PRIx64, pwet_totals_header->incarnation));
+	pwet_json_int(&state, "reset_generation", (int64) meta.generation);
+	pwet_json_int(&state, "scan_start", (int64) meta.scan_start);
+	pwet_json_int(&state, "scan_end", (int64) meta.scan_end);
+	pwet_json_int(&state, "xact_commit", (int64) scan->xact_commit);
+	pwet_json_int(&state, "xact_abort", (int64) scan->xact_abort);
+	pwet_json_int(&state, "xact_prepare", (int64) scan->xact_prepare);
+	pwet_json_pair(&state, "lwlock_overflow", &scan->lwlock_overflow);
+	pwet_json_pair(&state, "flat_overflow", &scan->flat_overflow);
+
+	pwet_json_key(&state, "events");
+	pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+	sa.state = &state;
+	memset(&sa.names, 0, sizeof(sa.names));
+	pwet_visit_events(scan, pwet_snapshot_visitor, &sa);
+	pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+
+	pushJsonbValue(&state, WJB_END_OBJECT, NULL);
+	pfree(scan);
+	PG_RETURN_POINTER(JsonbValueToJsonb(state.result));
+}
+
+/*
+ * Flushes the pending wait, if any, before zeroing: the wait already
+ * happened and, per the decision document, its recorded values must not
+ * be lost, so it is accounted first and then immediately wiped by the
+ * reset below, exactly as it would have been (recorded, then reset) had
+ * pg_stat_reset_wait_event_timing() run in a later statement instead of
+ * landing between the wait and its flush.  Its trace record, if any, is
+ * unaffected by a stats reset and is left standing.
+ */
+static void
+pwet_reset_own(void)
+{
+	pwet_flush_pending();
+
+	if (pwet_my_stats != NULL)
+	{
+		pwet_stats_reset(pwet_my_stats);
+		pwet_current_event = 0;
+		INSTR_TIME_SET_ZERO(pwet_wait_start);
+	}
+}
+
+/*
+ * Replicate the target-authorization checks of pg_signal_backend() in
+ * src/backend/storage/ipc/signalfuncs.c: a non-superuser cannot touch a
+ * superuser-owned or role-less target, and otherwise needs privileges of
+ * the target role or of pg_signal_backend.  Unlike pg_signal_backend(),
+ * there is no separate carve-out for autovacuum workers: they are
+ * role-less, so they already require superuser here, which is the more
+ * conservative choice for a function that erases diagnostic state.
+ */
+static void
+pwet_check_reset_privileges(Oid target_role)
+{
+	if (!OidIsValid(target_role) || superuser_arg(target_role))
+	{
+		if (!superuser())
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to reset another backend's wait event timing statistics"),
+					 errdetail("Only roles with the %s attribute may reset statistics of a superuser-owned or role-less backend.",
+							   "SUPERUSER")));
+	}
+	else if (!has_privs_of_role(GetUserId(), target_role) &&
+			 !has_privs_of_role(GetUserId(), ROLE_PG_SIGNAL_BACKEND))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to reset another backend's wait event timing statistics"),
+				 errdetail("Only roles with privileges of the target role or the \"%s\" role may reset another backend's wait event timing statistics.",
+						   "pg_signal_backend")));
+}
+
+/*
+ * Request an asynchronous reset on the given slot, if it is still owned by
+ * target_pid/target_start.  The owning backend notices at its next
+ * wait_end() (see pwet_wait_end()) and clears its own counters.
+ *
+ * target_pid/target_start were captured by the caller when it resolved the
+ * pid to a ProcNumber, which can be arbitrarily far in the past by the time
+ * we get the lock (ProcArrayLock was already released by then).  Re-checking
+ * the owner token under the same lock that publishes the request is what
+ * prevents the request from landing on a successor that has since reused
+ * this ProcNumber (a bare "does this slot have a payload" check is not
+ * enough: the successor could be capturing too).
+ */
+static void
+pwet_request_reset(int procnumber, int target_pid, TimestampTz target_start)
+{
+	PwetSlot   *slot = &pwet_ctl[procnumber];
+
+	INJECTION_POINT("pg-wait-event-tracing-reset-before-publish", NULL);
+
+	LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+	if (slot->owner_pid == target_pid && slot->owner_start == target_start)
+		pg_atomic_fetch_add_u32(&slot->reset_generation, 1);
+	LWLockRelease(pwet_lock);
+}
+
+/*
+ * SQL function: pg_stat_reset_wait_event_timing(pid int4)
+ *
+ *   NULL or own pid : reset the caller's own counters synchronously.
+ *   another pid     : request a cross-backend reset, subject to the same
+ *                      target authorization as pg_signal_backend().
+ *   unknown pid     : silent no-op (matching pg_signal_backend()'s WARNING).
+ *   auxiliary pid   : rejected -- BackendPidGetProc() only resolves normal
+ *                      backends, so this falls out of the same check.
+ */
+Datum
+pg_stat_reset_wait_event_timing(PG_FUNCTION_ARGS)
+{
+	int			target_pid;
+	PGPROC	   *proc;
+	int			procnumber;
+	PgBackendStatus *beentry;
+
+	if (PG_ARGISNULL(0) || PG_GETARG_INT32(0) == MyProcPid)
+	{
+		pwet_reset_own();
+		PG_RETURN_VOID();
+	}
+
+	target_pid = PG_GETARG_INT32(0);
+
+	proc = BackendPidGetProc(target_pid);
+	if (proc == NULL)
+	{
+		/* Matches pg_signal_backend(): unknown pid or auxiliary process. */
+		ereport(WARNING,
+				(errmsg("PID %d is not a PostgreSQL backend process",
+						target_pid)));
+		PG_RETURN_VOID();
+	}
+
+	procnumber = GetNumberFromPGProc(proc);
+	if (procnumber < 0 || procnumber >= PWET_NUM_SLOTS)
+		PG_RETURN_VOID();
+
+	pwet_check_reset_privileges(proc->roleId);
+
+	beentry = pgstat_get_beentry_by_proc_number(procnumber);
+	if (beentry == NULL || beentry->st_procpid != target_pid)
+		PG_RETURN_VOID();		/* gone by the time we got here */
+
+	pwet_request_reset(procnumber, target_pid,
+					   beentry->st_proc_start_timestamp);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_stat_reset_wait_event_timing_all()
+ *
+ * Request a reset on every slot.  Superuser-only: unlike the single-pid
+ * form, this is not delegable by granting EXECUTE, matching the "_all()
+ * superuser-only" policy regardless of what the extension script's default
+ * REVOKE/GRANT state happens to be.
+ */
+Datum
+pg_stat_reset_wait_event_timing_all(PG_FUNCTION_ARGS)
+{
+	int			i;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to reset wait event timing statistics for all backends"),
+				 errdetail("Only roles with the %s attribute may reset statistics for all backends.",
+						   "SUPERUSER")));
+
+	/*
+	 * Unlike the single-pid form, there is no specific owner to re-check:
+	 * bumping an unowned slot's reset_generation is harmless (nothing
+	 * consumes it), and a slot that gets a new owner concurrently either
+	 * sees this generation already accounted for at attach time or picks up
+	 * the bump at its first wait_end, which is a fine outcome either way for
+	 * an operation whose contract is "every backend", not "this backend".
+	 */
+	LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+	for (i = 0; i < PWET_NUM_SLOTS; i++)
+		pg_atomic_fetch_add_u32(&pwet_ctl[i].reset_generation, 1);
+	LWLockRelease(pwet_lock);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_wait_event_tracing_capacity()
+ *
+ * One row per dense class plus one for LWLock (whose effective capacity is
+ * the max_tranches GUC, not a table entry, since LWLock waits go through a
+ * per-backend hash rather than the flat per-event array).  Meant to be
+ * compared against "SELECT type, count(*) FROM pg_wait_events GROUP BY
+ * type" by the module's regression test, which fails when any class is
+ * within 4 of its capacity.
+ */
+Datum
+pg_wait_event_tracing_capacity(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Datum		values[2];
+	bool		nulls[2] = {0};
+	int			i;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	for (i = 0; i < PWET_DENSE_CLASSES; i++)
+	{
+		values[0] = CStringGetTextDatum(pwet_class_names[i]);
+		values[1] = Int32GetDatum(pwet_class_nevents[i]);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	values[0] = CStringGetTextDatum("LWLock");
+	values[1] = Int32GetDatum(pwet_max_tranches);
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * SQL function: pg_wait_event_tracing_hooks_installed()
+ *
+ * Diagnostic for the lazy, per-process hook installation (see
+ * pwet_install_wait_hooks()): true if the calling backend has installed
+ * its own wait_event_begin_hook/wait_event_end_hook, false if it never has
+ * (capture has been off in this process since it started).  Reveals
+ * nothing about any other backend or about what is being recorded, so it
+ * is granted to PUBLIC, like pg_wait_event_tracing_capacity().
+ */
+Datum
+pg_wait_event_tracing_hooks_installed(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(pwet_wait_hooks_installed);
+}
+
+/* Decoded, SRF-shaped view of one trace record; see pwet_decode_trace_record(). */
+typedef struct PwetTraceRowFields
+{
+	const char *event_type;
+	const char *event_name;
+	double		duration_us;
+	int64		query_id;
+	int32		depth;
+} PwetTraceRowFields;
+
+/*
+ * Decode one trace record's record_type into the SRF's output row shape.
+ * Shared by the own-session and cross-backend readers.  Returns false
+ * (nothing should be emitted) for a record_type this build does not
+ * recognise (defensive; cannot happen with the type list below) or, for
+ * PWET_TRACE_WAIT, an event id of 0 (a record whose duration/event fields
+ * were never filled in -- cannot happen either, since the writer only
+ * ever completes a record after filling them, but kept as a defensive
+ * symmetry with the seqlock check itself).
+ */
+static bool
+pwet_decode_trace_record(PwetTraceRecord *rec, PwetTraceRowFields *out)
+{
+	out->duration_us = 0;
+	out->query_id = 0;
+	out->depth = 0;
+
+	switch (rec->record_type)
+	{
+		case PWET_TRACE_WAIT:
+			if (rec->data.wait.event == 0)
+				return false;
+			out->event_type = pgstat_get_wait_event_type(rec->data.wait.event);
+			out->event_name = pgstat_get_wait_event(rec->data.wait.event);
+			out->duration_us = (double) rec->data.wait.duration_ns / 1000.0;
+			break;
+		case PWET_TRACE_QUERY_START:
+			out->event_type = "Query";
+			out->event_name = "QueryStart";
+			out->query_id = rec->data.marker.query_id;
+			out->depth = (int32) rec->data.marker.depth;
+			break;
+		case PWET_TRACE_EXEC_START:
+			out->event_type = "Query";
+			out->event_name = "ExecStart";
+			out->query_id = rec->data.marker.query_id;
+			out->depth = (int32) rec->data.marker.depth;
+			break;
+		case PWET_TRACE_EXEC_END:
+			out->event_type = "Query";
+			out->event_name = "ExecEnd";
+			out->query_id = rec->data.marker.query_id;
+			out->depth = (int32) rec->data.marker.depth;
+			break;
+		case PWET_TRACE_UTILITY_START:
+			out->event_type = "Query";
+			out->event_name = "UtilityStart";
+			out->query_id = rec->data.marker.query_id;
+			out->depth = (int32) rec->data.marker.depth;
+			break;
+		case PWET_TRACE_UTILITY_END:
+			out->event_type = "Query";
+			out->event_name = "UtilityEnd";
+			out->query_id = rec->data.marker.query_id;
+			out->depth = (int32) rec->data.marker.depth;
+			break;
+		case PWET_TRACE_TXN_COMMIT:
+			out->event_type = "Query";
+			out->event_name = "TxnCommit";
+			out->depth = (int32) rec->data.marker.depth;
+			break;
+		case PWET_TRACE_TXN_ABORT:
+			out->event_type = "Query";
+			out->event_name = "TxnAbort";
+			out->depth = (int32) rec->data.marker.depth;
+			break;
+		case PWET_TRACE_IDLE:
+			out->event_type = "Query";
+			out->event_name = "Idle";
+			break;
+		case PWET_TRACE_IDLE_IN_XACT:
+			out->event_type = "Query";
+			out->event_name = "IdleInTransaction";
+			break;
+		default:
+			return false;
+	}
+
+	return out->event_type != NULL && out->event_name != NULL;
+}
+
+/* Own-session row shape: no owner_pid column (it is always MyProcPid). */
+static void
+pwet_emit_trace_row(ReturnSetInfo *rsinfo, uint64 ring_index,
+					PwetTraceRecord *rec)
+{
+	PwetTraceRowFields f;
+	Datum		values[7];
+	bool		nulls[7] = {0};
+
+	if (!pwet_decode_trace_record(rec, &f))
+		return;
+
+	values[0] = Int64GetDatum((int64) ring_index);
+	values[1] = Int64GetDatum(rec->timestamp_ns);
+	values[2] = CStringGetTextDatum(f.event_type);
+	values[3] = CStringGetTextDatum(f.event_name);
+	values[4] = Float8GetDatum(f.duration_us);
+	values[5] = Int64GetDatum(f.query_id);
+	values[6] = Int32GetDatum(f.depth);
+
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+/*
+ * Cross-backend row shape: leads with owner_pid, the pid of the ring's
+ * producer -- live or, for an ORPHANED ring (fix 3), the pid it had before
+ * it exited -- so a caller can identify a post-mortem ring's origin
+ * without a second lookup that would fail anyway (the producer's
+ * PgBackendStatus entry no longer exists once it has exited).
+ */
+static void
+pwet_emit_trace_row_for_procnumber(ReturnSetInfo *rsinfo, int owner_pid,
+								   uint64 ring_index, PwetTraceRecord *rec)
+{
+	PwetTraceRowFields f;
+	Datum		values[8];
+	bool		nulls[8] = {0};
+
+	if (!pwet_decode_trace_record(rec, &f))
+		return;
+
+	values[0] = Int32GetDatum(owner_pid);
+	values[1] = Int64GetDatum((int64) ring_index);
+	values[2] = Int64GetDatum(rec->timestamp_ns);
+	values[3] = CStringGetTextDatum(f.event_type);
+	values[4] = CStringGetTextDatum(f.event_name);
+	values[5] = Float8GetDatum(f.duration_us);
+	values[6] = Int64GetDatum(f.query_id);
+	values[7] = Int32GetDatum(f.depth);
+
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+/*
+ * SQL function: pg_get_backend_wait_event_trace()
+ *
+ * Own-session trace ring reader.  No lock needed: this backend is the
+ * ring's sole writer, and it is reading its own memory.  Flushes its own
+ * pending wait first, so a wait completed by, e.g., pg_sleep() earlier in
+ * the same statement is always visible here immediately, without waiting
+ * for the next flush point (see the module comment / commit message).
+ */
+Datum
+pg_get_backend_wait_event_trace(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	uint64		write_pos;
+	uint64		read_start;
+	uint64		ring_size;
+	uint64		i;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	pwet_maybe_attach();
+	pwet_flush_pending();
+	if (pwet_my_trace == NULL)
+		PG_RETURN_VOID();
+
+	write_pos = pg_atomic_read_u64(&pwet_my_trace->write_pos);
+	if (write_pos == 0)
+		PG_RETURN_VOID();
+
+	ring_size = (uint64) pwet_my_trace->ring_mask + 1;
+	read_start = write_pos > ring_size ? write_pos - ring_size : 0;
+
+	for (i = read_start; i < write_pos; i++)
+	{
+		PwetTraceRecord *rec = &pwet_my_trace->records[i & pwet_my_trace->ring_mask];
+		uint32		expected_seq = (uint32) (i * 2 + 2);
+		uint32		seq_before;
+		uint32		seq_after;
+		PwetTraceRecord copy;
+
+		seq_before = rec->seq;
+		pg_read_barrier();
+		if (seq_before != expected_seq)
+			continue;
+		copy = *rec;
+		pg_read_barrier();
+		seq_after = rec->seq;
+		if (seq_after != expected_seq)
+			continue;
+
+		pwet_emit_trace_row(rsinfo, i, &copy);
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * Snapshot procnumber's trace ring and emit its records into the SRF's
+ * tuplestore.  Returns silently for a FREE slot or an empty ring.
+ *
+ * Cross-backend reader protocol (ported from v6's
+ * emit_wait_event_trace_for_procnumber(), same rationale throughout,
+ * INCLUDING v6's own lock-scope discipline -- an earlier version of this
+ * function held pwet_lock across the tuplestore_putvalues() loop too,
+ * which defeated the whole point of buffering locally first; fixed on
+ * review):
+ *   1. Allocate the worst-case result buffer -- sized from
+ *      pwet_trace_records_per_ring, the cluster-wide ring capacity every
+ *      ring shares, not from this specific ring (not yet resolved) --
+ *      BEFORE taking any lock: a palloc this size can bottom out in a
+ *      glibc mmap() syscall, and doing that while holding pwet_lock would
+ *      serialise every concurrent attach/release/reset/orphan-sweep
+ *      through one VMA-modifying kernel operation.
+ *   2. Acquire pwet_lock LW_SHARED; every trace_state/trace_ptr transition
+ *      (pwet_attach_trace(), pwet_release_trace(), pwet_orphan_trace(),
+ *      the orphan sweep) takes it LW_EXCLUSIVE, so the ring's identity and
+ *      address are stable for the whole iteration.
+ *   3. Re-check trace_state under the lock and resolve the ring address.
+ *   4. Walk [read_start, write_pos): for each position, the
+ *      POSITION-ENCODED IDENTITY seqlock check against shared memory (NOT
+ *      just parity -- see v6's WaitEventTraceRecord seqlock comment for
+ *      why parity alone accepts a stale previous-cycle record after a
+ *      wraparound): a record at ring index i is valid only if its seq
+ *      equals (uint32)(i*2+2), read before AND after copying the record,
+ *      with a read barrier on each side.
+ *   5. Release the lock -- BEFORE emitting a single row: a 4 MB default
+ *      ring is up to 131072 rows, and tuplestore_putvalues() can spill to
+ *      disk for a large result, none of which should happen while every
+ *      other backend's attach/release/reset/orphan-sweep is blocked on
+ *      this lock.
+ *
+ * Both ACTIVE and ORPHANED slots are read the same way: for ACTIVE, the
+ * live owner is concurrently appending and the seqlock catches torn
+ * reads; for ORPHANED, the ring is immutable post-mortem data, so the
+ * check is a pass-through (it still correctly skips one trailing
+ * odd-seq record if the owner died mid-write).
+ */
+static void
+emit_wait_event_trace(int procnumber, ReturnSetInfo *rsinfo)
+{
+	PwetSlot   *slot = &pwet_ctl[procnumber];
+	PwetTraceState *ts;
+	uint64		write_pos;
+	uint64		read_start;
+	uint64		ring_size;
+	uint64		i;
+	PwetTraceRecord *valid_records;
+	uint64	   *valid_indexes;
+	uint64		valid_count = 0;
+	int			owner_pid = 0;
+
+	if (pwet_trace_records_per_ring == 0)
+		pwet_trace_records_per_ring =
+			(uint32) pwet_trace_ring_size * 1024U /
+			(uint32) sizeof(PwetTraceRecord);
+
+	/* See point 1 above: sized from the cluster-wide capacity, no lock yet. */
+	valid_records = palloc(sizeof(PwetTraceRecord) * pwet_trace_records_per_ring);
+	valid_indexes = palloc(sizeof(uint64) * pwet_trace_records_per_ring);
+
+	LWLockAcquire(pwet_lock, LW_SHARED);
+
+	if (slot->trace_state == PWET_TRACE_FREE || !DsaPointerIsValid(slot->trace_ptr))
+	{
+		LWLockRelease(pwet_lock);
+		pfree(valid_records);
+		pfree(valid_indexes);
+		return;
+	}
+
+	ts = dsa_get_address(pwet_trace_dsa, slot->trace_ptr);
+	owner_pid = slot->trace_owner_pid;
+
+	write_pos = pg_atomic_read_u64(&ts->write_pos);
+	if (write_pos == 0)
+	{
+		LWLockRelease(pwet_lock);
+		pfree(valid_records);
+		pfree(valid_indexes);
+		return;
+	}
+
+	ring_size = (uint64) ts->ring_mask + 1;
+	read_start = write_pos > ring_size ? write_pos - ring_size : 0;
+
+	for (i = read_start; i < write_pos; i++)
+	{
+		PwetTraceRecord *rec_shared = &ts->records[i & ts->ring_mask];
+		uint32		expected_seq = (uint32) (i * 2 + 2);
+		uint32		seq_before;
+		uint32		seq_after;
+
+		seq_before = rec_shared->seq;
+		pg_read_barrier();
+		if (seq_before != expected_seq)
+			continue;
+		valid_records[valid_count] = *rec_shared;
+		pg_read_barrier();
+		seq_after = rec_shared->seq;
+		if (seq_after != expected_seq)
+			continue;
+		valid_indexes[valid_count] = i;
+		valid_count++;
+	}
+
+	LWLockRelease(pwet_lock);
+
+	/* No shared-memory access below: safe to run unlocked, even a spill. */
+	for (i = 0; i < valid_count; i++)
+		pwet_emit_trace_row_for_procnumber(rsinfo, owner_pid,
+										   valid_indexes[i], &valid_records[i]);
+
+	pfree(valid_records);
+	pfree(valid_indexes);
+}
+
+/*
+ * SQL function: pg_get_wait_event_trace(procnumber int4)
+ *
+ * Cross-backend trace ring reader.  Returns the records belonging to
+ * whichever backend currently or previously occupied procnumber's trace
+ * slot, each tagged with that backend's pid (owner_pid; see
+ * pwet_emit_trace_row_for_procnumber()); FREE slots (never traced, or
+ * already swept) return an empty result.  This is the in-tree consumer of
+ * orphan-preserved data (fix 3): a backend that exited while capture =
+ * trace leaves its ring ORPHANED, readable here (with its last-known pid
+ * still attached) until a successor reclaims the slot or
+ * pg_stat_clear_orphaned_wait_event_rings() sweeps it.
+ *
+ * When procnumber is the CALLING backend's own, this flushes its own
+ * pending wait first, for the same reason pg_get_backend_wait_event_trace()
+ * does: this function (and pg_wait_event_trace_by_statement(), built on
+ * top of it in the extension script) is the only way a backend can read
+ * its own ring by procnumber rather than through the dedicated own-session
+ * reader, and it must show the same "always see your own completed waits"
+ * behavior either way.  A procnumber belonging to any other backend is
+ * the genuine cross-backend case, unaffected: only that backend's own next
+ * flush point can ever move its own pending record into its own ring.
+ */
+Datum
+pg_get_wait_event_trace(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int32		procnumber = PG_GETARG_INT32(0);
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (procnumber < 0 || procnumber >= PWET_NUM_SLOTS)
+		PG_RETURN_VOID();
+
+	if (procnumber == MyProcNumber)
+		pwet_flush_pending();
+
+	/* Unlocked fast-path: skip a FREE slot without taking the lock. */
+	if (pwet_ctl[procnumber].trace_state == PWET_TRACE_FREE)
+		PG_RETURN_VOID();
+
+	if (!pwet_ensure_trace_dsa())
+		PG_RETURN_VOID();
+
+	emit_wait_event_trace(procnumber, rsinfo);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * Transition this backend's trace ring to ORPHANED on process exit (fix
+ * 3), instead of freeing it: trace_owner_pid/trace_owner_start are left
+ * untouched (they already identify this process, the one now exiting),
+ * so pg_get_wait_event_trace() keeps attributing the ring to its producer
+ * post-mortem, like a flight recorder.  A successor that later claims
+ * this ProcNumber and attaches trace reclaims (frees) the orphan in
+ * pwet_attach_trace(); pg_stat_clear_orphaned_wait_event_rings() lets an
+ * administrator sweep every orphan explicitly, for procnumbers that
+ * never get reused (e.g. a long-lived connection pool with capture
+ * briefly enabled).  Nothing runs at process start to reclaim an orphan
+ * earlier (contrast v6's now-removed clear-orphan-at-init step, whose
+ * EXEC_BACKEND ordering bug was V6-3): reclaim happens lazily, at the
+ * successor's own trace attach, which is always a safe point -- so
+ * EXEC_BACKEND's relative ordering of shared-memory attachment and
+ * backend initialization cannot matter here.
+ *
+ * Flushes the pending wait, if any, before orphaning: the ring is about
+ * to become immutable post-mortem data, so this is the last chance to
+ * append a still-pending trace record to it (see pwet_flush_pending()'s
+ * comment).
+ */
+static void
+pwet_orphan_trace(void)
+{
+	PwetSlot   *slot;
+	ProcNumber	procno = pwet_my_procno;
+
+	pwet_flush_pending();
+
+	if (pwet_my_trace == NULL || procno == INVALID_PROC_NUMBER)
+	{
+		pwet_my_trace = NULL;
+		pwet_update_rec_pointers();
+		return;
+	}
+
+	pwet_my_trace = NULL;
+	pwet_update_rec_pointers();
+	slot = &pwet_ctl[procno];
+
+	LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+	if (DsaPointerIsValid(slot->trace_ptr))
+	{
+		slot->trace_state = PWET_TRACE_ORPHANED;
+		pg_atomic_fetch_add_u32(&slot->generation, 1);
+	}
+	LWLockRelease(pwet_lock);
+}
+
+/*
+ * SQL function: pg_stat_clear_orphaned_wait_event_rings()
+ *
+ * Free every trace ring whose owner has exited (trace_state ORPHANED).
+ * Superuser-only in C, matching this module's pg_stat_reset_wait_event_
+ * timing_all() (fix 4's C-level hard-superuser policy for cluster-scope
+ * mutating admin functions, rather than v6's plain SQL-level REVOKE-only
+ * default): this operation, like that one, can disrupt any concurrent
+ * cross-backend reader of any orphan.
+ *
+ * Per-slot lock acquire/release rather than one lock held across the
+ * whole sweep, so a long sweep never holds pwet_lock for more than one
+ * slot's worth of work at a time; CHECK_FOR_INTERRUPTS() lets a caller
+ * cancel a long sweep between slots.  An unlocked fast-path skips a
+ * non-ORPHANED slot without taking the lock at all; the authoritative
+ * re-check under the lock means a concurrent reclaim by a successor's own
+ * attach is never raced (we only ever free a slot we ourselves saw, and
+ * re-saw under the lock, as ORPHANED).
+ */
+Datum
+pg_stat_clear_orphaned_wait_event_rings(PG_FUNCTION_ARGS)
+{
+	int64		freed = 0;
+	int			i;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to clear orphaned wait event trace rings"),
+				 errdetail("Only roles with the %s attribute may free orphaned trace rings.",
+						   "SUPERUSER")));
+
+	if (!pwet_ensure_trace_dsa())
+		PG_RETURN_INT64(0);
+
+	for (i = 0; i < PWET_NUM_SLOTS; i++)
+	{
+		PwetSlot   *slot = &pwet_ctl[i];
+
+		CHECK_FOR_INTERRUPTS();
+
+		/* Unlocked fast-path: skip a non-ORPHANED slot cheaply. */
+		if (slot->trace_state != PWET_TRACE_ORPHANED)
+			continue;
+
+		LWLockAcquire(pwet_lock, LW_EXCLUSIVE);
+		if (slot->trace_state == PWET_TRACE_ORPHANED &&
+			DsaPointerIsValid(slot->trace_ptr))
+		{
+			dsa_free(pwet_trace_dsa, slot->trace_ptr);
+			slot->trace_ptr = InvalidDsaPointer;
+			slot->trace_state = PWET_TRACE_FREE;
+			slot->trace_owner_pid = 0;
+			slot->trace_owner_start = 0;
+			pg_atomic_fetch_add_u32(&slot->generation, 1);
+			freed++;
+		}
+		LWLockRelease(pwet_lock);
+	}
+
+	PG_RETURN_INT64(freed);
+}
+
+void
+_PG_init(void)
+{
+	if (!process_shared_preload_libraries_in_progress)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("pg_wait_event_tracing must be loaded via \"shared_preload_libraries\"")));
+
+	DefineCustomEnumVariable("pg_wait_event_tracing.capture",
+							 "Controls wait event collection.",
+							 NULL,
+							 &pwet_capture,
+							 PWET_CAPTURE_OFF,
+							 pwet_capture_options,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL,
+							 pwet_assign_capture,
+							 NULL);
+	DefineCustomIntVariable("pg_wait_event_tracing.max_tranches",
+							"Maximum distinct LWLock tranches tracked per backend.",
+							NULL,
+							&pwet_max_tranches,
+							192,
+							16,
+							65534,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
+	DefineCustomIntVariable("pg_wait_event_tracing.trace_ring_size",
+							"Per-backend trace ring size.",
+							NULL,
+							&pwet_trace_ring_size,
+							4096,
+							8,
+							32768,
+							PGC_POSTMASTER,
+							GUC_UNIT_KB | GUC_NOT_IN_SAMPLE,
+							pwet_check_trace_ring_size,
+							NULL,
+							NULL);
+	MarkGUCPrefixReserved("pg_wait_event_tracing");
+
+	/*
+	 * Register the process-start hook point for the exit drain; see the
+	 * comment above pwet_pgstat_kind.
+	 */
+	pgstat_register_kind(PWET_PGSTAT_KIND, &pwet_pgstat_kind);
+
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = pwet_shmem_request;
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = pwet_shmem_startup;
+
+	/*
+	 * The wait-event begin/end hooks are NOT installed here: they are
+	 * installed lazily, per process, the first time this process's own
+	 * pwet_assign_capture() sees capture become non-off -- see
+	 * pwet_install_wait_hooks().  A process that never enables capture
+	 * never pays the indirect-call overhead on its timed waits.
+	 */
+	prev_post_parse_analyze_hook = post_parse_analyze_hook;
+	post_parse_analyze_hook = pwet_post_parse_analyze;
+	prev_planner_hook = planner_hook;
+	planner_hook = pwet_planner;
+	prev_ExecutorStart_hook = ExecutorStart_hook;
+	ExecutorStart_hook = pwet_ExecutorStart;
+	prev_ExecutorRun_hook = ExecutorRun_hook;
+	ExecutorRun_hook = pwet_ExecutorRun;
+	prev_ExecutorFinish_hook = ExecutorFinish_hook;
+	ExecutorFinish_hook = pwet_ExecutorFinish;
+	prev_ExecutorEnd_hook = ExecutorEnd_hook;
+	ExecutorEnd_hook = pwet_ExecutorEnd;
+	prev_ProcessUtility_hook = ProcessUtility_hook;
+	ProcessUtility_hook = pwet_ProcessUtility;
+
+	pwet_active = true;
+	pwet_attach_needed = (pwet_capture != PWET_CAPTURE_OFF);
+}
+
+#ifdef USE_ASSERT_CHECKING
+
+/*
+ * Assert-build-only test entry points.  They are NOT part of the extension
+ * script; t/008_lwlock_table.pl and t/009_stats_stress.pl create the SQL
+ * functions themselves (CREATE FUNCTION ... AS 'pg_wait_event_tracing',
+ * '<symbol>').  The first two exercise static functions on private
+ * payloads, so no real lock contention or server timing is needed.
+ */
+PG_FUNCTION_INFO_V1(pwet_test_lwlock_table);
+PG_FUNCTION_INFO_V1(pwet_test_struct_seq);
+PG_FUNCTION_INFO_V1(pwet_test_new_tranches);
+PG_FUNCTION_INFO_V1(pwet_test_waits);
+
+#define PWET_TEST_CHECK(cond) \
+	do { \
+		if (!(cond)) \
+			elog(ERROR, "pwet test check failed: %s (line %d)", \
+				 #cond, __LINE__); \
+	} while (0)
+
+static PwetStats *
+pwet_test_new_payload(int max_entries)
+{
+	PwetStats  *p = palloc0(pwet_stats_payload_size(max_entries));
+
+	pg_atomic_init_u32(&p->struct_seq, 0);
+	pwet_stats_reinit(p, max_entries);
+	return p;
+}
+
+/* Find (or insert) key; if expect_count >= 0, also check its row's count. */
+static bool
+pwet_test_find(PwetStats *p, uint16 key, int64 expect_count)
+{
+	PwetTimingEntry *e = pwet_lwlock_lookup(p, key);
+
+	if (e == NULL)
+		return false;
+	if (expect_count >= 0)
+		return e->count == expect_count;
+	return true;
+}
+
+/*
+ * Fix 1: a full table keeps finding every admitted tranche, however far it
+ * sits from its home slot.  hash_size 32, max_entries 16, keys base + 32 * k
+ * all share one home slot, so the cluster is 16 long and wraps around the
+ * end of the hash array.
+ */
+Datum
+pwet_test_lwlock_table(PG_FUNCTION_ARGS)
+{
+	PwetStats  *p = pwet_test_new_payload(16);
+	PwetLWLockHashEntry *entries = pwet_lwlock_hash_entries(p);
+	int			round;
+	int			k;
+
+	PWET_TEST_CHECK(p->lwlock_hash.hash_size == 32);
+	PWET_TEST_CHECK(p->lwlock_hash.max_entries == 16);
+
+	for (round = 0; round < 2; round++)
+	{
+		/* Round 0 uses keys 1 + 32k; round 1 (after a clear) 2 + 32k. */
+		int			base = 1 + round;
+
+		for (k = 0; k < 16; k++)
+		{
+			PwetTimingEntry *e = pwet_lwlock_lookup(p, base + 32 * k);
+
+			PWET_TEST_CHECK(e != NULL);
+			PWET_TEST_CHECK(e == &pwet_lwlock_hash_events(p)[k]);
+			e->count = k + 1;
+		}
+		PWET_TEST_CHECK(p->lwlock_hash.num_used == 16);
+
+		/* Table full: every admitted key must still be found, unchanged. */
+		for (k = 0; k < 16; k++)
+			PWET_TEST_CHECK(pwet_test_find(p, base + 32 * k, k + 1));
+		PWET_TEST_CHECK(p->lwlock_hash.num_used == 16);
+
+		/* A key never admitted is refused without changing occupancy. */
+		PWET_TEST_CHECK(pwet_lwlock_lookup(p, base + 32 * 16) == NULL);
+		PWET_TEST_CHECK(p->lwlock_hash.num_used == 16);
+		PWET_TEST_CHECK(pwet_test_find(p, base + 32 * 15, 16));
+
+		/* Round 0's cluster (home slot 17) wraps past the array's end. */
+		if (round == 0)
+			PWET_TEST_CHECK(entries[0].tranche_id != PWET_LWLOCK_EMPTY);
+
+		/* Clear, then refill with the other key set. */
+		pwet_stats_reset(p);
+		PWET_TEST_CHECK(p->lwlock_hash.num_used == 0);
+		for (k = 0; k < 32; k++)
+			PWET_TEST_CHECK(entries[k].tranche_id == PWET_LWLOCK_EMPTY);
+		PWET_TEST_CHECK(pwet_lwlock_hash_events(p)[0].count == 0);
+	}
+
+	PG_RETURN_VOID();
+}
+
+static void
+pwet_test_bump_seq(PwetStats *src)
+{
+	pwet_struct_begin(src);
+	pwet_struct_end(src);
+}
+
+/*
+ * Fixes 2/3: structural sequence counter and reader validation.
+ */
+Datum
+pwet_test_struct_seq(PG_FUNCTION_ARGS)
+{
+	Size		len = pwet_stats_payload_size(pwet_max_tranches);
+	PwetStats  *p = pwet_test_new_payload(pwet_max_tranches);
+	PwetStats  *snap = palloc(len);
+	int64		a;
+	int64		b;
+	int64		c;
+	uint32		s0;
+	uint32		s1;
+	int			i;
+
+	/* A fresh payload is even and valid. */
+	s0 = pg_atomic_read_u32(&p->struct_seq);
+	PWET_TEST_CHECK((s0 & 1) == 0);
+	PWET_TEST_CHECK(pwet_copy_stable(p, snap, len));
+	PWET_TEST_CHECK(pwet_snapshot_valid(snap));
+
+	/* Insertion leaves it even and increased; a hit leaves it unchanged. */
+	PWET_TEST_CHECK(pwet_lwlock_lookup(p, 7) != NULL);
+	s1 = pg_atomic_read_u32(&p->struct_seq);
+	PWET_TEST_CHECK((s1 & 1) == 0 && s1 > s0);
+	PWET_TEST_CHECK(pwet_lwlock_lookup(p, 7) != NULL);
+	PWET_TEST_CHECK(pg_atomic_read_u32(&p->struct_seq) == s1);
+	PWET_TEST_CHECK(pwet_lwlock_lookup(p, 9) != NULL);
+	PWET_TEST_CHECK(pwet_lwlock_lookup(p, 7) != NULL);
+	PWET_TEST_CHECK(pwet_copy_stable(p, snap, len));
+	PWET_TEST_CHECK(pwet_snapshot_valid(snap));
+	PWET_TEST_CHECK(snap->lwlock_hash.num_used == 2);
+
+	/* Reset leaves it even and increased. */
+	s0 = pg_atomic_read_u32(&p->struct_seq);
+	pwet_stats_reset(p);
+	s1 = pg_atomic_read_u32(&p->struct_seq);
+	PWET_TEST_CHECK((s1 & 1) == 0 && s1 > s0);
+
+	/* Reinitialization (fixed-slot re-claim) advances it, never rewinds. */
+	s0 = s1;
+	pwet_stats_reinit(p, pwet_max_tranches);
+	s1 = pg_atomic_read_u32(&p->struct_seq);
+	PWET_TEST_CHECK((s1 & 1) == 0 && s1 > s0);
+
+	/* Reader rejects an odd sequence. */
+	pg_atomic_write_u32(&p->struct_seq, s1 + 1);
+	PWET_TEST_CHECK(!pwet_copy_stable(p, snap, len));
+	PWET_TEST_CHECK(!pwet_read_counters_stable(p, &a, &b, &c));
+	pg_atomic_write_u32(&p->struct_seq, s1);
+	PWET_TEST_CHECK(pwet_copy_stable(p, snap, len));
+	PWET_TEST_CHECK(pwet_read_counters_stable(p, &a, &b, &c));
+
+	/* Reader rejects a copy that a structural change overlapped. */
+	pwet_test_copy_hook = pwet_test_bump_seq;
+	PWET_TEST_CHECK(!pwet_copy_stable(p, snap, len));
+	pwet_test_copy_hook = NULL;
+	PWET_TEST_CHECK(pwet_copy_stable(p, snap, len));
+
+	/* Validation: dense_idx >= num_used is rejected. */
+	PWET_TEST_CHECK(pwet_lwlock_lookup(p, 5) != NULL);
+	PWET_TEST_CHECK(pwet_copy_stable(p, snap, len));
+	PWET_TEST_CHECK(pwet_snapshot_valid(snap));
+	for (i = 0; i < snap->lwlock_hash.hash_size; i++)
+		if (pwet_lwlock_hash_entries(snap)[i].tranche_id == 5)
+			pwet_lwlock_hash_entries(snap)[i].dense_idx = 1;
+	PWET_TEST_CHECK(!pwet_snapshot_valid(snap));
+
+	/* Validation: occupied-row count must equal num_used. */
+	PWET_TEST_CHECK(pwet_copy_stable(p, snap, len));
+	snap->lwlock_hash.num_used = 0;
+	PWET_TEST_CHECK(!pwet_snapshot_valid(snap));
+
+	/* Validation: out-of-range num_used and foreign dimensions. */
+	PWET_TEST_CHECK(pwet_copy_stable(p, snap, len));
+	snap->lwlock_hash.num_used = -1;
+	PWET_TEST_CHECK(!pwet_snapshot_valid(snap));
+	snap->lwlock_hash.num_used = snap->lwlock_hash.max_entries + 1;
+	PWET_TEST_CHECK(!pwet_snapshot_valid(snap));
+	PWET_TEST_CHECK(pwet_copy_stable(p, snap, len));
+	snap->lwlock_hash.hash_size *= 2;
+	PWET_TEST_CHECK(!pwet_snapshot_valid(snap));
+	PWET_TEST_CHECK(pwet_copy_stable(p, snap, len));
+	snap->lwlock_hash.max_entries++;
+	PWET_TEST_CHECK(!pwet_snapshot_valid(snap));
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * pwet_test_new_tranches(prefix text, n int) returns int4[]
+ *
+ * Allocate n distinct, named LWLock tranches; names are prefix || k.
+ */
+Datum
+pwet_test_new_tranches(PG_FUNCTION_ARGS)
+{
+	char	   *prefix = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	int			n = PG_GETARG_INT32(1);
+	Datum	   *ids = palloc(sizeof(Datum) * n);
+	int			k;
+
+	for (k = 0; k < n; k++)
+	{
+		char		name[NAMEDATALEN];
+
+		snprintf(name, sizeof(name), "%s%d", prefix, k);
+		ids[k] = Int32GetDatum(LWLockNewTrancheId(name));
+	}
+
+	PG_RETURN_ARRAYTYPE_P(construct_array_builtin(ids, n, INT4OID));
+}
+
+/*
+ * pwet_test_waits(ids int4[], rounds int, first int) returns void
+ *
+ * Report rounds * length(ids) synthetic LWLock waits through the real
+ * timed wait-event pair (hence through whatever hooks are installed),
+ * visiting the tranches round-robin starting at index first.
+ */
+Datum
+pwet_test_waits(PG_FUNCTION_ARGS)
+{
+	ArrayType  *arr = PG_GETARG_ARRAYTYPE_P(0);
+	int			rounds = PG_GETARG_INT32(1);
+	int			first = PG_GETARG_INT32(2);
+	int32	   *ids = (int32 *) ARR_DATA_PTR(arr);
+	int			n = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+	int			i;
+
+	for (i = 0; i < rounds * n; i++)
+	{
+		pgstat_report_wait_start_timed(PG_WAIT_LWLOCK |
+									   (uint32) ids[(first + i) % n]);
+		pgstat_report_wait_end_timed();
+	}
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(pwet_test_ledger_dictionary);
+PG_FUNCTION_INFO_V1(pwet_test_slot_counted);
+PG_FUNCTION_INFO_V1(pwet_test_read_barrier_arm);
+PG_FUNCTION_INFO_V1(pwet_test_read_barrier_waiting);
+PG_FUNCTION_INFO_V1(pwet_test_read_barrier_release);
+PG_FUNCTION_INFO_V1(pwet_test_read_retries);
+PG_FUNCTION_INFO_V1(pwet_test_totals_absolute);
+PG_FUNCTION_INFO_V1(pwet_test_ledger_set);
+PG_FUNCTION_INFO_V1(pwet_test_ledger_changecount);
+PG_FUNCTION_INFO_V1(pwet_test_ledger_torn_read);
+PG_FUNCTION_INFO_V1(pwet_test_ledger_odd_read);
+
+/* Arm the reader barrier: the next totals reader suspends after its scan. */
+Datum
+pwet_test_read_barrier_arm(PG_FUNCTION_ARGS)
+{
+	pg_atomic_write_u32(&pwet_totals_header->test_release, 0);
+	pg_atomic_write_u32(&pwet_totals_header->test_waiting, 0);
+	pg_atomic_write_u32(&pwet_totals_header->test_arm, 1);
+	PG_RETURN_VOID();
+}
+
+Datum
+pwet_test_read_barrier_waiting(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(pg_atomic_read_u32(&pwet_totals_header->test_waiting) != 0);
+}
+
+Datum
+pwet_test_read_barrier_release(PG_FUNCTION_ARGS)
+{
+	pg_atomic_write_u32(&pwet_totals_header->test_release, 1);
+	PG_RETURN_VOID();
+}
+
+/* How many times a reader found the generation moved and started over. */
+Datum
+pwet_test_read_retries(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64((int64) pg_atomic_read_u32(&pwet_totals_header->test_retries));
+}
+
+/*
+ * pwet_test_totals_absolute(event_key bigint, OUT absolute bigint, OUT baseline bigint)
+ *
+ * The sum of all ledgers for an event (no baseline subtracted) and the
+ * baseline of the last reset, so a test can check conservation: absolute
+ * equals everything emitted, and the totals view shows absolute - baseline.
+ */
+Datum
+pwet_test_totals_absolute(PG_FUNCTION_ARGS)
+{
+	uint32		key = (uint32) PG_GETARG_INT64(0);
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {0};
+	PwetTotalsScan *scan = palloc0(sizeof(PwetTotalsScan));
+	int			idx = pwet_timing_index(key);
+	const PwetTotal *base;
+	const PwetTotal *cur;
+	int64		basecalls;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	pwet_totals_scan(scan);
+	PWET_TEST_CHECK(!scan->sum_overflow);
+
+	LWLockAcquire(pwet_totals_lock, LW_SHARED);
+	if (idx == PWET_IDX_LWLOCK)
+	{
+		cur = &scan->tranche[key & PWET_WAIT_EVENT_ID_MASK];
+		base = &pwet_totals_header->baseline.tranche[key & PWET_WAIT_EVENT_ID_MASK];
+	}
+	else
+	{
+		PWET_TEST_CHECK(idx >= 0);
+		cur = &scan->flat[idx];
+		base = &pwet_totals_header->baseline.flat[idx];
+	}
+	basecalls = (int64) base->calls;
+	LWLockRelease(pwet_totals_lock);
+
+	values[0] = Int64GetDatum((int64) cur->calls);
+	values[1] = Int64GetDatum(basecalls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/* pwet_test_slot_counted(slot int) returns bool: would capturing_backends count it? */
+Datum
+pwet_test_slot_counted(PG_FUNCTION_ARGS)
+{
+	int			slot = PG_GETARG_INT32(0);
+
+	PWET_TEST_CHECK(slot >= 0 && slot < PWET_NUM_SLOTS);
+	pwet_flush_pending();
+	PG_RETURN_BOOL(pwet_slot_owner_is_live(slot));
+}
+
+/*
+ * pwet_test_ledger_dictionary() returns void
+ *
+ * The ledger dictionary on a private ledger (needs max_tranches = 16, so
+ * hash_size is 32): keys base + 32 * k share one home cell, so the 16
+ * admitted keys form a cluster that wraps around the end of the cell array.
+ * With the table full every admitted key must still be found with its
+ * count, a further key must go to the overflow pair with count and time and
+ * get no cell, and admitted keys must not move.
+ */
+Datum
+pwet_test_ledger_dictionary(PG_FUNCTION_ARGS)
+{
+	PwetLedger *l = palloc0(pwet_ledger_size(pwet_max_tranches));
+	int			home;
+	int			k;
+	int			wrapped = 0;
+	int			pos[16];
+
+	PWET_TEST_CHECK(pwet_max_tranches == 16 && pwet_ledger_hash_size == 32);
+	pg_atomic_init_u32(&l->changecount, 0);
+
+	for (k = 0; k < 16; k++)
+		pwet_ledger_add(l, PG_WAIT_LWLOCK | (1 + 32 * k), 10 + k);
+	PWET_TEST_CHECK(l->num_used == 16);
+
+	home = (uint32) 1 * 2654435761U & 31;
+	for (k = 0; k < 16; k++)
+	{
+		bool		insert;
+		PwetLedgerCell *cell = pwet_ledger_find_cell(l, 1 + 32 * k, &insert);
+
+		PWET_TEST_CHECK(cell != NULL && !insert);
+		PWET_TEST_CHECK(cell->total.calls == 1 &&
+						cell->total.total_ns == (uint64) (10 + k));
+		pos[k] = cell - l->cells;
+		if (pos[k] < home)
+			wrapped++;
+	}
+	PWET_TEST_CHECK(wrapped > 0);
+
+	/* The table is full: one more tranche overflows, with count and time. */
+	for (k = 0; k < 3; k++)
+		pwet_ledger_add(l, PG_WAIT_LWLOCK | (1 + 32 * 16), 100);
+	PWET_TEST_CHECK(l->num_used == 16);
+	PWET_TEST_CHECK(l->lwlock_overflow.calls == 3 &&
+					l->lwlock_overflow.total_ns == 300);
+	{
+		bool		insert;
+
+		PWET_TEST_CHECK(pwet_ledger_find_cell(l, 1 + 32 * 16, &insert) == NULL);
+	}
+
+	/* Admitted keys are still found, did not move, and keep counting. */
+	for (k = 0; k < 16; k++)
+	{
+		bool		insert;
+		PwetLedgerCell *cell;
+
+		pwet_ledger_add(l, PG_WAIT_LWLOCK | (1 + 32 * k), 1);
+		cell = pwet_ledger_find_cell(l, 1 + 32 * k, &insert);
+		PWET_TEST_CHECK(cell != NULL && !insert && cell - l->cells == pos[k]);
+		PWET_TEST_CHECK(cell->total.calls == 2 &&
+						cell->total.total_ns == (uint64) (11 + k));
+	}
+	PWET_TEST_CHECK(l->lwlock_overflow.calls == 3);
+	PWET_TEST_CHECK(l->invalid == 0);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * pwet_test_ledger_set(event_key bigint, calls bigint, total_ns bigint)
+ *
+ * Set this process's ledger pair of the event (or of an overflow pair: key
+ * -1 is the LWLock one, -2 the flat one) to the given values, inside the
+ * write bracket, to reach counter ranges no test could reach by emitting.
+ */
+Datum
+pwet_test_ledger_set(PG_FUNCTION_ARGS)
+{
+	int64		key = PG_GETARG_INT64(0);
+	int64		calls = PG_GETARG_INT64(1);
+	int64		total_ns = PG_GETARG_INT64(2);
+	PwetLedger *l;
+	PwetTotal  *pair;
+	PwetLedgerCell *cell = NULL;
+	bool		insert = false;
+
+	pwet_flush_pending();
+	l = pwet_get_my_ledger();
+	PWET_TEST_CHECK(l != NULL);
+
+	if (key == PWET_KEY_LWLOCK_OVERFLOW)
+		pair = &l->lwlock_overflow;
+	else if (key == PWET_KEY_FLAT_OVERFLOW)
+		pair = &l->flat_overflow;
+	else
+		pair = pwet_ledger_target(l, (uint32) key, &cell, &insert);
+	PWET_TEST_CHECK(!(pair == &l->lwlock_overflow && key >= 0) ||
+					((uint32) key & PWET_WAIT_EVENT_CLASS_MASK) == PG_WAIT_LWLOCK);
+
+	pwet_ledger_begin(l);
+	if (insert)
+	{
+		cell->tranche_plus1 = ((uint32) key & PWET_WAIT_EVENT_ID_MASK) + 1;
+		l->num_used++;
+	}
+	pair->calls = (uint64) calls;
+	pair->total_ns = (uint64) total_ns;
+	pwet_ledger_end(l);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * pwet_test_ledger_changecount(slot int, value bigint) returns bigint
+ *
+ * Return the changecount of a slot's ledger; if value >= 0, also store it
+ * (a stand-in for a writer stalled mid-update when odd, or a counter close
+ * to wraparound when set on one's own slot).
+ */
+Datum
+pwet_test_ledger_changecount(PG_FUNCTION_ARGS)
+{
+	int			slot = PG_GETARG_INT32(0);
+	int64		value = PG_GETARG_INT64(1);
+	PwetLedger *l;
+	uint32		old;
+
+	PWET_TEST_CHECK(slot >= 0 && slot < PWET_NUM_SLOTS);
+	pwet_flush_pending();
+	l = pwet_ledger_at(slot);
+	old = pg_atomic_read_u32(&l->changecount);
+	if (value >= 0)
+		pg_atomic_write_u32(&l->changecount, (uint32) value);
+
+	PG_RETURN_INT64((int64) old);
+}
+
+static uint32 pwet_test_hook_event;
+static int	pwet_test_hook_release_at;
+static uint32 pwet_test_hook_release_value;
+
+/* Copy hook: one complete writer bracket lands inside the reader's copy. */
+static void
+pwet_test_hook_torn(PwetLedger *src)
+{
+	pwet_test_ledger_copy_hook = NULL;
+	pwet_ledger_add(src, pwet_test_hook_event, 1000);
+}
+
+/* Retry hook: the stalled writer finishes at retry number release_at. */
+static void
+pwet_test_hook_release(PwetLedger *src, int retries)
+{
+	if (retries == pwet_test_hook_release_at)
+		pg_atomic_write_u32(&src->changecount, pwet_test_hook_release_value);
+}
+
+static Datum
+pwet_test_read_result(FunctionCallInfo fcinfo, PwetLedger *copy,
+					  uint32 event, int retries)
+{
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {0};
+	PwetLedgerCell *cell = NULL;
+	bool		insert;
+	PwetTotal  *pair;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	pair = pwet_ledger_target(copy, event, &cell, &insert);
+	values[0] = Int32GetDatum(retries);
+	values[1] = Int64GetDatum((int64) pair->calls);
+	return HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
+}
+
+/*
+ * pwet_test_ledger_torn_read(event_key bigint, OUT retries int, OUT calls bigint)
+ *
+ * Read this process's own ledger while a complete writer bracket lands
+ * between the reader's copy and its closing changecount check: the copy
+ * must be rejected and retried exactly once, and the accepted copy must show
+ * the extra call.
+ */
+Datum
+pwet_test_ledger_torn_read(PG_FUNCTION_ARGS)
+{
+	uint32		event = (uint32) PG_GETARG_INT64(0);
+	PwetLedger *copy = palloc(pwet_ledger_bytes);
+	int			before;
+
+	pwet_flush_pending();
+	pwet_test_hook_event = event;
+	pwet_test_ledger_copy_hook = pwet_test_hook_torn;
+	before = pwet_test_ledger_retries;
+	pwet_ledger_read(pwet_get_my_ledger(), copy);
+	pwet_test_ledger_copy_hook = NULL;
+
+	return pwet_test_read_result(fcinfo, copy, event,
+								 pwet_test_ledger_retries - before);
+}
+
+/*
+ * pwet_test_ledger_odd_read(event_key bigint, release_at int,
+ *                           OUT retries int, OUT calls bigint)
+ *
+ * Make this process's own changecount odd, as if a writer were stalled
+ * inside the bracket, and read the ledger: the reader must keep retrying
+ * until the writer finishes, which the retry hook does at retry number
+ * release_at.
+ */
+Datum
+pwet_test_ledger_odd_read(PG_FUNCTION_ARGS)
+{
+	uint32		event = (uint32) PG_GETARG_INT64(0);
+	int			release_at = PG_GETARG_INT32(1);
+	PwetLedger *l;
+	PwetLedger *copy = palloc(pwet_ledger_bytes);
+	uint32		cc;
+	int			before;
+
+	pwet_flush_pending();
+	l = pwet_get_my_ledger();
+	cc = pg_atomic_read_u32(&l->changecount);
+	PWET_TEST_CHECK((cc & 1) == 0);
+	pg_atomic_write_u32(&l->changecount, cc + 1);
+
+	pwet_test_hook_release_at = release_at;
+	pwet_test_hook_release_value = cc + 2;
+	pwet_test_ledger_retry_hook = pwet_test_hook_release;
+	before = pwet_test_ledger_retries;
+	pwet_ledger_read(l, copy);
+	pwet_test_ledger_retry_hook = NULL;
+
+	PWET_TEST_CHECK((pg_atomic_read_u32(&l->changecount) & 1) == 0);
+	return pwet_test_read_result(fcinfo, copy, event,
+								 pwet_test_ledger_retries - before);
+}
+
+#endif							/* USE_ASSERT_CHECKING */

@@ -165,6 +165,7 @@ CREATE EXTENSION <replaceable>extension_name</replaceable>;
  &pgsurgery;
  &pgtrgm;
  &pgvisibility;
+ &pgwaiteventtracing;
  &pgwalinspect;
  &postgres-fdw;
  &seg;

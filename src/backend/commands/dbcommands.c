@@ -499,7 +499,7 @@ CreateDirAndVersionFile(char *dbpath, Oid dbid, Oid tsid, bool isRedo)
 				 errmsg("could not create file \"%s\": %m", versionfile)));
 
 	/* Write PG_MAJORVERSION in the PG_VERSION file. */
-	pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_WRITE);
+	pgstat_report_wait_start_timed(WAIT_EVENT_VERSION_FILE_WRITE);
 	errno = 0;
 	if (write(fd, buf, nbytes) != nbytes)
 	{
@@ -510,15 +510,15 @@ CreateDirAndVersionFile(char *dbpath, Oid dbid, Oid tsid, bool isRedo)
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", versionfile)));
 	}
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
-	pgstat_report_wait_start(WAIT_EVENT_VERSION_FILE_SYNC);
+	pgstat_report_wait_start_timed(WAIT_EVENT_VERSION_FILE_SYNC);
 	if (pg_fsync(fd) != 0)
 		ereport(data_sync_elevel(ERROR),
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", versionfile)));
 	fsync_fname(dbpath, true);
-	pgstat_report_wait_end();
+	pgstat_report_wait_end_timed();
 
 	/* Close the version file. */
 	CloseTransientFile(fd);
