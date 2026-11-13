@@ -47,6 +47,7 @@
 #include "optimizer/optimizer.h"
 #include "parser/parse_agg.h"
 #include "parser/parse_coerce.h"
+#include "parser/parse_oper.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -55,6 +56,7 @@
 #include "utils/memutils.h"
 #include "utils/regproc.h"
 #include "utils/syscache.h"
+#include "utils/tuplesort.h"
 #include "utils/tuplestore.h"
 #include "windowapi.h"
 
@@ -171,6 +173,23 @@ typedef struct WindowStatePerAggData
 
 	/* Data local to eval_windowaggregates() */
 	bool		restart;		/* need to restart this agg in this cycle? */
+
+	/* DISTINCT support */
+	bool		windistinct;	/* DISTINCT specified on this aggregate */
+	Oid			inputtypeOid;	/* OID of the single DISTINCT argument type */
+	Oid			sortOperator;	/* btree < operator for sorting */
+	Oid			sortCollation;	/* collation for sort/equality */
+	bool		sortNullsFirst; /* NULLS FIRST? */
+	FmgrInfo	equalfn;		/* equality comparison function */
+
+	/* Grow-only frame DISTINCT: hash-based seen-set */
+	bool		distinctIsHash;		/* using hash-based incremental DISTINCT? */
+	TupleHashTable distinctTable;	/* hash table of seen values, or NULL */
+	MemoryContext distinctContext;	/* BumpContext for hash table tuples */
+	TupleDesc	distinctTupleDesc;	/* single-column tuple descriptor */
+	TupleTableSlot *distinctSlot;	/* slot for hash table lookups */
+	Oid		   *hashEqFuncOids;		/* equality function OID for hash (palloc'd) */
+	FmgrInfo   *hashFunctions;		/* hash function info (palloc'd) */
 } WindowStatePerAggData;
 
 static void initialize_windowaggregate(WindowAggState *winstate,
@@ -206,6 +225,15 @@ static WindowStatePerAggData *initialize_peragg(WindowAggState *winstate,
 												WindowFunc *wfunc,
 												WindowStatePerAgg peraggstate);
 static Datum GetAggInitVal(Datum textInitVal, Oid transtype);
+
+static bool is_whole_partition_frame(WindowAggState *winstate);
+static bool is_grow_only_frame(WindowAggState *winstate);
+static void eval_windowaggregate_distinct(WindowAggState *winstate,
+										  WindowStatePerFunc perfuncstate,
+										  WindowStatePerAgg peraggstate);
+static void advance_windowaggregate_distinct(WindowAggState *winstate,
+											 WindowStatePerFunc perfuncstate,
+											 WindowStatePerAgg peraggstate);
 
 static bool are_peers(WindowAggState *winstate, TupleTableSlot *slot1,
 					  TupleTableSlot *slot2);
@@ -278,6 +306,51 @@ initialize_windowaggregate(WindowAggState *winstate,
 	peraggstate->transValueCount = 0;
 	peraggstate->resultValue = (Datum) 0;
 	peraggstate->resultValueIsNull = true;
+
+	/*
+	 * For hash-based DISTINCT (grow-only frames), create a fresh hash table
+	 * each time the aggregate is restarted (i.e., at the start of each new
+	 * partition).  The previous distinctContext (if any) was a child of
+	 * aggcontext and was already destroyed by the MemoryContextReset above
+	 * (for private aggcontexts) or by the caller's reset of the shared
+	 * aggcontext.
+	 */
+	if (peraggstate->distinctIsHash)
+	{
+		Oid			collations[1];
+		AttrNumber	keyColIdx[1] = {1};
+
+		collations[0] = peraggstate->sortCollation;
+
+		peraggstate->distinctContext =
+			BumpContextCreate(peraggstate->aggcontext,
+							  "WindowAgg Distinct Hash Tuples",
+							  ALLOCSET_DEFAULT_SIZES);
+
+		/*
+		 * This grow-only DISTINCT hash table is currently not bounded by
+		 * work_mem; it retains every distinct value seen so far in the
+		 * partition.  Providing bounded-memory behavior here would require
+		 * additional design, such as compaction, fallback, or spill-aware
+		 * handling.  This is a current limitation, not the intended final
+		 * shape of the feature.
+		 */
+		peraggstate->distinctTable =
+			BuildTupleHashTable(&winstate->ss.ps,
+								peraggstate->distinctTupleDesc,
+								&TTSOpsVirtual,
+								1,		/* numCols */
+								keyColIdx,
+								peraggstate->hashEqFuncOids,
+								peraggstate->hashFunctions,
+								collations,
+								256,	/* initial estimate */
+								0,		/* additionalsize */
+								peraggstate->aggcontext,
+								peraggstate->distinctContext,
+								winstate->tmpcontext->ecxt_per_tuple_memory,
+								false);
+	}
 }
 
 /*
@@ -695,6 +768,476 @@ finalize_windowaggregate(WindowAggState *winstate,
 }
 
 /*
+ * is_whole_partition_frame
+ *
+ * Returns true if the window frame is guaranteed to cover the entire
+ * partition.  This is the case when the start is UNBOUNDED PRECEDING,
+ * there is no EXCLUSION clause, and the end is either UNBOUNDED FOLLOWING
+ * or CURRENT ROW with no ORDER BY in RANGE or GROUPS mode (which means
+ * all rows are peers, so CURRENT ROW extends to the partition boundary).
+ * In ROWS mode, CURRENT ROW always means exactly the current row.
+ */
+static bool
+is_whole_partition_frame(WindowAggState *winstate)
+{
+	WindowAgg  *node = (WindowAgg *) winstate->ss.ps.plan;
+	int			frameOptions = winstate->frameOptions;
+
+	/* Must start at UNBOUNDED PRECEDING */
+	if (!(frameOptions & FRAMEOPTION_START_UNBOUNDED_PRECEDING))
+		return false;
+
+	/* Must not have an EXCLUSION clause */
+	if (frameOptions & FRAMEOPTION_EXCLUSION)
+		return false;
+
+	/* End must be UNBOUNDED FOLLOWING ... */
+	if (frameOptions & FRAMEOPTION_END_UNBOUNDED_FOLLOWING)
+		return true;
+
+	/*
+	 * ... or CURRENT ROW with no ORDER BY (all rows are peers), but only
+	 * for RANGE or GROUPS mode.  In ROWS mode, CURRENT ROW means exactly
+	 * the current row regardless of peers.
+	 */
+	if ((frameOptions & FRAMEOPTION_END_CURRENT_ROW) &&
+		!(frameOptions & FRAMEOPTION_ROWS) &&
+		node->ordNumCols == 0)
+		return true;
+
+	return false;
+}
+
+/*
+ * is_grow_only_frame
+ *
+ * Returns true if the window frame only grows as the current row advances,
+ * i.e. rows only enter the frame, never leave it.  This is the case when the
+ * start is UNBOUNDED PRECEDING and there is no EXCLUSION clause.
+ *
+ * Note: every whole-partition frame is also a grow-only frame.
+ */
+static bool
+is_grow_only_frame(WindowAggState *winstate)
+{
+	int			frameOptions = winstate->frameOptions;
+
+	if (!(frameOptions & FRAMEOPTION_START_UNBOUNDED_PRECEDING))
+		return false;
+	if (frameOptions & FRAMEOPTION_EXCLUSION)
+		return false;
+	return true;
+}
+
+/*
+ * eval_windowaggregate_distinct
+ *
+ * Compute a single-argument DISTINCT window aggregate over the whole
+ * partition.  We collect all argument values (applying any FILTER clause),
+ * sort them, skip duplicates, and feed the distinct values into the
+ * aggregate's transition function.
+ *
+ * This follows the pattern of process_ordered_aggregate_single() in
+ * nodeAgg.c.
+ */
+static void
+eval_windowaggregate_distinct(WindowAggState *winstate,
+							  WindowStatePerFunc perfuncstate,
+							  WindowStatePerAgg peraggstate)
+{
+	WindowObject agg_winobj = winstate->agg_winobj;
+	TupleTableSlot *temp_slot = winstate->temp_slot_1;
+	ExprContext *econtext = winstate->tmpcontext;
+	WindowFuncExprState *wfuncstate = perfuncstate->wfuncstate;
+	ExprState  *filter = wfuncstate->aggfilter;
+	int			numArguments = perfuncstate->numArguments;
+	LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
+	Tuplesortstate *sortstate;
+	Datum		newVal;
+	bool		newIsNull;
+	Datum		newAbbrevVal;
+	Datum		oldVal = (Datum) 0;
+	bool		oldIsNull = true;
+	bool		haveOldVal = false;
+	Datum		oldAbbrevVal = (Datum) 0;
+	MemoryContext oldContext;
+	int64		total_rows;
+	int64		row;
+
+	/* Ensure all partition rows are spooled */
+	spool_tuples(winstate, -1);
+	total_rows = winstate->spooled_rows;
+
+	/* Create a tuplesort for the single DISTINCT argument */
+	sortstate = tuplesort_begin_datum(peraggstate->inputtypeOid,
+									  peraggstate->sortOperator,
+									  peraggstate->sortCollation,
+									  peraggstate->sortNullsFirst,
+									  work_mem, NULL, TUPLESORT_NONE);
+
+	/*
+	 * Loop over all rows in the partition, evaluate FILTER and the argument,
+	 * and feed values into the sort.
+	 */
+	for (row = 0; row < total_rows; row++)
+	{
+		if (!window_gettupleslot(agg_winobj, row, temp_slot))
+			break;
+
+		econtext->ecxt_outertuple = temp_slot;
+
+		oldContext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+
+		/* Skip anything FILTERed out */
+		if (filter)
+		{
+			bool		isnull;
+			Datum		res = ExecEvalExpr(filter, econtext, &isnull);
+
+			if (isnull || !DatumGetBool(res))
+			{
+				MemoryContextSwitchTo(oldContext);
+				ResetExprContext(econtext);
+				ExecClearTuple(temp_slot);
+				continue;
+			}
+		}
+
+		/* Evaluate the single argument */
+		{
+			ExprState  *argstate = (ExprState *) linitial(wfuncstate->args);
+			Datum		val;
+			bool		isnull;
+
+			val = ExecEvalExpr(argstate, econtext, &isnull);
+
+			MemoryContextSwitchTo(oldContext);
+
+			/* Feed into sort */
+			tuplesort_putdatum(sortstate, val, isnull);
+		}
+
+		ResetExprContext(econtext);
+		ExecClearTuple(temp_slot);
+	}
+
+	/* Sort */
+	tuplesort_performsort(sortstate);
+
+	/*
+	 * Read back sorted values, skip duplicates, and feed distinct values
+	 * into the transition function.  This mirrors
+	 * process_ordered_aggregate_single() in nodeAgg.c.
+	 */
+	while (tuplesort_getdatum(sortstate, true, false,
+							  &newVal, &newIsNull, &newAbbrevVal))
+	{
+		ResetExprContext(econtext);
+		oldContext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+
+		/*
+		 * If DISTINCT mode, skip if not distinct from prior value.
+		 */
+		if (haveOldVal &&
+			((oldIsNull && newIsNull) ||
+			 (!oldIsNull && !newIsNull &&
+			  oldAbbrevVal == newAbbrevVal &&
+			  DatumGetBool(FunctionCall2Coll(&peraggstate->equalfn,
+											 peraggstate->sortCollation,
+											 oldVal, newVal)))))
+		{
+			MemoryContextSwitchTo(oldContext);
+			continue;
+		}
+
+		/*
+		 * Advance the transition function with this distinct value.
+		 * This replicates the strict-function handling from
+		 * advance_windowaggregate().
+		 */
+		if (peraggstate->transfn.fn_strict)
+		{
+			/* For strict transfn, skip NULL inputs */
+			if (newIsNull)
+			{
+				MemoryContextSwitchTo(oldContext);
+				goto remember_value;
+			}
+
+			/*
+			 * For strict transition functions with initial value NULL,
+			 * use the first non-NULL input as the initial state.
+			 */
+			if (peraggstate->transValueCount == 0 &&
+				peraggstate->transValueIsNull)
+			{
+				MemoryContextSwitchTo(peraggstate->aggcontext);
+				peraggstate->transValue = datumCopy(newVal,
+													peraggstate->transtypeByVal,
+													peraggstate->transtypeLen);
+				peraggstate->transValueIsNull = false;
+				peraggstate->transValueCount = 1;
+				MemoryContextSwitchTo(oldContext);
+				goto remember_value;
+			}
+
+			if (peraggstate->transValueIsNull)
+			{
+				/*
+				 * Don't call a strict function with NULL inputs.
+				 */
+				MemoryContextSwitchTo(oldContext);
+				goto remember_value;
+			}
+		}
+
+		/* OK to call the transition function */
+		InitFunctionCallInfoData(*fcinfo, &(peraggstate->transfn),
+								 numArguments + 1,
+								 perfuncstate->winCollation,
+								 (Node *) winstate, NULL);
+		fcinfo->args[0].value = peraggstate->transValue;
+		fcinfo->args[0].isnull = peraggstate->transValueIsNull;
+		fcinfo->args[1].value = newVal;
+		fcinfo->args[1].isnull = newIsNull;
+		winstate->curaggcontext = peraggstate->aggcontext;
+
+		{
+			Datum		result;
+
+			result = FunctionCallInvoke(fcinfo);
+			winstate->curaggcontext = NULL;
+
+			peraggstate->transValueCount++;
+
+			/*
+			 * If pass-by-ref datatype, must copy the new value into
+			 * aggcontext and free the prior transValue.  But if transfn
+			 * returned a pointer to its first input, we don't need to do
+			 * anything.  Also, if transfn returned a pointer to a R/W
+			 * expanded object that is already a child of the aggcontext,
+			 * assume we can adopt that value without copying it.
+			 *
+			 * This must match advance_windowaggregate's logic exactly.
+			 */
+			if (!peraggstate->transtypeByVal &&
+				DatumGetPointer(result) != DatumGetPointer(peraggstate->transValue))
+			{
+				if (!fcinfo->isnull)
+				{
+					MemoryContextSwitchTo(peraggstate->aggcontext);
+					if (DatumIsReadWriteExpandedObject(result,
+													   false,
+													   peraggstate->transtypeLen) &&
+						MemoryContextGetParent(DatumGetEOHP(result)->eoh_context) == CurrentMemoryContext)
+						 /* do nothing */ ;
+					else
+						result = datumCopy(result,
+										   peraggstate->transtypeByVal,
+										   peraggstate->transtypeLen);
+				}
+				if (!peraggstate->transValueIsNull)
+				{
+					if (DatumIsReadWriteExpandedObject(peraggstate->transValue,
+													   false,
+													   peraggstate->transtypeLen))
+						DeleteExpandedObject(peraggstate->transValue);
+					else
+						pfree(DatumGetPointer(peraggstate->transValue));
+				}
+			}
+
+			MemoryContextSwitchTo(oldContext);
+			peraggstate->transValue = result;
+			peraggstate->transValueIsNull = fcinfo->isnull;
+		}
+
+remember_value:
+		/*
+		 * Remember the current value for subsequent duplicate checks.
+		 */
+		if (!peraggstate->inputtypeByVal)
+		{
+			if (!oldIsNull)
+				pfree(DatumGetPointer(oldVal));
+			if (!newIsNull)
+				oldVal = datumCopy(newVal, peraggstate->inputtypeByVal,
+								   peraggstate->inputtypeLen);
+			else
+				oldVal = (Datum) 0;
+		}
+		else
+			oldVal = newVal;
+		oldAbbrevVal = newAbbrevVal;
+		oldIsNull = newIsNull;
+		haveOldVal = true;
+	}
+
+	if (!oldIsNull && !peraggstate->inputtypeByVal)
+		pfree(DatumGetPointer(oldVal));
+
+	tuplesort_end(sortstate);
+}
+
+/*
+ * advance_windowaggregate_distinct
+ *
+ * Per-row handler for hash-based DISTINCT window aggregates with grow-only
+ * frames.  Evaluates the single argument, checks the hash table for
+ * duplicates, and only advances the transition function for new distinct
+ * values.
+ */
+static void
+advance_windowaggregate_distinct(WindowAggState *winstate,
+								 WindowStatePerFunc perfuncstate,
+								 WindowStatePerAgg peraggstate)
+{
+	LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
+	WindowFuncExprState *wfuncstate = perfuncstate->wfuncstate;
+	int			numArguments = perfuncstate->numArguments;
+	ExprContext *econtext = winstate->tmpcontext;
+	ExprState  *filter = wfuncstate->aggfilter;
+	TupleTableSlot *slot = peraggstate->distinctSlot;
+	Datum		newVal;
+	bool		isnull;
+	bool		isnew;
+	MemoryContext oldContext;
+
+	oldContext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+
+	/* Skip anything FILTERed out */
+	if (filter)
+	{
+		Datum		res = ExecEvalExpr(filter, econtext, &isnull);
+
+		if (isnull || !DatumGetBool(res))
+		{
+			MemoryContextSwitchTo(oldContext);
+			return;
+		}
+	}
+
+	/* Evaluate the single argument */
+	{
+		ExprState  *argstate = (ExprState *) linitial(wfuncstate->args);
+
+		newVal = ExecEvalExpr(argstate, econtext, &isnull);
+	}
+
+	/* Store in slot for hash lookup */
+	ExecClearTuple(slot);
+	slot->tts_values[0] = newVal;
+	slot->tts_isnull[0] = isnull;
+	ExecStoreVirtualTuple(slot);
+
+	/* Check if already seen */
+	LookupTupleHashEntry(peraggstate->distinctTable, slot, &isnew, NULL);
+
+	if (!isnew)
+	{
+		MemoryContextSwitchTo(oldContext);
+		return;		/* already seen, skip */
+	}
+
+	/*
+	 * New distinct value: advance the transition function.
+	 * This replicates the strict-handling + transfn logic from
+	 * advance_windowaggregate().
+	 */
+	if (peraggstate->transfn.fn_strict)
+	{
+		/* For strict transfn, skip NULL inputs */
+		if (isnull)
+		{
+			MemoryContextSwitchTo(oldContext);
+			return;
+		}
+
+		/*
+		 * For strict transition functions with initial value NULL, use the
+		 * first non-NULL input as the initial state.
+		 */
+		if (peraggstate->transValueCount == 0 && peraggstate->transValueIsNull)
+		{
+			MemoryContextSwitchTo(peraggstate->aggcontext);
+			peraggstate->transValue = datumCopy(newVal,
+												peraggstate->transtypeByVal,
+												peraggstate->transtypeLen);
+			peraggstate->transValueIsNull = false;
+			peraggstate->transValueCount = 1;
+			MemoryContextSwitchTo(oldContext);
+			return;
+		}
+
+		if (peraggstate->transValueIsNull)
+		{
+			/*
+			 * Don't call a strict function with NULL inputs.  Note it is
+			 * possible to get here despite the above tests, if the transfn
+			 * is strict *and* returned a NULL on a prior cycle.  If that
+			 * happens we will propagate the NULL all the way to the end.
+			 * Hash-based DISTINCT never uses moving-aggregate code, so
+			 * invtransfn_oid should always be invalid here.
+			 */
+			MemoryContextSwitchTo(oldContext);
+			Assert(!OidIsValid(peraggstate->invtransfn_oid));
+			return;
+		}
+	}
+
+	/* OK to call the transition function */
+	InitFunctionCallInfoData(*fcinfo, &(peraggstate->transfn),
+							 numArguments + 1,
+							 perfuncstate->winCollation,
+							 (Node *) winstate, NULL);
+	fcinfo->args[0].value = peraggstate->transValue;
+	fcinfo->args[0].isnull = peraggstate->transValueIsNull;
+	fcinfo->args[1].value = newVal;
+	fcinfo->args[1].isnull = isnull;
+	winstate->curaggcontext = peraggstate->aggcontext;
+
+	{
+		Datum		result;
+
+		result = FunctionCallInvoke(fcinfo);
+		winstate->curaggcontext = NULL;
+
+		peraggstate->transValueCount++;
+
+		if (!peraggstate->transtypeByVal &&
+			DatumGetPointer(result) != DatumGetPointer(peraggstate->transValue))
+		{
+			if (!fcinfo->isnull)
+			{
+				MemoryContextSwitchTo(peraggstate->aggcontext);
+				if (DatumIsReadWriteExpandedObject(result,
+												   false,
+												   peraggstate->transtypeLen) &&
+					MemoryContextGetParent(DatumGetEOHP(result)->eoh_context) == CurrentMemoryContext)
+					 /* do nothing */ ;
+				else
+					result = datumCopy(result,
+									   peraggstate->transtypeByVal,
+									   peraggstate->transtypeLen);
+			}
+			if (!peraggstate->transValueIsNull)
+			{
+				if (DatumIsReadWriteExpandedObject(peraggstate->transValue,
+												   false,
+												   peraggstate->transtypeLen))
+					DeleteExpandedObject(peraggstate->transValue);
+				else
+					pfree(DatumGetPointer(peraggstate->transValue));
+			}
+		}
+
+		MemoryContextSwitchTo(oldContext);
+		peraggstate->transValue = result;
+		peraggstate->transValueIsNull = fcinfo->isnull;
+	}
+}
+
+/*
  * eval_windowaggregates
  * evaluate plain aggregates being used as window functions
  *
@@ -948,6 +1491,25 @@ eval_windowaggregates(WindowAggState *winstate)
 	}
 
 	/*
+	 * Compute DISTINCT aggregates for the whole partition.  These are handled
+	 * separately via sort-based deduplication rather than the main
+	 * accumulation loop below.  Hash-based DISTINCT (grow-only frames) is
+	 * handled incrementally in the main loop instead.
+	 */
+	for (i = 0; i < numaggs; i++)
+	{
+		peraggstate = &winstate->peragg[i];
+		if (!peraggstate->windistinct || !peraggstate->restart)
+			continue;
+		if (peraggstate->distinctIsHash)
+			continue;		/* handled incrementally in main loop */
+		wfuncno = peraggstate->wfuncno;
+		eval_windowaggregate_distinct(winstate,
+									  &winstate->perfunc[wfuncno],
+									  peraggstate);
+	}
+
+	/*
 	 * Non-restarted aggregates now contain the rows between aggregatedbase
 	 * (i.e., frameheadpos) and aggregatedupto, while restarted aggregates
 	 * contain no rows.  If there are any restarted aggregates, we must thus
@@ -1002,6 +1564,20 @@ eval_windowaggregates(WindowAggState *winstate)
 		for (i = 0; i < numaggs; i++)
 		{
 			peraggstate = &winstate->peragg[i];
+
+			/* Sort-based DISTINCT aggregates are handled separately */
+			if (peraggstate->windistinct && !peraggstate->distinctIsHash)
+				continue;
+
+			/* Hash-based DISTINCT: advance via per-row dedup */
+			if (peraggstate->windistinct && peraggstate->distinctIsHash)
+			{
+				wfuncno = peraggstate->wfuncno;
+				advance_windowaggregate_distinct(winstate,
+												 &winstate->perfunc[wfuncno],
+												 peraggstate);
+				continue;
+			}
 
 			/* Non-restarted aggs skip until aggregatedupto_nonrestarted */
 			if (!peraggstate->restart &&
@@ -1182,6 +1758,34 @@ prepare_tuplestore(WindowAggState *winstate)
 			agg_winobj->markptr = tuplestore_alloc_read_pointer(winstate->buffer, 0);
 			/* and the read pointer will need BACKWARD capability */
 			readptr_flags |= EXEC_FLAG_BACKWARD;
+		}
+
+		/*
+		 * If any aggregate uses sort-based DISTINCT (whole-partition path),
+		 * the read pointer also needs BACKWARD capability.  The DISTINCT
+		 * helper reads through the entire partition to collect values for
+		 * sorting, which advances the read pointer to the end.  The main
+		 * accumulation loop (for non-DISTINCT aggregates in the same
+		 * WindowAgg node) then needs to rewind back to the frame head.
+		 *
+		 * Hash-based DISTINCT (grow-only frames) participates in the normal
+		 * forward main loop and does not need BACKWARD.
+		 *
+		 * NB: windistinct and distinctIsHash are set during
+		 * initialize_peragg() in ExecInitWindowAgg(), which runs before
+		 * any partition is started, so they are valid here.
+		 */
+		if (!(readptr_flags & EXEC_FLAG_BACKWARD))
+		{
+			for (int i = 0; i < winstate->numaggs; i++)
+			{
+				if (winstate->peragg[i].windistinct &&
+					!winstate->peragg[i].distinctIsHash)
+				{
+					readptr_flags |= EXEC_FLAG_BACKWARD;
+					break;
+				}
+			}
 		}
 
 		agg_winobj->readptr = tuplestore_alloc_read_pointer(winstate->buffer,
@@ -2941,7 +3545,9 @@ ExecReScanWindowAgg(WindowAggState *node)
 /*
  * initialize_peragg
  *
- * Almost same as in nodeAgg.c, except we don't support DISTINCT currently.
+ * Almost same as in nodeAgg.c, except we only support DISTINCT for
+ * non-shrinking frames (UNBOUNDED PRECEDING, no EXCLUDE) and
+ * single-argument aggregates.
  */
 static WindowStatePerAggData *
 initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
@@ -2966,6 +3572,26 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 	Datum		textInitVal;
 	int			i;
 	ListCell   *lc;
+
+	/*
+	 * Validate DISTINCT usage.  We support DISTINCT for whole-partition frames
+	 * (sort-based deduplication) and grow-only frames (hash-based dedup).
+	 * A grow-only frame starts at UNBOUNDED PRECEDING with no EXCLUSION.
+	 * Only single-argument aggregates are supported.
+	 */
+	if (wfunc->windistinct && !is_grow_only_frame(winstate))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("DISTINCT is not supported for window functions "
+						"with frames that do not start at UNBOUNDED "
+						"PRECEDING or that use an EXCLUDE clause"),
+				 errhint("The frame must start at UNBOUNDED PRECEDING "
+						 "and must not have an EXCLUDE clause.")));
+
+	if (wfunc->windistinct && list_length(wfunc->args) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("DISTINCT is not supported for window aggregate functions with more than one argument")));
 
 	numArguments = list_length(wfunc->args);
 
@@ -3229,6 +3855,79 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 								  ALLOCSET_DEFAULT_SIZES);
 	else
 		peraggstate->aggcontext = winstate->aggcontext;
+
+	/*
+	 * Set up DISTINCT state if needed.  We need sort and equality operators
+	 * for the single argument type, plus its type length and by-value info
+	 * for datum copying during the dedup loop.
+	 */
+	if (wfunc->windistinct)
+	{
+		Oid			ltOpr,
+					eqOpr;
+		Oid			inputType = inputTypes[0];
+
+		peraggstate->windistinct = true;
+		peraggstate->inputtypeOid = inputType;
+
+		get_sort_group_operators(inputType,
+								 true, true, false,
+								 &ltOpr, &eqOpr, NULL,
+								 NULL);
+
+		peraggstate->sortOperator = ltOpr;
+		peraggstate->sortCollation = wfunc->inputcollid;
+		peraggstate->sortNullsFirst = false;
+		fmgr_info(get_opcode(eqOpr), &peraggstate->equalfn);
+
+		get_typlenbyval(inputType,
+						&peraggstate->inputtypeLen,
+						&peraggstate->inputtypeByVal);
+
+		/*
+		 * For non-shrinking but non-whole-partition frames, set up hash-based
+		 * incremental DISTINCT.  Unlike the whole-partition path which uses
+		 * sort-based deduplication (requiring only btree operators), the
+		 * incremental path must track previously seen values across rows
+		 * using a hash table, so the argument type must support hashing.
+		 * If it does not, we reject here rather than silently falling back,
+		 * because a sort-based incremental approach would require re-sorting
+		 * on every row.
+		 *
+		 * The hash table itself is created per-partition in
+		 * initialize_windowaggregate().
+		 */
+		if (!is_whole_partition_frame(winstate))
+		{
+			Oid			hashfn_oid;
+
+			/* Grow-only path requires a hashable type */
+			if (!get_op_hash_functions(eqOpr, &hashfn_oid, NULL))
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_FUNCTION),
+						 errmsg("could not find hash function for window "
+								"DISTINCT aggregate"),
+						 errhint("The argument type must support hashing.")));
+
+			peraggstate->distinctIsHash = true;
+
+			/* Create a single-column TupleDesc for the input type */
+			peraggstate->distinctTupleDesc = CreateTemplateTupleDesc(1);
+			TupleDescInitEntry(peraggstate->distinctTupleDesc, 1,
+							   "distinct_val", inputType, -1, 0);
+
+			/* Create a dedicated slot for hash table lookups */
+			peraggstate->distinctSlot =
+				MakeSingleTupleTableSlot(peraggstate->distinctTupleDesc,
+										 &TTSOpsVirtual);
+
+			/* Pre-compute hash infrastructure (reused across partitions) */
+			execTuplesHashPrepare(1,
+								  &eqOpr,
+								  &peraggstate->hashEqFuncOids,
+								  &peraggstate->hashFunctions);
+		}
+	}
 
 	ReleaseSysCache(aggTuple);
 
