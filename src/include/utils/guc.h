@@ -305,6 +305,7 @@ extern PGDLLIMPORT int log_statement_max_length;
 extern PGDLLIMPORT double log_statement_sample_rate;
 extern PGDLLIMPORT double log_xact_sample_rate;
 extern PGDLLIMPORT char *backtrace_functions;
+extern PGDLLIMPORT bool log_object_drops;
 
 extern PGDLLIMPORT int temp_file_limit;
 
