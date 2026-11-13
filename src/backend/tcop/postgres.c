@@ -562,7 +562,8 @@ ProcessClientWriteInterrupt(bool blocked)
 {
 	int			save_errno = errno;
 
-	if (ProcDiePending)
+	if (ProcDiePending ||
+		(TransactionTimeoutPending && TransactionTimeout > 0))
 	{
 		/*
 		 * We're dying.  If it's not possible to write, then we should handle
@@ -577,7 +578,7 @@ ProcessClientWriteInterrupt(bool blocked)
 		{
 			/*
 			 * Don't mess with whereToSendOutput if ProcessInterrupts wouldn't
-			 * service ProcDiePending.
+			 * service the pending termination.
 			 */
 			if (InterruptHoldoffCount == 0 && CritSectionCount == 0)
 			{
@@ -3525,6 +3526,19 @@ ProcessInterrupts(void)
 					 ERRDETAIL_SIGNAL_SENDER(sender_pid, sender_uid)));
 	}
 
+	if (TransactionTimeoutPending)
+	{
+		/* Ignore the signal if the GUC has been reset to zero. */
+		TransactionTimeoutPending = false;
+		if (TransactionTimeout > 0)
+		{
+			INJECTION_POINT("transaction-timeout", NULL);
+			ereport(FATAL,
+					(errcode(ERRCODE_TRANSACTION_TIMEOUT),
+					 errmsg("terminating connection due to transaction timeout")));
+		}
+	}
+
 	if (CheckClientConnectionPending)
 	{
 		CheckClientConnectionPending = false;
@@ -3654,19 +3668,6 @@ ProcessInterrupts(void)
 			ereport(FATAL,
 					(errcode(ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT),
 					 errmsg("terminating connection due to idle-in-transaction timeout")));
-		}
-	}
-
-	if (TransactionTimeoutPending)
-	{
-		/* As above, ignore the signal if the GUC has been reset to zero. */
-		TransactionTimeoutPending = false;
-		if (TransactionTimeout > 0)
-		{
-			INJECTION_POINT("transaction-timeout", NULL);
-			ereport(FATAL,
-					(errcode(ERRCODE_TRANSACTION_TIMEOUT),
-					 errmsg("terminating connection due to transaction timeout")));
 		}
 	}
 
