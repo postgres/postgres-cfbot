@@ -156,7 +156,10 @@ CreateSchemaCommand(ParseState *pstate, CreateSchemaStmt *stmt,
 	CommandCounterIncrement();
 
 	/*
-	 * Prepend the new schema to the current search path.
+	 * Prepend the new schema to the current search path, making it the
+	 * default creation target namespace.  Append pg_temp so that it is not
+	 * implicitly prepended ahead of the new schema.  If the old path already
+	 * lists pg_temp, its explicit position is preserved.
 	 *
 	 * We use the equivalent of a function SET option to allow the setting to
 	 * persist for exactly the duration of the schema creation.  guc.c also
@@ -172,6 +175,8 @@ CreateSchemaCommand(ParseState *pstate, CreateSchemaStmt *stmt,
 
 	if (*nsp != '\0')
 		appendStringInfo(&pathbuf, ", %s", nsp);
+
+	appendStringInfoString(&pathbuf, ", pg_temp");
 
 	(void) set_config_option("search_path", pathbuf.data,
 							 PGC_USERSET, PGC_S_SESSION,
