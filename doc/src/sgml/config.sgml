@@ -2035,6 +2035,15 @@ include_dir 'conf.d'
         that exceeds the usual <varname>work_mem</varname> base
         amount.
        </para>
+       <para>
+        After a bitmap scan, a backend may keep the memory of up to two
+        bitmaps' hash tables for use by later bitmap scans.  Together it is
+        never more than the <varname>work_mem</varname> in effect when it was
+        last added to, and it is freed by the next bitmap scan whose
+        <varname>work_mem</varname> is too small to hold it.  It appears as
+        <literal>TIDBitmap cache</literal> in
+        <link linkend="view-pg-backend-memory-contexts"><structname>pg_backend_memory_contexts</structname></link>.
+       </para>
       </listitem>
      </varlistentry>
 
