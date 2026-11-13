@@ -63,6 +63,8 @@ extern PGDLLIMPORT char *ListenAddresses;
 extern PGDLLIMPORT bool ClientAuthInProgress;
 extern PGDLLIMPORT int PreAuthDelay;
 extern PGDLLIMPORT int AuthenticationTimeout;
+extern PGDLLIMPORT bool log_postmaster_overloads;
+extern PGDLLIMPORT int log_postmaster_excess_connections;
 extern PGDLLIMPORT bool log_hostname;
 extern PGDLLIMPORT bool enable_bonjour;
 extern PGDLLIMPORT char *bonjour_name;
