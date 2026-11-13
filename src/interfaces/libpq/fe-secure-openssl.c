@@ -258,7 +258,8 @@ pgtls_bytes_pending(PGconn *conn)
 		 * around in the caller to call pgtls_bytes_pending() again.  Throw an
 		 * error rather than complicate the code in that way, because
 		 * SSL_read() should be bounded to the size of a single TLS record,
-		 * and conn->inBuffer can't currently go past INT_MAX in size anyway.
+		 * and conn->inBuffer.buffer can't currently go past INT_MAX in size
+		 * anyway.
 		 */
 		libpq_append_conn_error(conn, "OpenSSL reports INT_MAX bytes pending");
 		return -1;
