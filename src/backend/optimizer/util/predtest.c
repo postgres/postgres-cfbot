@@ -296,6 +296,8 @@ predicate_implied_by_recurse(Node *clause, Node *predicate,
 	PredIterInfoData pred_info;
 	PredClass	pclass;
 	bool		result;
+	List	   *pargs;
+	int			cpos;
 
 	/* skip through RestrictInfo */
 	Assert(clause != NULL);
@@ -393,15 +395,40 @@ predicate_implied_by_recurse(Node *clause, Node *predicate,
 					/*
 					 * OR-clause => OR-clause if each of A's items implies any
 					 * of B's items.  Messy but can't do it any more simply.
+					 *
+					 * When both are plain OR lists, first try B's item at the
+					 * same position as A's.  create_bitmap_scan_plan() tests
+					 * a scan clause against the indexquals of the BitmapOr
+					 * built from it arm by arm, so the arms correspond in
+					 * order, and this makes the test take a number of proof
+					 * attempts linear rather than quadratic in the number of
+					 * arms.  The result is the same either way.
 					 */
+					pargs = NIL;
+					if (is_orclause(clause) && is_orclause(predicate))
+						pargs = ((BoolExpr *) predicate)->args;
+					cpos = 0;
 					result = true;
 					iterate_begin(citem, clause, clause_info)
 					{
 						bool		presult = false;
+						Node	   *tried = NULL;
+
+						if (cpos < list_length(pargs))
+						{
+							tried = (Node *) list_nth(pargs, cpos);
+							presult = predicate_implied_by_recurse(citem,
+																   tried,
+																   weak);
+						}
+						cpos++;
 
 						iterate_begin(pitem, predicate, pred_info)
 						{
-							if (predicate_implied_by_recurse(citem, pitem,
+							if (presult)
+								break;
+							if (pitem != tried &&
+								predicate_implied_by_recurse(citem, pitem,
 															 weak))
 							{
 								presult = true;
