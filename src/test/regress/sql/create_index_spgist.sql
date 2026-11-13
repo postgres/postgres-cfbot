@@ -234,6 +234,16 @@ SELECT p, dist FROM quad_point_tbl_ord_seq1 ORDER BY p <-> '0,0' LIMIT 10;
 SELECT p, dist FROM quad_point_tbl_ord_seq1 ORDER BY p <-> '0,0' LIMIT 10;
 RESET extra_float_digits;
 
+-- test an index-only scan that returns only an included column, from an
+-- index whose opclass cannot return its key column
+CREATE TEMP TABLE spgist_poly_include (id int, p polygon);
+INSERT INTO spgist_poly_include VALUES (7, '((0,0),(1,1),(2,0))');
+CREATE INDEX spgist_poly_include_idx ON spgist_poly_include
+  USING spgist (p) INCLUDE (id);
+EXPLAIN (COSTS OFF)
+SELECT id FROM spgist_poly_include;
+SELECT id FROM spgist_poly_include;
+
 -- check ORDER BY distance to NULL
 SELECT (SELECT p FROM kd_point_tbl ORDER BY p <-> pt, p <-> '0,0' LIMIT 1)
 FROM (VALUES (point '1,2'), (NULL), ('1234,5678')) pts(pt);

@@ -199,6 +199,7 @@ AioShmemInit(void *arg)
 
 		dclist_init(&bs->idle_ios);
 		memset(bs->staged_ios, 0, sizeof(PgAioHandle *) * PGAIO_SUBMIT_BATCH_SIZE);
+		ConditionVariableInit(&bs->submit_cv);
 		dclist_init(&bs->in_flight_ios);
 
 		/* initialize per-backend IOs */

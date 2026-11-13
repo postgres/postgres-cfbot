@@ -53,14 +53,14 @@ CREATE FUNCTION buffer_call_terminate_io(buffer int, for_input bool, succeed boo
 RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
-CREATE FUNCTION read_buffers(rel regclass, startblock int4, nblocks int4, OUT blockoff int4, OUT blocknum int4, OUT io_reqd bool, OUT foreign_io bool, OUT nblocks int4, OUT buf int4[])
+CREATE FUNCTION read_buffers(rel regclass, startblock int4, nblocks int4, abandon_after int4 DEFAULT -1, OUT blockoff int4, OUT blocknum int4, OUT io_reqd bool, OUT foreign_io bool, OUT abandoned bool, OUT nblocks int4, OUT buf int4[])
 RETURNS SETOF record STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
 /*
  * Read stream related functions
  */
-CREATE FUNCTION read_stream_for_blocks(rel regclass, blocks int4[], OUT blockoff int4, OUT blocknum int4, OUT buf int4)
+CREATE FUNCTION read_stream_for_blocks(rel regclass, blocks int4[], dedup bool DEFAULT false, evict_before int4 DEFAULT -1, OUT blockoff int4, OUT blocknum int4, OUT buf int4)
 RETURNS SETOF record STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
