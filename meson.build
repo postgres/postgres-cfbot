@@ -1123,6 +1123,11 @@ if liburing.found()
     cdata.set('HAVE_IO_URING_QUEUE_INIT_MEM', 1)
   endif
 
+  if cc.has_function('io_uring_opcode_supported',
+      dependencies: liburing, args: test_c_args)
+    cdata.set('HAVE_IO_URING_OPCODE_SUPPORTED', 1)
+  endif
+
 endif
 
 
