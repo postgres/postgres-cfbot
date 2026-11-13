@@ -29,14 +29,14 @@ SELECT * FROM pg_get_wal_block_info('0/0', :'wal_lsn1');
 ERROR:  could not read WAL at LSN 0/00000000
 -- Start LSN > End LSN.
 SELECT * FROM pg_get_wal_records_info(:'wal_lsn2', :'wal_lsn1');
-ERROR:  WAL start LSN must be less than end LSN
+ERROR:  WAL start LSN must be less than or equal to end LSN
 SELECT * FROM pg_get_wal_stats(:'wal_lsn2', :'wal_lsn1');
-ERROR:  WAL start LSN must be less than end LSN
+ERROR:  WAL start LSN must be less than or equal to end LSN
 SELECT * FROM pg_get_wal_block_info(:'wal_lsn2', :'wal_lsn1');
-ERROR:  WAL start LSN must be less than end LSN
+ERROR:  WAL start LSN must be less than or equal to end LSN
 -- LSNs with the highest value possible.
 SELECT * FROM pg_get_wal_record_info('FFFFFFFF/FFFFFFFF');
-ERROR:  WAL input LSN must be less than current LSN
+ERROR:  WAL input LSN must be less than or equal to current LSN
 -- Success with end LSNs.
 SELECT COUNT(*) >= 1 AS ok FROM pg_get_wal_records_info(:'wal_lsn1', 'FFFFFFFF/FFFFFFFF');
  ok 
@@ -58,11 +58,11 @@ SELECT COUNT(*) >= 1 AS ok FROM pg_get_wal_block_info(:'wal_lsn1', 'FFFFFFFF/FFF
 
 -- Failures with start LSNs.
 SELECT * FROM pg_get_wal_records_info('FFFFFFFF/FFFFFFFE', 'FFFFFFFF/FFFFFFFF');
-ERROR:  WAL start LSN must be less than current LSN
+ERROR:  WAL start LSN must be less than or equal to current LSN
 SELECT * FROM pg_get_wal_stats('FFFFFFFF/FFFFFFFE', 'FFFFFFFF/FFFFFFFF');
-ERROR:  WAL start LSN must be less than current LSN
+ERROR:  WAL start LSN must be less than or equal to current LSN
 SELECT * FROM pg_get_wal_block_info('FFFFFFFF/FFFFFFFE', 'FFFFFFFF/FFFFFFFF');
-ERROR:  WAL start LSN must be less than current LSN
+ERROR:  WAL start LSN must be less than or equal to current LSN
 -- ===================================================================
 -- Tests for all function executions
 -- ===================================================================
