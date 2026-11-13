@@ -58,6 +58,7 @@ typedef enum RecoveryPauseState
 	RECOVERY_NOT_PAUSED,		/* pause not requested */
 	RECOVERY_PAUSE_REQUESTED,	/* pause requested, but not yet paused */
 	RECOVERY_PAUSED,			/* recovery is paused */
+	RECOVERY_VCI_PAUSE_REQUESTED,	/* pause requested for VCI query */
 } RecoveryPauseState;
 
 /*
@@ -232,6 +233,8 @@ extern void WakeupRecovery(void);
 
 extern void StartupRequestWalReceiverRestart(void);
 extern void XLogRequestWalReceiverReply(void);
+
+extern void SetVciRecoveryPause(void);
 
 extern void RecoveryRequiresIntParameter(const char *param_name, int currValue, int minValue);
 

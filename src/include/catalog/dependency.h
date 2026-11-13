@@ -244,4 +244,7 @@ extern void shdepDropOwned(List *roleids, DropBehavior behavior);
 
 extern void shdepReassignOwned(List *roleids, Oid newrole);
 
+/* vci index original hook*/
+extern PGDLLIMPORT bool (*add_drop_relation_hook) (const ObjectAddress *object, int flags);
+
 #endif							/* DEPENDENCY_H */

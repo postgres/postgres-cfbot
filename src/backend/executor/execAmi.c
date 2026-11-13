@@ -445,6 +445,7 @@ ExecSupportsMarkRestore(Path *pathnode)
 			return true;
 
 		case T_CustomScan:
+		case T_CustomPlanMarkPos:
 			if (castNode(CustomPath, pathnode)->flags & CUSTOMPATH_SUPPORT_MARK_RESTORE)
 				return true;
 			return false;
@@ -571,6 +572,7 @@ ExecSupportsBackwardScan(Plan *node)
 			return ExecSupportsBackwardScan(((SubqueryScan *) node)->subplan);
 
 		case T_CustomScan:
+		case T_CustomPlanMarkPos:
 			if (((CustomScan *) node)->flags & CUSTOMPATH_SUPPORT_BACKWARD_SCAN)
 				return true;
 			return false;

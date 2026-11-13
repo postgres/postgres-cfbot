@@ -220,6 +220,9 @@ typedef struct Plan
 	/* OK to use as part of parallel plan? */
 	bool		parallel_safe;
 
+	/* plan number (1-origin) in the Query */
+	AttrNumber	plan_no;
+
 	/*
 	 * information needed for asynchronous execution
 	 */

@@ -463,6 +463,10 @@ extern void log_heap_prune_and_freeze(Relation relation, Buffer buffer,
 									  OffsetNumber *dead, int ndead,
 									  OffsetNumber *unused, int nunused);
 
+extern PGDLLIMPORT void (*add_index_delete_hook) (Relation indexRelation, const ItemPointerData *heap_tid, TransactionId xmin);
+extern PGDLLIMPORT bool (*add_snapshot_satisfies_hook) (HeapTuple htup, Snapshot snapshot, Buffer buffer);
+extern PGDLLIMPORT bool (*add_skip_vacuum_hook) (Relation rel);
+
 /* in heap/vacuumlazy.c */
 extern void heap_vacuum_rel(Relation rel,
 							const VacuumParams *params, BufferAccessStrategy bstrategy);

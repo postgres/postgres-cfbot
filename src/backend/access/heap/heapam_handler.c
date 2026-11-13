@@ -48,6 +48,9 @@
 #include "utils/rel.h"
 #include "utils/tuplesort.h"
 
+/* Preserve the original heap tuple that is passed to callback in heapam_index_build_range_scan() */
+HeapTuple	IndexHeapTuple;
+
 static void reform_and_rewrite_tuple(HeapTuple tuple,
 									 Relation OldHeap, Relation NewHeap,
 									 Datum *values, bool *isnull, RewriteState rwstate);
@@ -1616,6 +1619,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 		 * some index AMs want to do further processing on the data first.  So
 		 * pass the values[] and isnull[] arrays, instead.
 		 */
+		IndexHeapTuple = heapTuple;
 
 		if (HeapTupleIsHeapOnly(heapTuple))
 		{

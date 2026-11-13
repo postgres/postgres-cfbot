@@ -82,4 +82,8 @@ extern void ExplainQueryText(ExplainState *es, QueryDesc *queryDesc);
 extern void ExplainQueryParameters(ExplainState *es,
 								   ParamListInfo params, int maxlen);
 
+extern void ExplainPropertySortGroupKeys(PlanState *planstate, const char *qlabel,
+										 int nkeys, AttrNumber *keycols,
+										 List *ancestors, ExplainState *es);
+
 #endif							/* EXPLAIN_H */

@@ -117,6 +117,7 @@ typedef struct CustomScanMethods
 
 	/* Create execution state (CustomScanState) from a CustomScan plan node */
 	Node	   *(*CreateCustomScanState) (CustomScan *cscan);
+	struct CustomScan *(*CopyCustomPlan) (const struct CustomScan *from);
 } CustomScanMethods;
 
 /*
@@ -157,6 +158,9 @@ typedef struct CustomExecMethods
 	void		(*ExplainCustomScan) (CustomScanState *node,
 									  List *ancestors,
 									  ExplainState *es);
+	void		(*SetBoundCustomScan) (const LimitState *limit,
+									   CustomScanState *cps);
+	void		(*ExplainCustomPlanTargetRel) (CustomScanState *node, ExplainState *es);
 } CustomExecMethods;
 
 extern void RegisterCustomScanMethods(const CustomScanMethods *methods);

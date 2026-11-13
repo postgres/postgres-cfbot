@@ -186,6 +186,8 @@ extern void RestoreReindexState(const void *reindexstate);
 
 extern void IndexSetParentIndex(Relation partitionIdx, Oid parentOid);
 
+extern PGDLLIMPORT bool (*add_reindex_index_hook) (Relation);
+extern PGDLLIMPORT HeapTuple IndexHeapTuple;
 
 /*
  * itemptr_encode - Encode ItemPointer as int64/int8

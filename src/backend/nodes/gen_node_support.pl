@@ -139,6 +139,7 @@ my @extra_tags = qw(
   AllocSetContext GenerationContext SlabContext BumpContext
   TIDBitmap
   WindowObjectData
+  CustomPlanMarkPos
 );
 
 # This is a regular node, but we skip parsing it from its header file
@@ -656,10 +657,21 @@ foreach my $n (@node_types)
 	my $struct_no_equal = (elem $n, @no_equal);
 	next if $struct_no_copy && $struct_no_equal;
 
-	print $cfs "\t\tcase T_${n}:\n"
-	  . "\t\t\tretval = _copy${n}(from);\n"
-	  . "\t\t\tbreak;\n"
-	  unless $struct_no_copy;
+	if($n eq 'CustomScan')
+		{
+			print $cfs "\t\tcase T_${n}:\n"
+			  . "\t\tcase T_CustomPlanMarkPos:\n"
+			  . "\t\t\tretval = _copy${n}(from);\n"
+			  . "\t\t\tbreak;\n"
+			unless $struct_no_copy;
+		}
+		else
+		{
+		print $cfs "\t\tcase T_${n}:\n"
+		  . "\t\t\tretval = _copy${n}(from);\n"
+	          . "\t\t\tbreak;\n"
+		unless $struct_no_copy;
+	}
 
 	print $efs "\t\tcase T_${n}:\n"
 	  . "\t\t\tretval = _equal${n}(a, b);\n"
@@ -668,13 +680,35 @@ foreach my $n (@node_types)
 
 	next if elem $n, @custom_copy_equal;
 
-	print $cff "
-static $n *
-_copy${n}(const $n *from)
-{
-\t${n} *newnode = makeNode($n);
+        if ($n eq 'CustomScan')
+        {
+                print $cff "static $n *\n"
+                . "_copy${n}(const $n *from)\n"
+                . "{\n"
+                . "\tCustomScan *newnode;\n\n"
+                . "\tif (strcmp(from->methods->CustomName, \"VCI Scan\") == 0 ||
+                strcmp(from->methods->CustomName, \"VCI Sort\") == 0 ||
+                strcmp(from->methods->CustomName, \"VCI Aggregate\") == 0 ||
+                strcmp(from->methods->CustomName, \"VCI HashAggregate\") == 0 ||
+                strcmp(from->methods->CustomName, \"VCI GroupAggregate\") == 0 ||
+                strcmp(from->methods->CustomName, \"VCI Gather\") == 0)\n"
+                . "\t{\n"
+                . "\t\tnewnode = from->methods->CopyCustomPlan(from);\n"
+                . "\t}\n"
+                . "\telse\n"
+                . "\t\tnewnode = makeNode(CustomScan);\n\n"
+                . "\t((Node *) newnode)->type = nodeTag(from);\n\n" unless $struct_no_copy;
+        }
+        else
+        {
+                print $cff
+                "static $n *\n"
+                . "_copy${n}(const $n *from)\n"
+                . "{\n"
+                        ."\t${n} *newnode = makeNode($n);\n\n"
 
-" unless $struct_no_copy;
+                        unless $struct_no_copy;
+        }
 
 	print $eff "
 static bool

@@ -49,6 +49,22 @@ ExecInitCustomScan(CustomScan *cscan, EState *estate, int eflags)
 	css->ss.ps.state = estate;
 	css->ss.ps.ExecProcNode = ExecCustomScan;
 
+	if (strcmp(cscan->methods->CustomName, "VCI Scan") == 0 ||
+		strcmp(cscan->methods->CustomName, "VCI Sort") == 0 ||
+		strcmp(cscan->methods->CustomName, "VCI Aggregate") == 0 ||
+		strcmp(cscan->methods->CustomName, "VCI HashAggregate") == 0 ||
+		strcmp(cscan->methods->CustomName, "VCI GroupAggregate") == 0 ||
+		strcmp(cscan->methods->CustomName, "VCI Gather") == 0)
+	{
+		/*
+		 * The callback of custom-scan provider applies the final
+		 * initialization of the custom-scan-state node according to its
+		 * logic.
+		 */
+		css->methods->BeginCustomScan(css, estate, eflags);
+		return css;
+	}
+
 	/* create expression context for node */
 	ExecAssignExprContext(estate, &css->ss.ps);
 

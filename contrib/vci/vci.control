@@ -1,0 +1,5 @@
+# vci extension
+comment = 'vertical clustered index'
+default_version = '1.0'
+module_pathname = '$libdir/vci'
+relocatable = false

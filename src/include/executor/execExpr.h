@@ -292,6 +292,8 @@ typedef enum ExprEvalOp
 	EEOP_AGG_ORDERED_TRANS_DATUM,
 	EEOP_AGG_ORDERED_TRANS_TUPLE,
 
+	EEOP_VCI_VAR,
+	EEOP_VCI_PARAM_EXEC,
 	/* non-existent operation, used e.g. to check array lengths */
 	EEOP_LAST
 } ExprEvalOp;
@@ -338,6 +340,7 @@ typedef struct ExprEvalStep
 			/* but it's just the normal (negative) attr number for SYSVAR */
 			int			attnum;
 			Oid			vartype;	/* type OID of variable */
+			PlanState  *vci_parent_planstate;
 			VarReturningType varreturningtype;	/* return old/new/default */
 		}			var;
 
@@ -424,6 +427,7 @@ typedef struct ExprEvalStep
 		{
 			int			paramid;	/* numeric ID for parameter */
 			Oid			paramtype;	/* OID of parameter's datatype */
+			Plan	   *vci_parent_plan;
 		}			param;
 
 		/* for EEOP_PARAM_CALLBACK */
@@ -903,6 +907,18 @@ extern void ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
 								ExprContext *econtext);
 extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,
 						   ExprContext *econtext, TupleTableSlot *slot);
+extern void ExecCreateExprSetupSteps(ExprState *state, Node *node);
+extern void ExecReadyExpr(ExprState *state);
+
+typedef void (*ExprEvalVar_hook_type) (ExprState *state, ExprEvalStep *op,
+									   ExprContext *econtext);
+extern PGDLLIMPORT ExprEvalVar_hook_type ExprEvalVar_hook;
+
+typedef void (*ExprEvalParam_hook_type) (ExprState *state, ExprEvalStep *op,
+										 ExprContext *econtext);
+extern PGDLLIMPORT ExprEvalParam_hook_type ExprEvalParam_hook;
+extern void VciExprEvalVarHook(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
+extern void VciExprEvalParamHook(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
 
 extern void ExecAggInitGroup(AggState *aggstate, AggStatePerTrans pertrans, AggStatePerGroup pergroup,
 							 ExprContext *aggcontext);

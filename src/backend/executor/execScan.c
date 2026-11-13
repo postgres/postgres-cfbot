@@ -139,7 +139,7 @@ ExecScanReScan(ScanState *node)
 			 */
 			if (IsA(node->ps.plan, ForeignScan))
 				relids = ((ForeignScan *) node->ps.plan)->fs_base_relids;
-			else if (IsA(node->ps.plan, CustomScan))
+			else if (IsA(node->ps.plan, CustomScan) || IsA(node->ps.plan, CustomPlanMarkPos))
 				relids = ((CustomScan *) node->ps.plan)->custom_relids;
 			else
 				elog(ERROR, "unexpected scan node: %d",

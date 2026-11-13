@@ -108,4 +108,10 @@ extern void RangeVarCallbackOwnsRelation(const RangeVar *relation,
 extern bool PartConstraintImpliedByRelConstraint(Relation scanrel,
 												 List *partConstraint);
 
+extern PGDLLIMPORT bool (*add_alter_tablespace_hook) (Relation rel);
+extern PGDLLIMPORT void (*add_alter_table_change_owner_hook) (Oid relOid,
+															  char relKind, Oid newOwnerId);
+extern PGDLLIMPORT void (*add_alter_table_change_schema_hook) (Oid relOid,
+															   char relKind, Oid newNspOid);
+
 #endif							/* TABLECMDS_H */

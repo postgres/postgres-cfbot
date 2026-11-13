@@ -178,6 +178,7 @@ CREATE EXTENSION <replaceable>extension_name</replaceable>;
  &tsm-system-time;
  &unaccent;
  &uuid-ossp;
+ &vci;
  &xml2;
 
 </appendix>

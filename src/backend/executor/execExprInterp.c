@@ -198,6 +198,21 @@ static pg_always_inline void ExecAggPlainTransByRef(AggState *aggstate,
 													int setno);
 static char *ExecGetJsonValueItemString(JsonbValue *item, bool *resnull);
 
+ExprEvalVar_hook_type ExprEvalVar_hook = NULL;
+ExprEvalParam_hook_type ExprEvalParam_hook = NULL;
+void
+VciExprEvalVarHook(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	Assert(ExprEvalVar_hook != NULL);
+	(*ExprEvalVar_hook) (state, op, econtext);
+}
+void
+VciExprEvalParamHook(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	Assert(ExprEvalParam_hook != NULL);
+	(*ExprEvalParam_hook) (state, op, econtext);
+}
+
 /*
  * ScalarArrayOpExprHashEntry
  * 		Hash table entry type used during EEOP_HASHED_SCALARARRAYOP
@@ -602,6 +617,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_AGG_PRESORTED_DISTINCT_MULTI,
 		&&CASE_EEOP_AGG_ORDERED_TRANS_DATUM,
 		&&CASE_EEOP_AGG_ORDERED_TRANS_TUPLE,
+		&&CASE_EEOP_VCI_VAR,
+		&&CASE_EEOP_VCI_PARAM_EXEC,
 		&&CASE_EEOP_LAST
 	};
 
@@ -2274,6 +2291,25 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 			EEO_NEXT();
 		}
+
+		EEO_CASE(EEOP_VCI_VAR)
+		{
+			/* TO-do */
+			Assert(ExprEvalVar_hook != NULL);
+			(*ExprEvalVar_hook) (state, op, econtext);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_VCI_PARAM_EXEC)
+		{
+			/* To-do */
+			Assert(ExprEvalParam_hook != NULL);
+			(*ExprEvalParam_hook) (state, op, econtext);
+
+			EEO_NEXT();
+		}
+
 
 		EEO_CASE(EEOP_LAST)
 		{

@@ -24,6 +24,7 @@
 #include "catalog/pg_type.h"
 #include "common/int.h"
 #include "common/int128.h"
+#include "datatype/timestamp.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
@@ -63,19 +64,6 @@ typedef struct
 	int			step_sign;
 	pg_tz	   *attimezone;
 } generate_series_timestamptz_fctx;
-
-/*
- * The transition datatype for interval aggregates is declared as internal.
- * It's a pointer to an IntervalAggState allocated in the aggregate context.
- */
-typedef struct IntervalAggState
-{
-	int64		N;				/* count of finite intervals processed */
-	Interval	sumX;			/* sum of finite intervals processed */
-	/* These counts are *not* included in N!  Use IA_TOTAL_COUNT() as needed */
-	int64		pInfcount;		/* count of +infinity intervals */
-	int64		nInfcount;		/* count of -infinity intervals */
-} IntervalAggState;
 
 #define IA_TOTAL_COUNT(ia) \
 	((ia)->N + (ia)->pInfcount + (ia)->nInfcount)
@@ -3509,7 +3497,7 @@ interval_larger(PG_FUNCTION_ARGS)
 	PG_RETURN_INTERVAL_P(result);
 }
 
-static void
+void
 finite_interval_pl(const Interval *span1, const Interval *span2, Interval *result)
 {
 	Assert(!INTERVAL_NOT_FINITE(span1));
@@ -3988,7 +3976,7 @@ in_range_interval_interval(PG_FUNCTION_ARGS)
  * context. When the state data needs to be allocated in the current memory
  * context, we use palloc0 directly e.g. interval_avg_deserialize().
  */
-static IntervalAggState *
+IntervalAggState *
 makeIntervalAggState(FunctionCallInfo fcinfo)
 {
 	IntervalAggState *state;

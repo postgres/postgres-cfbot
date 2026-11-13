@@ -112,6 +112,16 @@ typedef enum SnapshotType
 	 * horizon to use.
 	 */
 	SNAPSHOT_NON_VACUUMABLE,
+
+	/*
+	 * VCI WOS2ROS visible
+	 */
+	SNAPSHOT_VCI_WOS2ROS,
+
+	/*
+	 * VCI Local ROS visible
+	 */
+	SNAPSHOT_VCI_LOCALROS
 } SnapshotType;
 
 typedef struct SnapshotData *Snapshot;

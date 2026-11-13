@@ -2942,7 +2942,8 @@ recoveryPausesHere(bool endOfRecovery)
 		ereport(LOG,
 				(errmsg("pausing at the end of recovery"),
 				 errhint("Execute pg_wal_replay_resume() to promote.")));
-	else
+	/* If pause requested by VCI, the log is not output. */
+	else if (GetRecoveryPauseState() != RECOVERY_VCI_PAUSE_REQUESTED)
 		ereport(LOG,
 				(errmsg("recovery has paused"),
 				 errhint("Execute pg_wal_replay_resume() to continue.")));
@@ -3108,6 +3109,18 @@ SetRecoveryPause(bool recoveryPause)
 		ConditionVariableBroadcast(&XLogRecoveryCtl->recoveryNotPausedCV);
 }
 
+/* Set the recovery pause requested for VCI. */
+void
+SetVciRecoveryPause(void)
+{
+	SpinLockAcquire(&XLogRecoveryCtl->info_lck);
+
+	if (XLogRecoveryCtl->recoveryPauseState == RECOVERY_NOT_PAUSED)
+		XLogRecoveryCtl->recoveryPauseState = RECOVERY_VCI_PAUSE_REQUESTED;
+
+	SpinLockRelease(&XLogRecoveryCtl->info_lck);
+}
+
 /*
  * Confirm the recovery pause by setting the recovery pause state to
  * RECOVERY_PAUSED.
@@ -3117,7 +3130,8 @@ ConfirmRecoveryPaused(void)
 {
 	/* If recovery pause is requested then set it paused */
 	SpinLockAcquire(&XLogRecoveryCtl->info_lck);
-	if (XLogRecoveryCtl->recoveryPauseState == RECOVERY_PAUSE_REQUESTED)
+	if (XLogRecoveryCtl->recoveryPauseState == RECOVERY_PAUSE_REQUESTED ||
+		XLogRecoveryCtl->recoveryPauseState == RECOVERY_VCI_PAUSE_REQUESTED)
 		XLogRecoveryCtl->recoveryPauseState = RECOVERY_PAUSED;
 	SpinLockRelease(&XLogRecoveryCtl->info_lck);
 }

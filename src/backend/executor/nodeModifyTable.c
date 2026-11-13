@@ -76,6 +76,7 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
+List	   *(*add_should_index_insert_hook) (ResultRelInfo *, TupleTableSlot *, ItemPointer, EState *) = NULL;
 
 typedef struct MTTargetRelLookup
 {
@@ -2372,6 +2373,15 @@ ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 		recheckIndexes = ExecInsertIndexTuples(resultRelInfo, context->estate,
 											   flags, slot, NIL,
 											   NULL);
+	}
+
+	/*
+	 * VCI update hook
+	 */
+	else if (resultRelInfo->ri_NumIndices > 0 && !updateCxt->updateIndexes)
+	{
+		if (add_should_index_insert_hook)
+			recheckIndexes = add_should_index_insert_hook(resultRelInfo, slot, &slot->tts_tid, context->estate);
 	}
 
 	/* AFTER ROW UPDATE Triggers */

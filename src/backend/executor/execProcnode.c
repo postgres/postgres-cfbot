@@ -287,6 +287,7 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 			break;
 
 		case T_CustomScan:
+		case T_CustomPlanMarkPos:
 			result = (PlanState *) ExecInitCustomScan((CustomScan *) node,
 													  estate, eflags);
 			break;
