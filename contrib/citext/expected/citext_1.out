@@ -2120,6 +2120,91 @@ SELECT split_part('abcTdefTghi', 't'::citext, 2) = 'def' AS t;
  t
 (1 row)
 
+-- positions are handled as in the core split_part()
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, -1) = 'ghi' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, -3) = 'abc' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, 4) = '' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, -4) = '' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, ''::citext, 1) = 'abcTdefTghi' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, ''::citext, 2) = '' AS t;
+ t 
+---
+ t
+(1 row)
+
+-- the delimiter is matched regardless of case, even with characters that are
+-- special in a regular expression or in its replacement string
+SELECT split_part('a\B\c'::citext, '\'::citext, -1) = 'c' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('a\1b\1c'::citext, '\1'::citext, 2) = 'b' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('aB&cb&d'::citext, 'b&'::citext, -2) = 'c' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('a.*B.*c'::citext, '.*'::citext, -2) = 'B' AS t;
+ t 
+---
+ t
+(1 row)
+
+-- occurrences of the delimiter do not overlap, and fields keep their case
+SELECT split_part('AaA'::citext, 'aa'::citext, -1) = 'A' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('xaAb'::citext, 'AB'::citext, 1) = 'xa' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('a,b,c'::citext, ','::citext, -2147483648) = '' AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT split_part('abcTdefTghi'::citext, 't'::citext, 0);
+ERROR:  field position must not be zero
+CONTEXT:  SQL function "split_part" statement 1
 SELECT strpos('high'::citext, 'gh'        ) = 3 AS t;
  t 
 ---
