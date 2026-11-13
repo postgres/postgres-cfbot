@@ -7285,8 +7285,17 @@ get_actual_variable_endpoint(Relation heapRel,
 	 * We set xs_visited_pages_limit to tell the table AM to give up once it
 	 * has switched heap pages this many times without finding a visible
 	 * tuple.
+	 *
+	 * We also set xs_index_pages_limit to independently tell the index AM to
+	 * give up when this many leaf pages that lack even one matching index
+	 * tuple have been read.  This acts as a backstop against pages entirely
+	 * full of index entries that were already marked killed (typically by
+	 * prior calls here).  That way we avoid hopelessly searching through an
+	 * unbounded number of index leaf pages that don't contain even a single
+	 * still-live entry (which can't trigger xs_visited_pages_limit).
 	 */
 #define VISITED_PAGES_LIMIT 100
+#define INDEX_PAGES_LIMIT 3
 	InitNonVacuumableSnapshot(SnapshotNonVacuumable,
 							  GlobalVisTestFor(heapRel));
 
@@ -7296,6 +7305,7 @@ get_actual_variable_endpoint(Relation heapRel,
 								 SO_NONE);
 	Assert(index_scan->xs_want_itup);
 	index_scan->xs_visited_pages_limit = VISITED_PAGES_LIMIT;
+	index_scan->xs_index_pages_limit = INDEX_PAGES_LIMIT;
 	index_rescan(index_scan, scankeys, 1, NULL, 0);
 
 	/* Fetch first/next tuple in specified direction */
