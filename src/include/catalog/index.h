@@ -45,9 +45,8 @@ typedef struct ReindexParams
 
 /* flag bits for ReindexParams->flags */
 #define REINDEXOPT_VERBOSE		0x01	/* print progress info */
-#define REINDEXOPT_REPORT_PROGRESS 0x02 /* report pgstat progress */
-#define REINDEXOPT_MISSING_OK 	0x04	/* skip missing relations */
-#define REINDEXOPT_CONCURRENTLY	0x08	/* concurrent mode */
+#define REINDEXOPT_MISSING_OK 	0x02	/* skip missing relations */
+#define REINDEXOPT_CONCURRENTLY	0x04	/* concurrent mode */
 
 /* state info for validate_index bulkdelete callback */
 typedef struct ValidateIndexState
@@ -71,8 +70,7 @@ extern void index_check_primary_key(Relation heapRel,
 #define	INDEX_CREATE_IF_NOT_EXISTS			(1 << 4)
 #define	INDEX_CREATE_PARTITIONED			(1 << 5)
 #define INDEX_CREATE_INVALID				(1 << 6)
-#define INDEX_CREATE_SUPPRESS_PROGRESS		(1 << 7)
-#define INDEX_CREATE_DEFERRABLE				(1 << 8)
+#define INDEX_CREATE_DEFERRABLE				(1 << 7)
 
 extern Oid	index_create(Relation heapRelation,
 						 const char *indexRelationName,
@@ -153,8 +151,7 @@ extern void index_build(Relation heapRelation,
 						Relation indexRelation,
 						IndexInfo *indexInfo,
 						bool isreindex,
-						bool parallel,
-						bool progress);
+						bool parallel);
 
 extern void validate_index(Oid heapId, Oid indexId, Snapshot snapshot);
 

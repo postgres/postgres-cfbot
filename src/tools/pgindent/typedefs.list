@@ -2275,6 +2275,8 @@ PgAioWorkerSlot
 PgAioWorkerSubmissionQueue
 PgArchData
 PgBackendGSSStatus
+PgBackendProgress
+PgBackendProgresElt
 PgBackendSSLStatus
 PgBackendStatus
 PgBenchExpr

@@ -1162,7 +1162,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 				 * the st_progress_param array.
 				 */
 				appendStringInfo(&buf, _("delay time: %.3f ms\n"),
-								 (double) MyBEEntry->st_progress_param[PROGRESS_VACUUM_DELAY_TIME] / 1000000.0);
+								 (double) MyBEEntry->st_progress.param[PROGRESS_VACUUM_DELAY_TIME] / 1000000.0);
 			}
 			if (track_io_timing)
 			{

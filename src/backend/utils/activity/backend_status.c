@@ -283,8 +283,8 @@ pgstat_bestart_initial(void)
 	lbeentry.st_gss = false;
 
 	lbeentry.st_state = STATE_STARTING;
-	lbeentry.st_progress_command = PROGRESS_COMMAND_INVALID;
-	lbeentry.st_progress_command_target = InvalidOid;
+	lbeentry.st_progress.command = PROGRESS_COMMAND_INVALID;
+	lbeentry.st_progress.command_target = InvalidOid;
 	lbeentry.st_query_id = INT64CONST(0);
 	lbeentry.st_plan_id = INT64CONST(0);
 
