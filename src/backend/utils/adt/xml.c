@@ -588,11 +588,18 @@ xmlconcat(List *args)
 		xmlChar    *version;
 		int			standalone;
 		char	   *str;
+		int			res_code;
 
 		len = VARSIZE(x) - VARHDRSZ;
 		str = text_to_cstring((text *) x);
 
-		parse_xml_decl((xmlChar *) str, &len, &version, NULL, &standalone);
+		res_code = parse_xml_decl((xmlChar *) str, &len, &version, NULL,
+								  &standalone);
+		if (res_code != 0)
+			ereport(ERROR,
+					errcode(ERRCODE_DATA_CORRUPTED),
+					errmsg_internal("could not parse XML declaration in stored value"),
+					errdetail_for_xml_code(res_code));
 
 		if (standalone == 0 && global_standalone == 1)
 			global_standalone = 0;
@@ -1091,11 +1098,18 @@ xmlroot(xmltype *data, text *version, int standalone)
 	xmlChar    *orig_version;
 	int			orig_standalone;
 	StringInfoData buf;
+	int			res_code;
 
 	len = VARSIZE(data) - VARHDRSZ;
 	str = text_to_cstring((text *) data);
 
-	parse_xml_decl((xmlChar *) str, &len, &orig_version, NULL, &orig_standalone);
+	res_code = parse_xml_decl((xmlChar *) str, &len, &orig_version, NULL,
+							  &orig_standalone);
+	if (res_code != 0)
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg_internal("could not parse XML declaration in stored value"),
+				errdetail_for_xml_code(res_code));
 
 	if (version)
 		orig_version = xml_text2xmlChar(version);
@@ -1119,7 +1133,19 @@ xmlroot(xmltype *data, text *version, int standalone)
 	}
 
 	initStringInfo(&buf);
-	print_xml_decl(&buf, orig_version, 0, orig_standalone);
+	if (print_xml_decl(&buf, orig_version, 0, orig_standalone) && orig_version)
+	{
+		xmlChar    *parsed_version;
+
+		/* Reject a version that the XML declaration cannot represent */
+		if (parse_xml_decl((xmlChar *) buf.data, NULL, &parsed_version,
+						   NULL, NULL) != XML_ERR_OK ||
+			xmlStrcmp(parsed_version, orig_version) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid XML version \"%s\"",
+							(char *) orig_version)));
+	}
 	appendStringInfoString(&buf, str + len);
 
 	return stringinfo_to_xmltype(&buf);

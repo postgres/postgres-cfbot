@@ -116,6 +116,8 @@ SELECT xmlroot(xmlroot(xml '<foo/>', version '1.0'), version '1.1', standalone n
 SELECT xmlroot('<?xml version="1.1" standalone="yes"?><foo/>', version no value, standalone no);
 SELECT xmlroot('<?xml version="1.1" standalone="yes"?><foo/>', version no value, standalone no value);
 SELECT xmlroot('<?xml version="1.1" standalone="yes"?><foo/>', version no value);
+SELECT xmlroot(xml '<foo/>', version '1.0"x');
+SELECT xmlroot(xml '<foo/>', version '1.0" standalone="yes');
 
 
 SELECT xmlroot (
