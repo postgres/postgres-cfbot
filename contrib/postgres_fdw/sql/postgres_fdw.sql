@@ -250,6 +250,26 @@ ANALYZE ft1;
 ALTER FOREIGN TABLE ft2 OPTIONS (use_remote_estimate 'true');
 
 -- ===================================================================
+-- test streaming_fetch option
+-- ===================================================================
+CREATE SERVER fetch_stream_srv FOREIGN DATA WRAPPER postgres_fdw
+    OPTIONS (streaming_fetch 'true');
+CREATE USER MAPPING FOR CURRENT_USER SERVER fetch_stream_srv;
+CREATE FOREIGN TABLE ft_stream (c1 int) SERVER fetch_stream_srv;
+-- Set on the server; EXPLAIN VERBOSE shows "Streaming Fetch: true".
+EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM ft_stream;
+-- A table-level setting overrides the server's, in either direction.
+ALTER FOREIGN TABLE ft_stream OPTIONS (ADD streaming_fetch 'false');
+EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM ft_stream;
+ALTER SERVER fetch_stream_srv OPTIONS (SET streaming_fetch 'false');
+ALTER FOREIGN TABLE ft_stream OPTIONS (SET streaming_fetch 'true');
+EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM ft_stream;
+ALTER FOREIGN TABLE ft_stream OPTIONS (SET streaming_fetch 'yes');  -- ERROR
+DROP FOREIGN TABLE ft_stream;
+DROP USER MAPPING FOR CURRENT_USER SERVER fetch_stream_srv;
+DROP SERVER fetch_stream_srv;
+
+-- ===================================================================
 -- test subscription
 -- ===================================================================
 CREATE SUBSCRIPTION regress_pgfdw_subscription SERVER testserver1
@@ -368,6 +388,292 @@ EXPLAIN (VERBOSE, COSTS OFF)
   WHERE a.c2 = 6 AND b.c1 = a.c1 AND a.c8 = 'foo' AND b.c7 = upper(a.c7);
 SELECT * FROM ft2 a, ft2 b
 WHERE a.c2 = 6 AND b.c1 = a.c1 AND a.c8 = 'foo' AND b.c7 = upper(a.c7);
+
+-- ===================================================================
+-- streaming_fetch scans sharing a connection
+-- ===================================================================
+-- ft1_s and ft2_s stream the same remote table as ft1 and ft2, and all four
+-- share the loopback connection.  ft2_s gets its rows in chunks of 5.
+CREATE FOREIGN TABLE ft1_s (
+	c1 int NOT NULL,
+	c2 int NOT NULL,
+	c3 text,
+	c4 timestamptz,
+	c5 timestamp,
+	c6 varchar(10),
+	c7 char(10) default 'ft1',
+	c8 user_enum
+) SERVER loopback OPTIONS (schema_name 'S 1', table_name 'T 1',
+                          streaming_fetch 'true');
+ALTER FOREIGN TABLE ft1_s ALTER COLUMN c1 OPTIONS (column_name 'C 1');
+CREATE FOREIGN TABLE ft2_s (
+	c1 int NOT NULL,
+	c2 int NOT NULL,
+	c3 text,
+	c4 timestamptz,
+	c5 timestamp,
+	c6 varchar(10),
+	c7 char(10) default 'ft2',
+	c8 user_enum
+) SERVER loopback OPTIONS (schema_name 'S 1', table_name 'T 1',
+                          streaming_fetch 'true', fetch_size '5',
+                          use_remote_estimate 'true');
+ALTER FOREIGN TABLE ft2_s ALTER COLUMN c1 OPTIONS (column_name 'C 1');
+
+-- One row per chunk, and chunks of 5 + 5 + 2.  The c8 filter can't be pushed
+-- down, so the aggregate runs locally over the streamed rows.
+ALTER FOREIGN TABLE ft1_s OPTIONS (ADD fetch_size '1');
+SELECT array_agg(c1 ORDER BY c1) FROM ft1_s WHERE c1 <= 12 AND c8 = 'foo';
+ALTER FOREIGN TABLE ft1_s OPTIONS (DROP fetch_size);
+SELECT array_agg(c1 ORDER BY c1) FROM ft2_s WHERE c1 <= 12 AND c8 = 'foo';
+
+-- Streaming and cursor scans in one query, and two streaming scans at once.
+SELECT * FROM ft1_s t1 WHERE t1.c3 = (SELECT MAX(c3) FROM ft2 t2) ORDER BY c1;
+SELECT * FROM ft1_s t1 WHERE t1.c3 = (SELECT MAX(c3) FROM ft2_s t2) ORDER BY c1;
+SELECT t1.c1, t2."C 1" FROM ft2_s t1 JOIN "S 1"."T 1" t2 ON (t1.c1 = t2."C 1") OFFSET 100 LIMIT 10;
+SELECT t1.c1 FROM ft1_s t1 WHERE NOT EXISTS (SELECT 1 FROM ft2 t2 WHERE t1.c1 = t2.c2) ORDER BY t1.c1 OFFSET 100 LIMIT 10;
+SELECT t1.c1 FROM ft1_s t1 WHERE NOT EXISTS (SELECT 1 FROM ft2_s t2 WHERE t1.c1 = t2.c2) ORDER BY t1.c1 OFFSET 100 LIMIT 10;
+
+-- Nested loops: each time the inner scan starts, the rest of the outer
+-- scan's result is saved locally, and later read back in fetch_size batches.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM ft2_s a, ft2_s b
+WHERE a.c2 = 6 AND b.c1 = a.c1 AND a.c8 = 'foo' AND b.c7 = upper(a.c7);
+SELECT count(*), sum(b.c1) FROM ft2_s a, ft2_s b
+WHERE a.c2 = 6 AND b.c1 = a.c1 AND a.c8 = 'foo' AND b.c7 = upper(a.c7);
+SELECT count(*), sum(c.c1) FROM ft2_s a, ft2_s b, ft2_s c
+WHERE a.c2 = 6 AND b.c1 = a.c1 AND c.c1 = b.c1
+AND a.c8 = 'foo' AND b.c7 = upper(a.c7);
+
+-- An EXISTS subquery stops its streaming scan at the first match, leaving
+-- the rest of its result unread.  The connection must still work for the
+-- outer cursor's later FETCHes (ft1 needs several with fetch_size 5), for a
+-- per-row UPDATE, and for a pushed-down UPDATE on ft4.
+CREATE FUNCTION direct_modify_ft4(id int) RETURNS void AS $$
+  UPDATE ft4 SET c3 = c3 WHERE c1 = id;
+$$ LANGUAGE sql;
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD fetch_size '5');
+SET enable_hashagg = off;
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET enable_material = off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT a.c1, a.c2 FROM ft1 a
+WHERE a.c1 < 20 AND a.c8 = 'foo' AND EXISTS (SELECT 1 FROM ft2_s b WHERE b.c2 = a.c2)
+ORDER BY a.c1;
+SELECT a.c1, a.c2 FROM ft1 a
+WHERE a.c1 < 20 AND a.c8 = 'foo' AND EXISTS (SELECT 1 FROM ft2_s b WHERE b.c2 = a.c2)
+ORDER BY a.c1;
+EXPLAIN (VERBOSE, COSTS OFF)
+UPDATE ft1 SET c3 = c3
+WHERE c1 < 20 AND c8 = 'foo' AND EXISTS (SELECT 1 FROM ft2_s b WHERE b.c2 = ft1.c2);
+EXPLAIN (VERBOSE, COSTS OFF) UPDATE ft4 SET c3 = c3 WHERE c1 = 1;
+BEGIN;
+WITH u AS (UPDATE ft1 SET c3 = c3
+  WHERE c1 < 20 AND c8 = 'foo' AND EXISTS (SELECT 1 FROM ft2_s b WHERE b.c2 = ft1.c2)
+  RETURNING c1)
+SELECT count(*) FROM u;
+SELECT count(*) FROM (SELECT direct_modify_ft4(a.c1) FROM ft1 a
+  WHERE a.c1 < 20 AND a.c8 = 'foo' AND EXISTS (SELECT 1 FROM ft2_s b WHERE b.c2 = a.c2)
+  OFFSET 0) s;
+ROLLBACK;
+RESET enable_hashagg;
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+RESET enable_material;
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP fetch_size);
+DROP FUNCTION direct_modify_ft4(int);
+
+-- A LIMIT that can't be pushed down stops the scan early; the rest of the
+-- remote result is read and discarded.  The second query stops partway
+-- through a chunk.
+SELECT c1 FROM ft1_s WHERE c8 = 'foo' ORDER BY c1 LIMIT 5;
+SELECT c1 FROM ft2_s WHERE c8 = 'foo' ORDER BY c1 LIMIT 7;
+SELECT count(*) FROM ft1_s;
+
+-- Scans that fetch ctid or lock rows use a cursor (no "Streaming Fetch").
+EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM ft2_s WHERE c1 = 1 FOR UPDATE;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM ft2_s WHERE c1 = 1 FOR SHARE;
+EXPLAIN (VERBOSE, COSTS OFF) DELETE FROM ft2_s WHERE c1 = 1 AND random() >= 0;
+EXPLAIN (VERBOSE, COSTS OFF)
+UPDATE ft2_s f1 SET c3 = f2.c3 FROM ft1_s f2
+WHERE f1.c1 = f2.c1 AND f1.c1 = 3 AND random() >= 0;
+-- So a non-direct UPDATE whose rows arrive in several chunks updates them all.
+BEGIN;
+WITH u AS (UPDATE ft2_s SET c3 = c3 WHERE c1 <= 20 AND random() >= 0 RETURNING 1)
+SELECT count(*) FROM u;
+ROLLBACK;
+
+DROP FOREIGN TABLE ft1_s, ft2_s;
+
+-- If saving a scan's rows locally fails partway (row 6 can't be converted)
+-- inside a subtransaction, the scan must fail at the outer level rather than
+-- return short results, even if a later attempt to save the rest succeeds.
+CREATE TABLE loct_lost (id int, x text);
+INSERT INTO loct_lost SELECT g, g::text FROM generate_series(1, 5) g;
+INSERT INTO loct_lost VALUES (6, 'not_an_int'), (7, '7'), (8, '8');
+
+CREATE FOREIGN TABLE ft_lost (id int, x int)
+  SERVER loopback OPTIONS (schema_name 'public', table_name 'loct_lost',
+                           streaming_fetch 'true', fetch_size '2');
+CREATE FOREIGN TABLE ft_lost_other (id int)
+  SERVER loopback OPTIONS (schema_name 'public', table_name 'loct_lost');
+
+\set VERBOSITY terse
+BEGIN;
+DECLARE c_lost CURSOR FOR SELECT id, x FROM ft_lost ORDER BY id;
+FETCH 2 FROM c_lost;
+SAVEPOINT sp;
+SELECT id FROM ft_lost_other ORDER BY id LIMIT 1;  -- hits row 6
+ROLLBACK TO SAVEPOINT sp;
+FETCH ALL FROM c_lost;                             -- ERROR
+COMMIT;
+BEGIN;
+DECLARE c_lost CURSOR FOR SELECT id, x FROM ft_lost ORDER BY id;
+FETCH 2 FROM c_lost;
+SAVEPOINT sp;
+SELECT count(*) FROM ft_lost_other;                -- hits row 6
+ROLLBACK TO SAVEPOINT sp;
+SELECT count(*) FROM ft_lost_other;                -- saves rows 7 and 8
+FETCH ALL FROM c_lost;                             -- ERROR
+COMMIT;
+SELECT count(*) FROM ft_lost_other;                -- connection still works
+\set VERBOSITY default
+
+DROP FOREIGN TABLE ft_lost, ft_lost_other;
+DROP TABLE loct_lost;
+
+-- Transaction control with a cursor whose remote query is still streaming
+-- when postgres_fdw sends RELEASE SAVEPOINT, ROLLBACK TO SAVEPOINT or
+-- COMMIT.  Each case must return every row or fail cleanly, and leave the
+-- connection usable.
+CREATE TABLE loct_xact (id int, x text);
+INSERT INTO loct_xact SELECT g, g::text FROM generate_series(1, 10) g;
+CREATE FOREIGN TABLE ft_xact (id int, x int)
+  SERVER loopback OPTIONS (schema_name 'public', table_name 'loct_xact',
+                           streaming_fetch 'true', fetch_size '2');
+CREATE FOREIGN TABLE ft_xact_other (id int)
+  SERVER loopback OPTIONS (schema_name 'public', table_name 'loct_xact');
+
+-- Cursor opened in a subtransaction that is then released.
+BEGIN;
+SAVEPOINT s;
+DECLARE c CURSOR FOR SELECT id FROM ft_xact ORDER BY id;
+FETCH 3 FROM c;
+RELEASE SAVEPOINT s;
+FETCH ALL FROM c;
+COMMIT;
+
+-- Cursor declared outside a subtransaction, but first read inside it.
+BEGIN;
+DECLARE c CURSOR FOR SELECT id FROM ft_xact ORDER BY id;
+SAVEPOINT s;
+SELECT count(*) FROM ft_xact_other;
+FETCH 3 FROM c;
+RELEASE SAVEPOINT s;
+FETCH ALL FROM c;
+COMMIT;
+
+-- Nested savepoints, released one at a time; parallel_commit sends each
+-- RELEASE SAVEPOINT asynchronously.
+ALTER SERVER loopback OPTIONS (ADD parallel_commit 'true');
+BEGIN;
+SAVEPOINT s1;
+SAVEPOINT s2;
+DECLARE c CURSOR FOR SELECT id FROM ft_xact ORDER BY id;
+FETCH 3 FROM c;
+RELEASE SAVEPOINT s2;
+FETCH 2 FROM c;
+RELEASE SAVEPOINT s1;
+FETCH ALL FROM c;
+COMMIT;
+ALTER SERVER loopback OPTIONS (DROP parallel_commit);
+
+-- Rolling back the subtransaction in which the cursor was first read
+-- cancels the remote query, so the cursor must report an error.
+BEGIN;
+DECLARE c CURSOR FOR SELECT id FROM ft_xact ORDER BY id;
+SAVEPOINT s;
+SELECT count(*) FROM ft_xact_other;
+FETCH 3 FROM c;
+ROLLBACK TO SAVEPOINT s;
+FETCH ALL FROM c;                     -- ERROR
+COMMIT;
+SELECT count(*) FROM ft_xact_other;   -- connection still works
+
+-- Cursor opened in a subtransaction that is rolled back goes away with it.
+BEGIN;
+SAVEPOINT s;
+DECLARE c CURSOR FOR SELECT id FROM ft_xact ORDER BY id;
+FETCH 3 FROM c;
+ROLLBACK TO SAVEPOINT s;
+SELECT count(*) FROM ft_xact_other;
+COMMIT;
+
+-- Saving the rest of the cursor's rows at RELEASE SAVEPOINT fails on a bad
+-- row; the connection must work again after rollback.
+INSERT INTO loct_xact VALUES (11, 'not_an_int');
+\set VERBOSITY terse
+BEGIN;
+SAVEPOINT s;
+DECLARE c CURSOR FOR SELECT id, x FROM ft_xact ORDER BY id;
+FETCH 3 FROM c;
+RELEASE SAVEPOINT s;                  -- ERROR
+ROLLBACK;
+\set VERBOSITY default
+SELECT count(*) FROM ft_xact_other;   -- connection still works
+DELETE FROM loct_xact WHERE id = 11;
+
+-- Top-level COMMIT closes the cursor before the remote COMMIT.
+BEGIN;
+DECLARE c CURSOR FOR SELECT id FROM ft_xact ORDER BY id;
+FETCH 3 FROM c;
+COMMIT;
+SELECT count(*) FROM ft_xact_other;
+
+-- A holdable cursor is read to the end at COMMIT and keeps all its rows.
+BEGIN;
+DECLARE c CURSOR WITH HOLD FOR SELECT id FROM ft_xact ORDER BY id;
+FETCH 3 FROM c;
+COMMIT;
+FETCH ALL FROM c;
+CLOSE c;
+
+-- Top-level ROLLBACK.
+BEGIN;
+DECLARE c CURSOR FOR SELECT id FROM ft_xact ORDER BY id;
+FETCH 3 FROM c;
+ROLLBACK;
+SELECT count(*) FROM ft_xact_other;
+
+DROP FOREIGN TABLE ft_xact, ft_xact_other;
+DROP TABLE loct_xact;
+
+-- Rows saved locally on behalf of a cursor may spill to a temp file.  That
+-- file belongs to the cursor, so it must survive the rollback of the
+-- subtransaction in which it was written.
+CREATE TABLE loct_spill (id int, pad text);
+INSERT INTO loct_spill SELECT g, repeat('x', 100) FROM generate_series(1, 5000) g;
+CREATE FOREIGN TABLE ft_spill (id int, pad text)
+  SERVER loopback OPTIONS (schema_name 'public', table_name 'loct_spill',
+                           streaming_fetch 'true', fetch_size '10');
+CREATE FOREIGN TABLE ft_spill_other (id int)
+  SERVER loopback OPTIONS (schema_name 'public', table_name 'loct_spill');
+
+BEGIN;
+SET LOCAL work_mem = '64kB';
+DECLARE c CURSOR FOR SELECT id, length(pad) FROM ft_spill ORDER BY id;
+FETCH 1 FROM c;
+SAVEPOINT s;
+SELECT count(*) FROM ft_spill_other;   -- saves c's rows, spilling to disk
+ROLLBACK TO SAVEPOINT s;
+MOVE 4995 FROM c;
+FETCH ALL FROM c;
+COMMIT;
+
+DROP FOREIGN TABLE ft_spill, ft_spill_other;
+DROP TABLE loct_spill;
+
 -- bug before 9.3.5 due to sloppy handling of remote-estimate parameters
 SELECT * FROM ft1 WHERE c1 = ANY (ARRAY(SELECT c1 FROM ft2 WHERE c1 < 5));
 SELECT * FROM ft2 WHERE c1 = ANY (ARRAY(SELECT c1 FROM ft1 WHERE c1 < 5));
@@ -3887,6 +4193,31 @@ SELECT 1 FROM ft1 LIMIT 1;    -- should fail
 \set VERBOSITY default
 COMMIT;
 
+-- ===================================================================
+-- streaming_fetch: reconnecting after the remote backend terminates
+-- ===================================================================
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD streaming_fetch 'true');
+SELECT 1 FROM ft1 LIMIT 1;    -- open the connection
+DO $$ BEGIN
+PERFORM pg_terminate_backend(pid, 180000) FROM pg_stat_activity
+	WHERE application_name = 'fdw_retry_check';
+END $$;
+-- Outside a subtransaction, the broken connection is reestablished.
+BEGIN;
+SELECT c1 FROM ft1 ORDER BY c1 LIMIT 3;
+DO $$ BEGIN
+PERFORM pg_terminate_backend(pid, 180000) FROM pg_stat_activity
+	WHERE application_name = 'fdw_retry_check';
+END $$;
+-- Inside one, it isn't, and the query fails.
+SAVEPOINT s2;
+-- The text of the error might vary across platforms, so only show SQLSTATE.
+\set VERBOSITY sqlstate
+SELECT 1 FROM ft1 LIMIT 1;    -- should fail
+\set VERBOSITY default
+COMMIT;
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP streaming_fetch);
+
 -- =============================================================================
 -- test connection invalidation cases and postgres_fdw_get_connections function
 -- =============================================================================
@@ -4470,6 +4801,16 @@ SELECT * FROM local_tbl, async_pt WHERE local_tbl.a = async_pt.a AND local_tbl.c
 ALTER FOREIGN TABLE async_p1 OPTIONS (DROP use_remote_estimate);
 ALTER FOREIGN TABLE async_p2 OPTIONS (DROP use_remote_estimate);
 
+-- streaming_fetch disables asynchronous execution, whether it is set on the
+-- table (async_p1) or on the server (loopback2, used by async_p2).
+ALTER FOREIGN TABLE async_p1 OPTIONS (ADD streaming_fetch 'true');
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM async_pt;
+ALTER SERVER loopback2 OPTIONS (ADD streaming_fetch 'true');
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM async_pt;
+ALTER FOREIGN TABLE async_p1 OPTIONS (DROP streaming_fetch);
+ALTER SERVER loopback2 OPTIONS (DROP streaming_fetch);
 DROP TABLE local_tbl;
 DROP INDEX base_tbl1_idx;
 DROP INDEX base_tbl2_idx;
