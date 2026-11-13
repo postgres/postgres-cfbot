@@ -169,8 +169,6 @@ static void ExplainSubPlans(List *plans, List *ancestors,
 static void ExplainCustomChildren(CustomScanState *css,
 								  List *ancestors, ExplainState *es);
 static ExplainWorkersState *ExplainCreateWorkersState(int num_workers);
-static void ExplainOpenWorker(int n, ExplainState *es);
-static void ExplainCloseWorker(int n, ExplainState *es);
 static void ExplainFlushWorkersState(ExplainState *es);
 
 
@@ -5305,7 +5303,7 @@ ExplainCreateWorkersState(int num_workers)
 /*
  * Begin or resume output into the set-aside group for worker N.
  */
-static void
+void
 ExplainOpenWorker(int n, ExplainState *es)
 {
 	ExplainWorkersState *wstate = es->workers_state;
@@ -5367,7 +5365,7 @@ ExplainOpenWorker(int n, ExplainState *es)
 /*
  * End output for worker N --- must pair with previous ExplainOpenWorker call
  */
-static void
+void
 ExplainCloseWorker(int n, ExplainState *es)
 {
 	ExplainWorkersState *wstate = es->workers_state;

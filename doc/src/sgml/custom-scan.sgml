@@ -409,6 +409,63 @@ void (*ShutdownCustomScan) (CustomScanState *node);
 
    <para>
 <programlisting>
+Size (*EstimateDSMInstrumentationCustomScan) (CustomScanState *node,
+                                              ParallelContext *pcxt);
+</programlisting>
+    Estimate the amount of dynamic shared memory that will be required
+    for parallel operation's instrumentation.
+    This callback is optional, and need only be supplied if this custom
+    scan provider supports parallel execution and needs custom instrumentation
+    for <literal>EXPLAIN ANALYZE</literal>. It will only be invoked when
+    instrumentation is enabled and there is at least one worker.
+   </para>
+
+   <para>
+<programlisting>
+void (*InitializeDSMInstrumentationCustomScan) (CustomScanState *node,
+                                                ParallelContext *pcxt,
+                                                void *coordinate);
+</programlisting>
+    Initialize the dynamic shared memory that will be required for a custom
+    scan's parallel instrumentation. The core allocates the memory and maps it
+    to a <literal>shm_toc</literal> chunk, passing a pointer to the chunk in
+    <literal>coordinate</literal>. The provider should only initialize the chunk.
+    This callback is optional, and need only be supplied if this custom
+    scan provider supports parallel execution and needs custom instrumentation
+    for <literal>EXPLAIN ANALYZE</literal>. It will only be invoked when
+    instrumentation is enabled, there is at least one worker, and the chunk
+    size estimated by <function>EstimateDSMInstrumentationCustomScan</function>
+    is greater than zero.
+   </para>
+
+   <para>
+<programlisting>
+void (*InitializeWorkerInstrumentationCustomScan) (CustomScanState *node,
+                                                   ParallelWorkerContext *pwcxt,
+                                                   void *coordinate);
+</programlisting>
+    Initialize a parallel worker's local state based on the instrumentation
+    shared state set up by the leader. The same <literal>shm_toc</literal>
+    chunk allocated by the leader is passed in <literal>coordinate</literal>.
+    This callback is optional, and need only be supplied if this custom
+    scan provider supports parallel execution and needs custom instrumentation.
+   </para>
+
+   <para>
+<programlisting>
+void (*RetrieveInstrumentationCustomScan) (CustomScanState *node);
+</programlisting>
+    Retrieve parallel instrumentation data from dynamic shared memory into backend
+    memory. This callback is optional, and need only be supplied if this custom
+    scan provider supports parallel execution and needs custom instrumentation.
+    It is invoked once by the leader when the parallel context is being torn
+    down (after all workers have finished), not on every rescan. The custom
+    scan must copy out all data from the DSM segment into backend memory because
+    the DSM segment will be destroyed immediately afterwards.
+   </para>
+
+   <para>
+<programlisting>
 void (*ExplainCustomScan) (CustomScanState *node,
                            List *ancestors,
                            ExplainState *es);
@@ -417,7 +474,10 @@ void (*ExplainCustomScan) (CustomScanState *node,
     plan node.  This callback is optional.  Common data stored in the
     <structname>ScanState</structname>, such as the target list and scan relation, will
     be shown even without this callback, but the callback allows the display
-    of additional, private state.
+    of additional, private state. It can also be used to output
+    per-worker instrumentation information by calling
+    <function>ExplainOpenWorker</function> and <function>ExplainCloseWorker</function>,
+    provided <literal>es-&gt;workers_state</literal> is not NULL.
    </para>
   </sect2>
  </sect1>

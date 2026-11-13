@@ -82,4 +82,12 @@ extern void ExplainQueryText(ExplainState *es, QueryDesc *queryDesc);
 extern void ExplainQueryParameters(ExplainState *es,
 								   ParamListInfo params, int maxlen);
 
+/*
+ * Extensions (e.g. CustomScan/ForeignScan providers) may use these from their
+ * EXPLAIN callback to print per-worker data. Callers must check that
+ * es->workers_state != NULL before attempting to open a worker group.
+ */
+extern void ExplainOpenWorker(int n, ExplainState *es);
+extern void ExplainCloseWorker(int n, ExplainState *es);
+
 #endif							/* EXPLAIN_H */
