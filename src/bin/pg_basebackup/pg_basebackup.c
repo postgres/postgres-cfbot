@@ -165,6 +165,9 @@ static bool found_existing_xlogdir = false;
 static bool made_tablespace_dirs = false;
 static bool found_tablespace_dirs = false;
 
+/* Connection for the background WAL receiver, see PrepareLogStreamer() */
+static PGconn *bgconn = NULL;
+
 /* Progress indicators */
 static uint64 totalsize_kb;
 static uint64 totaldone;
@@ -313,6 +316,22 @@ kill_bgchild_atexit(void)
 		kill(bgchild, SIGTERM);
 }
 #endif
+
+/*
+ * Drop the lingering slot created by PrepareLogStreamer() if we fail before the
+ * background WAL receiver has taken over its connection.  Only registered
+ * once the slot exists, so a pre-existing slot of the same name should never
+ * be dropped.
+ */
+static void
+drop_lingering_replication_slot_atexit(void)
+{
+	/* Check that we have a good state */
+	if (success || in_log_streamer || bgchild > 0)
+		return;
+
+	(void) DropReplicationSlot(bgconn, replication_slot);
+}
 
 /*
  * Split argument into old_dir and new_dir and append to tablespace mapping
@@ -608,6 +627,62 @@ LogStreamerMain(logstreamer_param *param)
 }
 
 /*
+ * Open the connection for the background WAL receiver and create its
+ * replication slot, if one is needed.
+ *
+ * This must be done before BASE_BACKUP is sent: the slot reserves WAL from
+ * its creation onwards, so creating it first guarantees that no WAL from the
+ * backup's start position onwards can be removed before the receiver starts
+ * streaming.  If the slot were created only after BASE_BACKUP had returned
+ * the start position, a checkpoint in between could remove WAL the backup
+ * needs.
+ */
+static void
+PrepareLogStreamer(void)
+{
+	/* Get a WAL serving connection */
+	bgconn = GetConnection();
+	if (!bgconn)
+		/* Error message already written in GetConnection() */
+		exit(1);
+
+	/* Temporary replication slots are only supported in 10 and newer */
+	if (PQserverVersion(conn) < MINIMUM_VERSION_FOR_TEMP_SLOTS)
+		temp_replication_slot = false;
+
+	/*
+	 * Create replication slot if requested
+	 */
+	if (temp_replication_slot && !replication_slot)
+		replication_slot = psprintf("pg_basebackup_%u",
+									(unsigned int) PQbackendPID(bgconn));
+	if (temp_replication_slot || create_slot)
+	{
+		if (!CreateReplicationSlot(bgconn, replication_slot, NULL,
+								   temp_replication_slot, true, true, false,
+								   false, false))
+			exit(1);
+
+		/*
+		 * Only register atexit function if create_slot is true. Temporary
+		 * slots go away with connection
+		 */
+		if (create_slot)
+			atexit(drop_lingering_replication_slot_atexit);
+
+		if (verbose)
+		{
+			if (temp_replication_slot)
+				pg_log_info("created temporary replication slot \"%s\"",
+							replication_slot);
+			else
+				pg_log_info("created replication slot \"%s\"",
+							replication_slot);
+		}
+	}
+}
+
+/*
  * Initiate background process for receiving xlog during the backup.
  * The background stream will use its own database connection so we can
  * stream the logfile in parallel with the backups.
@@ -620,7 +695,10 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 	logstreamer_param *param;
 	char		statusdir[MAXPGPATH];
 
+	Assert(bgconn != NULL);
+
 	param = pg_malloc0_object(logstreamer_param);
+	param->bgconn = bgconn;
 	param->timeline = timeline;
 	param->sysidentifier = sysidentifier;
 	param->wal_compress_algorithm = wal_compress_algorithm;
@@ -639,45 +717,11 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 		pg_fatal("could not create pipe for background process: %m");
 #endif
 
-	/* Get a second connection */
-	param->bgconn = GetConnection();
-	if (!param->bgconn)
-		/* Error message already written in GetConnection() */
-		exit(1);
-
 	/* In post-10 cluster, pg_xlog has been renamed to pg_wal */
 	snprintf(param->xlog, sizeof(param->xlog), "%s/%s",
 			 basedir,
 			 PQserverVersion(conn) < MINIMUM_VERSION_FOR_PG_WAL ?
 			 "pg_xlog" : "pg_wal");
-
-	/* Temporary replication slots are only supported in 10 and newer */
-	if (PQserverVersion(conn) < MINIMUM_VERSION_FOR_TEMP_SLOTS)
-		temp_replication_slot = false;
-
-	/*
-	 * Create replication slot if requested
-	 */
-	if (temp_replication_slot && !replication_slot)
-		replication_slot = psprintf("pg_basebackup_%u",
-									(unsigned int) PQbackendPID(param->bgconn));
-	if (temp_replication_slot || create_slot)
-	{
-		if (!CreateReplicationSlot(param->bgconn, replication_slot, NULL,
-								   temp_replication_slot, true, true, false,
-								   false, false))
-			exit(1);
-
-		if (verbose)
-		{
-			if (temp_replication_slot)
-				pg_log_info("created temporary replication slot \"%s\"",
-							replication_slot);
-			else
-				pg_log_info("created replication slot \"%s\"",
-							replication_slot);
-		}
-	}
 
 	if (format == 'p')
 	{
@@ -1969,6 +2013,13 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 									  "COMPRESSION_DETAIL",
 									  compression_detail);
 	}
+
+	/*
+	 * If streaming WAL, create the replication slot before starting the
+	 * backup, so that it protects all the WAL the backup needs.
+	 */
+	if (includewal == STREAM_WAL)
+		PrepareLogStreamer();
 
 	if (verbose)
 		pg_log_info("initiating base backup, waiting for checkpoint to complete");
