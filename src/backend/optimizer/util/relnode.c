@@ -517,6 +517,12 @@ build_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	grouped_rel->cheapest_parameterized_paths = NIL;
 
 	/*
+	 * clear extension state; the array belongs to the input rel
+	 */
+	grouped_rel->extension_state = NULL;
+	grouped_rel->extension_state_allocated = 0;
+
+	/*
 	 * clear partition info
 	 */
 	grouped_rel->part_scheme = NULL;
