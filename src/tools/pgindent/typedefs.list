@@ -2876,6 +2876,7 @@ SharedRecordTableKey
 SharedRecordTypmodRegistry
 SharedSeqScanInstrumentation
 SharedSortInfo
+SharedTestScanInfo
 SharedTidRangeScanInstrumentation
 SharedTuplestore
 SharedTuplestoreAccessor
@@ -3172,6 +3173,7 @@ TestDSMRegistryStruct
 TestDecodingData
 TestDecodingTxnData
 TestExtNode
+TestScanInstrumentation
 TestShmemData
 TestSpec
 TestValueType

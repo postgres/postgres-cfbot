@@ -37,6 +37,17 @@ typedef struct ParallelExecutorInfo
 	struct TupleQueueReader **reader;	/* tuple reader/writer support */
 } ParallelExecutorInfo;
 
+/*
+ * shm_toc key for the parallel instrumentation chunk of a plan node whose
+ * shared state is opaque to the core executor (CustomScan, ForeignScan).
+ * plan_node_id itself is already used as the key for the node's
+ * parallel-aware shared state, so derive a distinct key from it.  The
+ * fixed keys in execParallel.c live at 0xE000000000000000 and up, and
+ * plan_node_id is a non-negative int, so there can be no collision.
+ */
+#define PARALLEL_KEY_NODE_INSTRUMENTATION(plan_node_id) \
+	(UINT64CONST(0xE100000000000000) + (uint64) (plan_node_id))
+
 extern ParallelExecutorInfo *ExecInitParallelPlan(PlanState *planstate,
 												  EState *estate, Bitmapset *sendParams, int nworkers,
 												  int64 tuples_needed);

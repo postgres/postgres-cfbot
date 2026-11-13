@@ -29,6 +29,13 @@ extern void ExecForeignScanReInitializeDSM(ForeignScanState *node,
 										   ParallelContext *pcxt);
 extern void ExecForeignScanInitializeWorker(ForeignScanState *node,
 											ParallelWorkerContext *pwcxt);
+extern void ExecForeignScanEstimateInstrumentation(ForeignScanState *node,
+												   ParallelContext *pcxt);
+extern void ExecForeignScanInitializeDSMInstrumentation(ForeignScanState *node,
+														ParallelContext *pcxt);
+extern void ExecForeignScanInitializeWorkerInstrumentation(ForeignScanState *node,
+														   ParallelWorkerContext *pwcxt);
+extern void ExecForeignScanRetrieveInstrumentation(ForeignScanState *node);
 extern void ExecShutdownForeignScan(ForeignScanState *node);
 
 extern void ExecAsyncForeignScanRequest(AsyncRequest *areq);

@@ -1612,6 +1612,51 @@ ShutdownForeignScan(ForeignScanState *node);
     wish to take some action before the DSM segment goes away should implement
     this method.
    </para>
+
+   <para>
+<programlisting>
+Size
+EstimateDSMInstrumentationForeignScan(ForeignScanState *node, ParallelContext *pcxt);
+</programlisting>
+    Estimate the amount of dynamic shared memory that will be required
+    for a foreign scan's parallel instrumentation (for <literal>EXPLAIN ANALYZE</literal>).
+    This function is optional, and need only be supplied if this foreign
+    scan provider supports parallel execution and needs custom instrumentation.
+   </para>
+
+   <para>
+<programlisting>
+void
+InitializeDSMInstrumentationForeignScan(ForeignScanState *node, ParallelContext *pcxt,
+                                        void *coordinate);
+</programlisting>
+    Initialize the dynamic shared memory that will be required for a foreign
+    scan's parallel instrumentation.
+    This function is optional, and need only be supplied if this foreign
+    scan provider supports parallel execution and needs custom instrumentation.
+   </para>
+
+   <para>
+<programlisting>
+void
+InitializeWorkerInstrumentationForeignScan(ForeignScanState *node, ParallelWorkerContext *pwcxt,
+                                           void *coordinate);
+</programlisting>
+    Initialize a parallel worker's local state based on the instrumentation shared state
+    set up by the leader.
+    This function is optional, and need only be supplied if this foreign
+    scan provider supports parallel execution and needs custom instrumentation.
+   </para>
+
+   <para>
+<programlisting>
+void
+RetrieveInstrumentationForeignScan(ForeignScanState *node);
+</programlisting>
+    Retrieve parallel instrumentation data from dynamic shared memory into backend memory.
+    This function is optional, and need only be supplied if this foreign
+    scan provider supports parallel execution and needs custom instrumentation.
+   </para>
    </sect2>
 
    <sect2 id="fdw-callbacks-async">

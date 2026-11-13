@@ -82,6 +82,21 @@ EXPLAIN (COSTS OFF) SELECT id, val FROM ONLY test_extensible_tbl;
 SELECT id, val FROM ONLY test_extensible_tbl ORDER BY id;
 DROP TABLE test_extensible_child;
 
+-- EXPLAIN ANALYZE instrumentation, serial: the leader counts the tuples
+-- itself (disable debug_parallel_query in case it is forced on globally)
+SET debug_parallel_query = off;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+  SELECT id, val FROM ONLY test_extensible_tbl ORDER BY id;
+
+-- EXPLAIN ANALYZE instrumentation, parallel: a single-copy Gather runs the
+-- scan in one worker, so the count must come back through shared memory
+SET max_parallel_workers_per_gather = 1;
+SET debug_parallel_query = on;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+  SELECT id, val FROM ONLY test_extensible_tbl ORDER BY id;
+RESET debug_parallel_query;
+RESET max_parallel_workers_per_gather;
+
 DROP TABLE test_extensible_tbl;
 
 DROP EXTENSION test_extensible;
