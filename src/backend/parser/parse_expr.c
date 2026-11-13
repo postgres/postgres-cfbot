@@ -2695,7 +2695,8 @@ transformWholeRowRef(ParseState *pstate, ParseNamespaceItem *nsitem,
 		rowexpr->args = list_truncate(fields,
 									  list_length(nsitem->p_names->colnames));
 		rowexpr->row_typeid = RECORDOID;
-		rowexpr->row_format = COERCE_IMPLICIT_CAST;
+		/* show a cast, as a bare ROW() reads back as a row comparison */
+		rowexpr->row_format = COERCE_EXPLICIT_CAST;
 		rowexpr->colnames = copyObject(nsitem->p_names->colnames);
 		rowexpr->location = location;
 
