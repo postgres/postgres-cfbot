@@ -477,13 +477,13 @@ BufFileLoadBuffer(BufFile *file)
 	if (track_io_timing)
 	{
 		INSTR_TIME_SET_CURRENT(io_time);
-		INSTR_TIME_ACCUM_DIFF(pgBufferUsage.temp_blk_read_time, io_time, io_start);
+		INSTR_BUFUSAGE_TIME_ACCUM_DIFF(temp_blk_read_time, io_time, io_start);
 	}
 
 	/* we choose not to advance curOffset here */
 
 	if (file->nbytes > 0)
-		pgBufferUsage.temp_blks_read++;
+		INSTR_BUFUSAGE_INCR(temp_blks_read);
 }
 
 /*
@@ -552,13 +552,13 @@ BufFileDumpBuffer(BufFile *file)
 		if (track_io_timing)
 		{
 			INSTR_TIME_SET_CURRENT(io_time);
-			INSTR_TIME_ACCUM_DIFF(pgBufferUsage.temp_blk_write_time, io_time, io_start);
+			INSTR_BUFUSAGE_TIME_ACCUM_DIFF(temp_blk_write_time, io_time, io_start);
 		}
 
 		file->curOffset += rc;
 		wpos += rc;
 
-		pgBufferUsage.temp_blks_written++;
+		INSTR_BUFUSAGE_INCR(temp_blks_written);
 	}
 	file->dirty = false;
 

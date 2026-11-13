@@ -354,11 +354,7 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
-	WalUsage	startwalusage = pgWalUsage;
-	BufferUsage startbufferusage = pgBufferUsage;
-	BufferUsage bufferusage;
-	PgStat_Counter startreadtime = 0;
-	PgStat_Counter startwritetime = 0;
+	QueryInstrumentation *instr = NULL;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -396,17 +392,15 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 
 	/*
 	 * When verbose or autovacuum logging is used, initialize a resource usage
-	 * snapshot and optionally track I/O timing.
+	 * snapshot and start instrumentation to track buffer usage (including I/O
+	 * timing, if track_io_timing is enabled) and WAL usage.
 	 */
 	if (instrument)
 	{
-		if (track_io_timing)
-		{
-			startreadtime = pgStatBlockReadTime;
-			startwritetime = pgStatBlockWriteTime;
-		}
-
 		pg_rusage_init(&ru0);
+
+		instr = InstrQueryAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+		InstrQueryStart(instr);
 	}
 
 	/* Used for instrumentation and stats report */
@@ -769,12 +763,13 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	{
 		TimestampTz endtime = GetCurrentTimestamp();
 
+		InstrQueryStopFinalize(instr);
+
 		if (verbose || params->log_analyze_min_duration == 0 ||
 			TimestampDifferenceExceeds(starttime, endtime,
 									   params->log_analyze_min_duration))
 		{
 			long		delay_in_ms;
-			WalUsage	walusage;
 			double		read_rate = 0;
 			double		write_rate = 0;
 			char	   *msgfmt;
@@ -782,18 +777,15 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 			int64		total_blks_hit;
 			int64		total_blks_read;
 			int64		total_blks_dirtied;
+			BufferUsage bufusage = instr->instr.bufusage;
+			WalUsage	walusage = instr->instr.walusage;
 
-			memset(&bufferusage, 0, sizeof(BufferUsage));
-			BufferUsageAccumDiff(&bufferusage, &pgBufferUsage, &startbufferusage);
-			memset(&walusage, 0, sizeof(WalUsage));
-			WalUsageAccumDiff(&walusage, &pgWalUsage, &startwalusage);
-
-			total_blks_hit = bufferusage.shared_blks_hit +
-				bufferusage.local_blks_hit;
-			total_blks_read = bufferusage.shared_blks_read +
-				bufferusage.local_blks_read;
-			total_blks_dirtied = bufferusage.shared_blks_dirtied +
-				bufferusage.local_blks_dirtied;
+			total_blks_hit = bufusage.shared_blks_hit +
+				bufusage.local_blks_hit;
+			total_blks_read = bufusage.shared_blks_read +
+				bufusage.local_blks_read;
+			total_blks_dirtied = bufusage.shared_blks_dirtied +
+				bufusage.local_blks_dirtied;
 
 			/*
 			 * We do not expect an analyze to take > 25 days and it simplifies
@@ -852,8 +844,10 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 			}
 			if (track_io_timing)
 			{
-				double		read_ms = (double) (pgStatBlockReadTime - startreadtime) / 1000;
-				double		write_ms = (double) (pgStatBlockWriteTime - startwritetime) / 1000;
+				double		read_ms = INSTR_TIME_GET_MILLISEC(bufusage.shared_blk_read_time) +
+					INSTR_TIME_GET_MILLISEC(bufusage.local_blk_read_time);
+				double		write_ms = INSTR_TIME_GET_MILLISEC(bufusage.shared_blk_write_time) +
+					INSTR_TIME_GET_MILLISEC(bufusage.local_blk_write_time);
 
 				appendStringInfo(&buf, _("I/O timings: read: %.3f ms, write: %.3f ms\n"),
 								 read_ms, write_ms);

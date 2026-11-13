@@ -152,6 +152,62 @@ EXPLAIN (costs off) SELECT a FROM generate_series(1,10) AS tab(a) WHERE a = 7;
 
 SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
 
+-- Buffer stats should flow through EXPLAIN ANALYZE
+CREATE TEMP TABLE flow_through_test (a int, b char(200));
+INSERT INTO flow_through_test SELECT i, repeat('x', 200) FROM generate_series(1, 5000) AS i;
+
+CREATE FUNCTION run_explain_buffers_test() RETURNS void AS $$
+DECLARE
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM flow_through_test';
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+
+SELECT run_explain_buffers_test();
+
+-- EXPLAIN entries should have non-zero buffer stats
+SELECT query, local_blks_hit + local_blks_read > 0 as has_buffer_stats
+FROM pg_stat_statements
+WHERE query LIKE 'SELECT run_explain_buffers_test%'
+ORDER BY query COLLATE "C";
+
+DROP FUNCTION run_explain_buffers_test;
+DROP TABLE flow_through_test;
+
+-- Validate buffer/WAL counting during abort
+SET pg_stat_statements.track = 'all';
+CREATE TEMP TABLE pgss_call_tab (a int, b char(20));
+CREATE TEMP TABLE pgss_call_tab2 (a int, b char(20));
+INSERT INTO pgss_call_tab VALUES (0, 'zzz');
+
+CREATE PROCEDURE pgss_call_rollback_proc() AS $$
+DECLARE
+    v int;
+BEGIN
+    EXPLAIN ANALYZE WITH ins AS (INSERT INTO pgss_call_tab2 SELECT * FROM pgss_call_tab RETURNING a)
+    SELECT a / 0 INTO v FROM ins;
+EXCEPTION WHEN division_by_zero THEN
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+CALL pgss_call_rollback_proc();
+
+SELECT query, calls,
+local_blks_hit + local_blks_read > 0 as local_hitread,
+wal_bytes > 0 as wal_bytes_generated,
+wal_records > 0 as wal_records_generated
+FROM pg_stat_statements
+WHERE query LIKE '%pgss_call_rollback_proc%'
+ORDER BY query COLLATE "C";
+
+DROP TABLE pgss_call_tab2;
+DROP TABLE pgss_call_tab;
+DROP PROCEDURE pgss_call_rollback_proc;
+SET pg_stat_statements.track = 'top';
+
 -- CALL
 CREATE OR REPLACE PROCEDURE sum_one(i int) AS $$
 DECLARE

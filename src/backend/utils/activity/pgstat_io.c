@@ -102,13 +102,13 @@ pgstat_prepare_io_time(bool track_io_guc)
 /*
  * Like pgstat_count_io_op() except it also accumulates time.
  *
- * The calls related to pgstat_count_buffer_*() are for pgstat_database.  As
- * pg_stat_database only counts block read and write times, these are done for
- * IOOP_READ, IOOP_WRITE and IOOP_EXTEND.
- *
- * pgBufferUsage is used for EXPLAIN.  pgBufferUsage has write and read stats
- * for shared, local and temporary blocks.  pg_stat_io does not track the
- * activity of temporary blocks, so these are ignored here.
+ * Buffer usage instrumentation tracks read and write times for shared and
+ * local blocks (IOOP_EXTEND counts as a write).  Besides EXPLAIN and
+ * pg_stat_statements, this also feeds pg_stat_database, which derives its
+ * blk_read_time/blk_write_time from the session-level totals in instr_top at
+ * flush time, see pgstat_update_dbstats().  Buffer usage additionally tracks
+ * temporary file blocks, but pg_stat_io does not track those, so they are
+ * ignored here.
  */
 void
 pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
@@ -125,19 +125,17 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 		{
 			if (io_op == IOOP_WRITE || io_op == IOOP_EXTEND)
 			{
-				pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
 				if (io_object == IOOBJECT_RELATION)
-					INSTR_TIME_ADD(pgBufferUsage.shared_blk_write_time, io_time);
+					INSTR_BUFUSAGE_TIME_ADD(shared_blk_write_time, io_time);
 				else if (io_object == IOOBJECT_TEMP_RELATION)
-					INSTR_TIME_ADD(pgBufferUsage.local_blk_write_time, io_time);
+					INSTR_BUFUSAGE_TIME_ADD(local_blk_write_time, io_time);
 			}
 			else if (io_op == IOOP_READ)
 			{
-				pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
 				if (io_object == IOOBJECT_RELATION)
-					INSTR_TIME_ADD(pgBufferUsage.shared_blk_read_time, io_time);
+					INSTR_BUFUSAGE_TIME_ADD(shared_blk_read_time, io_time);
 				else if (io_object == IOOBJECT_TEMP_RELATION)
-					INSTR_TIME_ADD(pgBufferUsage.local_blk_read_time, io_time);
+					INSTR_BUFUSAGE_TIME_ADD(local_blk_read_time, io_time);
 			}
 		}
 

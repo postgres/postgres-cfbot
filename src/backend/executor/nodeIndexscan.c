@@ -821,6 +821,7 @@ ExecEndIndexScan(IndexScanState *node)
 		 */
 		winstrument->nsearches += node->iss_Instrument->nsearches;
 		Assert(node->iss_Instrument->ntabletuplefetches == 0);
+		InstrAccumStack(&winstrument->table_instr, &node->iss_Instrument->table_instr);
 	}
 
 	/*
@@ -974,16 +975,35 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 		ExecInitExprList(node->indexorderbyorig, (PlanState *) indexstate);
 
 	/*
+	 * Set up instrumentation of index scans if requested.  Like the node's
+	 * own instrumentation (see ExecInitNode), this must exist even when we
+	 * are only doing EXPLAIN, since EXPLAIN (BUFFERS) reads it regardless of
+	 * whether the plan was run.
+	 */
+	if (estate->es_instrument)
+	{
+		indexstate->iss_Instrument = MemoryContextAllocZero(estate->es_query_instr->instr_cxt, sizeof(IndexScanInstrumentation));
+
+		/*
+		 * Track table and index access separately. We intentionally don't
+		 * collect timing (even if enabled), since we don't need it, and the
+		 * table AM calls InstrPushStack / InstrPopStack around its table
+		 * fetches (instead of the full InstrNode*) to reduce overhead.
+		 */
+		if ((estate->es_instrument & INSTRUMENT_BUFFERS) != 0)
+		{
+			InstrInitOptions(&indexstate->iss_Instrument->table_instr, INSTRUMENT_BUFFERS);
+			InstrQueryRememberChild(estate->es_query_instr, &indexstate->iss_Instrument->table_instr);
+		}
+	}
+
+	/*
 	 * If we are just doing EXPLAIN (ie, aren't going to run the plan), stop
 	 * here.  This allows an index-advisor plugin to EXPLAIN a plan containing
 	 * references to nonexistent indexes.
 	 */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return indexstate;
-
-	/* Set up instrumentation of index scans if requested */
-	if (estate->es_instrument)
-		indexstate->iss_Instrument = palloc0_object(IndexScanInstrumentation);
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;
@@ -1810,6 +1830,19 @@ ExecIndexScanInstrumentInitDSM(IndexScanState *node,
 	/* Each per-worker area must start out as zeroes */
 	memset(node->iss_SharedInfo, 0, size);
 	node->iss_SharedInfo->num_workers = pcxt->nworkers;
+
+	/*
+	 * Initialize each worker's table_instr with the same options as the
+	 * leader's own entry (see ExecInitIndexScan), so that accumulating from
+	 * it works once the worker has added its stats.
+	 */
+	if ((node->ss.ps.state->es_instrument & INSTRUMENT_BUFFERS) != 0)
+	{
+		for (int i = 0; i < pcxt->nworkers; i++)
+			InstrInitOptions(&node->iss_SharedInfo->winstrument[i].table_instr,
+							 INSTRUMENT_BUFFERS);
+	}
+
 	shm_toc_insert(pcxt->toc,
 				   node->ss.ps.plan->plan_node_id +
 				   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -1853,4 +1886,18 @@ ExecIndexScanRetrieveInstrumentation(IndexScanState *node)
 		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
 	node->iss_SharedInfo = palloc(size);
 	memcpy(node->iss_SharedInfo, SharedInfo, size);
+
+	/*
+	 * Aggregate workers' table buffer/WAL usage into leader's entry, which
+	 * ExecFinalizeNodeInstrumentation later rolls up into the node.  Record
+	 * the import so that session-level consumers can exclude it (see
+	 * InstrAccumWorkerUsage).
+	 */
+	for (int i = 0; i < node->iss_SharedInfo->num_workers; i++)
+	{
+		Instrumentation *winstr = &node->iss_SharedInfo->winstrument[i].table_instr;
+
+		InstrAccumStack(&node->iss_Instrument->table_instr, winstr);
+		InstrAccumWorkerUsage(&winstr->bufusage, &winstr->walusage);
+	}
 }
