@@ -17,6 +17,31 @@ INSERT INTO target VALUES (2, 20);
 INSERT INTO target VALUES (3, 30);
 SELECT t.ctid is not null as matched, t.*, s.* FROM source s FULL OUTER JOIN target t ON s.sid = t.tid ORDER BY t.tid, s.sid;
 
+-- target Vars in action expressions above a right MERGE join
+CREATE VIEW merge_target_view AS
+  SELECT tid, balance FROM target;
+CREATE FUNCTION merge_target_view_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN NEW;
+END
+$$;
+CREATE TRIGGER merge_target_view_insert
+  INSTEAD OF INSERT ON merge_target_view
+  FOR EACH ROW EXECUTE FUNCTION merge_target_view_insert();
+
+INSERT INTO source VALUES (1, 1);
+MERGE INTO merge_target_view t
+USING source s RIGHT JOIN source w ON s.sid = w.sid
+ON w.sid = t.tid AND t.tid = 0
+WHEN MATCHED AND s.sid < t.tid THEN DO NOTHING
+WHEN NOT MATCHED AND s.delta IS NOT NULL THEN
+  INSERT (balance) VALUES (s.delta);
+
+TRUNCATE source;
+DROP VIEW merge_target_view;
+DROP FUNCTION merge_target_view_insert();
+
 ALTER TABLE target OWNER TO regress_merge_privs;
 ALTER TABLE source OWNER TO regress_merge_privs;
 
