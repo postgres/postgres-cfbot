@@ -25,6 +25,7 @@ install_data(
   'pg_buffercache--1.4--1.5.sql',
   'pg_buffercache--1.5--1.6.sql',
   'pg_buffercache--1.6--1.7.sql',
+  'pg_buffercache--1.7--1.8.sql',
   'pg_buffercache.control',
   kwargs: contrib_data_args,
 )

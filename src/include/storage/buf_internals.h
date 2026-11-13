@@ -31,11 +31,32 @@
 #include "utils/resowner.h"
 
 /*
+ * How many second chances a single StrategyGetBuffer() call will spend before
+ * it stops looking for a buffer that has none left and takes the next unpinned
+ * buffer it sees.
+ *
+ * Spending a chance is progress -- the buffer becomes reclaimable on the next
+ * pass -- so the sweep treats it as a reason to keep scanning.  When the pool
+ * is re-touched faster than the hand can traverse it, chances are granted
+ * again before the hand returns, and a single allocation can spend them
+ * indefinitely without ever finding a victim.  Giving up after a fixed number
+ * makes the work one allocation can do a constant instead.
+ *
+ * The value trades that bound against replacement quality, and both sides have
+ * been measured.  The worst case an allocation reaches is almost exactly this
+ * threshold plus two, so the bound is a direct function of it.  The cost is
+ * taking a buffer that still had a chance left: on a workload whose hot set
+ * most queries re-read, a threshold of 4 leaves 4,519 hot pages non-resident
+ * and costs 1.8 points of hot-set hit ratio, 32 leaves 11 pages and costs 0.03
+ * points, and at 128 nothing hot is displaced and the cost is not measurable.
+ */
+#define BUF_SWEEP_CLAIM_THRESHOLD	128
+
+/*
  * Buffer state is a single 64-bit variable where following data is combined.
  *
  * State of the buffer itself (in order):
  * - 18 bits refcount
- * - 4 bits usage count
  * - 12 bits of flags
  * - 18 bits share-lock count
  * - 1 bit share-exclusive locked
@@ -47,11 +68,10 @@
  * The definition of buffer state components is below.
  */
 #define BUF_REFCOUNT_BITS 18
-#define BUF_USAGECOUNT_BITS 4
 #define BUF_FLAG_BITS 12
 #define BUF_LOCK_BITS (18+2)
 
-StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS + BUF_FLAG_BITS + BUF_LOCK_BITS <= 64,
+StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_FLAG_BITS + BUF_LOCK_BITS <= 64,
 				 "parts of buffer state space need to be <= 64");
 
 /* refcount related definitions */
@@ -59,17 +79,9 @@ StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS + BUF_FLAG_BITS + BUF_L
 #define BUF_REFCOUNT_MASK \
 	((UINT64CONST(1) << BUF_REFCOUNT_BITS) - 1)
 
-/* usage count related definitions */
-#define BUF_USAGECOUNT_SHIFT \
-	BUF_REFCOUNT_BITS
-#define BUF_USAGECOUNT_MASK \
-	(((UINT64CONST(1) << BUF_USAGECOUNT_BITS) - 1) << (BUF_USAGECOUNT_SHIFT))
-#define BUF_USAGECOUNT_ONE \
-	(UINT64CONST(1) << BUF_REFCOUNT_BITS)
-
 /* flags related definitions */
 #define BUF_FLAG_SHIFT \
-	(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS)
+	BUF_REFCOUNT_BITS
 #define BUF_FLAG_MASK \
 	(((UINT64CONST(1) << BUF_FLAG_BITS) - 1) << BUF_FLAG_SHIFT)
 
@@ -86,11 +98,19 @@ StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS + BUF_FLAG_BITS + BUF_L
 	((((uint64) MAX_BACKENDS) << BM_LOCK_SHIFT) | BM_LOCK_VAL_SHARE_EXCLUSIVE | BM_LOCK_VAL_EXCLUSIVE)
 
 
-/* Get refcount and usagecount from buffer state */
+/* Get refcount from buffer state */
 #define BUF_STATE_GET_REFCOUNT(state) \
 	((uint32)((state) & BUF_REFCOUNT_MASK))
-#define BUF_STATE_GET_USAGECOUNT(state) \
-	((uint32)(((state) & BUF_USAGECOUNT_MASK) >> BUF_USAGECOUNT_SHIFT))
+
+/*
+ * Does this buffer still have its second chance?
+ *
+ * The clock sweep reclaims a buffer only on a visit that finds the bit
+ * already clear, so a buffer that is accessed between two visits is always
+ * passed over once.  See BM_SECOND_CHANCE.
+ */
+#define BUF_STATE_HAS_SECOND_CHANCE(state) \
+	(((state) & BM_SECOND_CHANCE) != 0)
 
 /*
  * Flags for buffer descriptors
@@ -114,7 +134,19 @@ StaticAssertDecl(BUF_REFCOUNT_BITS + BUF_USAGECOUNT_BITS + BUF_FLAG_BITS + BUF_L
 #define BM_IO_IN_PROGRESS			BUF_DEFINE_FLAG( 4)
 /* previous I/O failed */
 #define BM_IO_ERROR					BUF_DEFINE_FLAG( 5)
-/* flag bit 6 is not used anymore */
+/*
+ * Set when a buffer is pinned, cleared by the clock sweep as the hand passes.
+ * The sweep reclaims a buffer only if it finds this bit already clear, so any
+ * buffer touched since the hand last passed it survives one more revolution:
+ * the classic second chance.
+ *
+ * This occupies the bit position of the 0..5 usage counter it replaces.  The
+ * counter let a buffer accumulate up to five chances, which cost a full
+ * revolution each to spend; one chance is enough to protect a working set and
+ * makes the work the sweep must do to find a victim independent of how hot the
+ * pool has been.
+ */
+#define BM_SECOND_CHANCE			BUF_DEFINE_FLAG( 6)
 /* have waiter for sole pin */
 #define BM_PIN_COUNT_WAITER			BUF_DEFINE_FLAG( 7)
 /* must write for checkpoint */
@@ -133,18 +165,6 @@ StaticAssertDecl(MAX_BACKENDS_BITS <= (BUF_LOCK_BITS - 2),
 				 "MAX_BACKENDS_BITS needs to be <= BUF_LOCK_BITS - 2");
 
 
-/*
- * The maximum allowed value of usage_count represents a tradeoff between
- * accuracy and speed of the clock-sweep buffer management algorithm.  A
- * large value (comparable to NBuffers) would approximate LRU semantics.
- * But it can take as many as BM_MAX_USAGE_COUNT+1 complete cycles of the
- * clock-sweep hand to find a free buffer, so in practice we don't want the
- * value to be very large.
- */
-#define BM_MAX_USAGE_COUNT	5
-
-StaticAssertDecl(BM_MAX_USAGE_COUNT < (UINT64CONST(1) << BUF_USAGECOUNT_BITS),
-				 "BM_MAX_USAGE_COUNT doesn't fit in BUF_USAGECOUNT_BITS bits");
 
 /*
  * Buffer tag identifies which disk block the buffer contains.
@@ -365,10 +385,10 @@ typedef struct BufferDesc
  * line sized.
  *
  * XXX: As this is primarily matters in highly concurrent workloads which
- * probably all are 64bit these days, and the space wastage would be a bit
- * more noticeable on 32bit systems, we don't force the stride to be cache
- * line sized on those. If somebody does actual performance testing, we can
- * reevaluate.
+ * probably all are 64bit these days. We force the stride to be cache line
+ * sized even on 32bit systems, where the space wastage is be a bit more
+ * noticeable, to allow partitioning of shared buffers (which requires the
+ * memory page be a multiple of buffer descriptor).
  *
  * Note that local buffer descriptors aren't forced to be aligned - as there's
  * no concurrent access to those it's unlikely to be beneficial.
@@ -378,7 +398,7 @@ typedef struct BufferDesc
  * platform with either 32 or 128 byte line sizes, it's good to align to
  * boundaries and avoid false sharing.
  */
-#define BUFFERDESC_PAD_TO_SIZE	(SIZEOF_VOID_P == 8 ? 64 : 1)
+#define BUFFERDESC_PAD_TO_SIZE	64
 
 typedef union BufferDescPadded
 {
@@ -411,7 +431,16 @@ typedef struct WritebackContext
 
 /* in buf_init.c */
 extern PGDLLIMPORT BufferDescPadded *BufferDescriptors;
+extern PGDLLIMPORT BufferPartitions *BufferPartitionsRegistry;
 extern PGDLLIMPORT ConditionVariableMinimallyPadded *BufferIOCVArray;
+
+extern int	BufferPartitionCount(void);
+extern void BufferPartitionGet(int idx, int *node, int *num_buffers,
+							   int *first_buffer, int *last_buffer);
+extern void BufferPartitionsCalculate(int *num_nodes, int *num_partitions,
+									  int *num_partitions_per_node);
+extern void BufferPartitionsParams(int *num_nodes, int *num_partitions,
+								   int *num_partitions_per_node);
 
 /* in localbuf.c */
 extern PGDLLIMPORT BufferDesc *LocalBufferDescriptors;
@@ -468,9 +497,6 @@ UnlockBufHdr(BufferDesc *desc)
  * unset_bits, adding the flags in set_bits, and changing the refcount by
  * refcount_change. If a flag is both cleared and added, it will end up being
  * set.
- *
- * Note that this approach would not trivially work for usagecount, since we
- * need to cap the usagecount at BM_MAX_USAGE_COUNT.
  */
 static inline uint64
 UnlockBufHdrExt(BufferDesc *desc, uint64 old_buf_state,
@@ -590,7 +616,11 @@ extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategy,
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf, bool from_ring);
 
-extern int	StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc);
+extern void StrategySyncBalance(void);
+extern void StrategySyncPrepare(int *num_parts, uint32 *num_buf_alloc);
+extern int	StrategySyncStart(int partition, uint32 *complete_passes,
+							  int *first_buffer, int *num_buffers);
+extern uint64 StrategySweepClaims(int partition);
 extern void StrategyNotifyBgWriter(int bgwprocno);
 
 /* buf_table.c */

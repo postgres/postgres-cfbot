@@ -142,6 +142,7 @@
 #temp_buffers = 8MB                     # min 800kB
 #max_prepared_transactions = 0          # zero disables the feature
                                         # (change requires restart)
+#shared_buffers_numa = off              # NUMA-aware partitioning
 # Caution: it is not advisable to set max_prepared_transactions nonzero unless
 # you actively intend to use prepared transactions.
 #work_mem = 4MB                         # min 64kB
