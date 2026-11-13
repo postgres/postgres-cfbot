@@ -752,6 +752,7 @@ build_regtype_array(Oid *param_types, int num_params)
 	ArrayType  *result;
 	int			i;
 
+	pg_assume(num_params >= 0);
 	tmp_ary = palloc_array(Datum, num_params);
 
 	for (i = 0; i < num_params; i++)

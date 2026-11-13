@@ -294,6 +294,19 @@ extern "C++"
 #endif
 
 /*
+ * pg_attribute_alloc_size means the function returns a pointer to an object
+ * whose size is given by the listed argument, or by the product of the two
+ * listed arguments.  This helps the compiler check object bounds.
+ *
+ * https://gcc.gnu.org/onlinedocs/gcc/Common-Attributes.html#index-alloc_005fsize
+ */
+#if __has_attribute (alloc_size)
+#define pg_attribute_alloc_size(...) __attribute__((alloc_size(__VA_ARGS__)))
+#else
+#define pg_attribute_alloc_size(...)
+#endif
+
+/*
  * pg_attribute_nonnull means the compiler should warn if the function is
  * called with the listed arguments set to NULL.  If no arguments are
  * listed, the compiler should warn if any pointer arguments are set to NULL.

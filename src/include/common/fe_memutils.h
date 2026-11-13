@@ -35,10 +35,10 @@
  * (except pg_malloc_extended with MCXT_ALLOC_NO_OOM)
  */
 pg_attribute_returns_nonnull extern char *pg_strdup(const char *in);
-pg_attribute_returns_nonnull extern void *pg_malloc(size_t size);
-pg_attribute_returns_nonnull extern void *pg_malloc0(size_t size);
-extern void *pg_malloc_extended(size_t size, int flags);
-pg_attribute_returns_nonnull extern void *pg_realloc(void *ptr, size_t size);
+pg_attribute_alloc_size(1) pg_attribute_returns_nonnull extern void *pg_malloc(size_t size);
+pg_attribute_alloc_size(1) pg_attribute_returns_nonnull extern void *pg_malloc0(size_t size);
+pg_attribute_alloc_size(1) extern void *pg_malloc_extended(size_t size, int flags);
+pg_attribute_alloc_size(2) pg_attribute_returns_nonnull extern void *pg_realloc(void *ptr, size_t size);
 extern void pg_free(void *ptr);
 
 /*
@@ -46,10 +46,10 @@ extern void pg_free(void *ptr);
  */
 extern Size add_size(Size s1, Size s2);
 extern Size mul_size(Size s1, Size s2);
-pg_attribute_returns_nonnull extern void *pg_malloc_mul(Size s1, Size s2);
-pg_attribute_returns_nonnull extern void *pg_malloc0_mul(Size s1, Size s2);
-extern void *pg_malloc_mul_extended(Size s1, Size s2, int flags);
-pg_attribute_returns_nonnull extern void *pg_realloc_mul(void *p, Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) pg_attribute_returns_nonnull extern void *pg_malloc_mul(Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) pg_attribute_returns_nonnull extern void *pg_malloc0_mul(Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) extern void *pg_malloc_mul_extended(Size s1, Size s2, int flags);
+pg_attribute_alloc_size(2, 3) pg_attribute_returns_nonnull extern void *pg_realloc_mul(void *p, Size s1, Size s2);
 
 /*
  * Variants with easier notation and more type safety
@@ -77,15 +77,15 @@ pg_attribute_returns_nonnull extern void *pg_realloc_mul(void *p, Size s1, Size 
 /* Equivalent functions, deliberately named the same as backend functions */
 pg_attribute_returns_nonnull extern char *pstrdup(const char *in);
 pg_attribute_returns_nonnull extern char *pnstrdup(const char *in, Size size);
-pg_attribute_returns_nonnull extern void *palloc(Size size);
-pg_attribute_returns_nonnull extern void *palloc0(Size size);
-extern void *palloc_extended(Size size, int flags);
-pg_attribute_returns_nonnull extern void *repalloc(void *pointer, Size size);
+pg_attribute_alloc_size(1) pg_attribute_returns_nonnull extern void *palloc(Size size);
+pg_attribute_alloc_size(1) pg_attribute_returns_nonnull extern void *palloc0(Size size);
+pg_attribute_alloc_size(1) extern void *palloc_extended(Size size, int flags);
+pg_attribute_alloc_size(2) pg_attribute_returns_nonnull extern void *repalloc(void *pointer, Size size);
 extern void pfree(void *pointer);
-pg_attribute_returns_nonnull extern void *palloc_mul(Size s1, Size s2);
-pg_attribute_returns_nonnull extern void *palloc0_mul(Size s1, Size s2);
-extern void *palloc_mul_extended(Size s1, Size s2, int flags);
-pg_attribute_returns_nonnull extern void *repalloc_mul(void *p, Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) pg_attribute_returns_nonnull extern void *palloc_mul(Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) pg_attribute_returns_nonnull extern void *palloc0_mul(Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) extern void *palloc_mul_extended(Size s1, Size s2, int flags);
+pg_attribute_alloc_size(2, 3) pg_attribute_returns_nonnull extern void *repalloc_mul(void *p, Size s1, Size s2);
 
 #define palloc_object(type) ((type *) palloc(sizeof(type)))
 #define palloc0_object(type) ((type *) palloc0(sizeof(type)))

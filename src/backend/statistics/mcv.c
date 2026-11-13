@@ -2283,6 +2283,7 @@ statext_mcv_import(int elevel, int numattrs,
 	 * VacAttrStats records, but only a few fields within those records have
 	 * to be filled out.
 	 */
+	pg_assume(numattrs >= 0);
 	vastats = (VacAttrStats **) palloc0_array(VacAttrStats *, numattrs);
 
 	for (int i = 0; i < numattrs; i++)
