@@ -28,9 +28,8 @@
 
 #if defined(WIN32)
 /*
- * Visual Studio's <thread.h>: cnd_t and mtx_t can be zero-initialized per
- * published documentation and example code, so this is a supported deployment
- * configuration.
+ * Visual Studio's <threads.h>: cnd_t and mtx_t can be zero-initialized per
+ * published documentation and example code.
  */
 #define PG_CND_INIT_IMPL			{0}
 #define PG_MTX_PLAIN_INIT_IMPL		{0}

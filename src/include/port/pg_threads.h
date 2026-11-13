@@ -16,12 +16,13 @@
  * Three implementations are available:
  *
  * (1) map_pthread.h for <pthread.h> on POSIX systems
- * (2) map_threads.h for <threads.h> on Windows + Visual Studio
+ * (2) map_threads.h for <threads.h>
  * (3) map_windows.h for <windows.h> on Windows
  *
- * The choice is made automatically, but can be overridden for testing.
- * PG_THREADS_USE_THREADS_H works on common POSIX systems, but such builds are
- * intended strictly for testing (see map_threads_ext.h for details).
+ * The choice is made automatically, but can be overridden for testing.  (2)
+ * is never chosen automatically: it works with Visual Studio's <threads.h>
+ * and on common POSIX systems, but serves to check that pg_threads.h follows
+ * <threads.h> exactly (see map_threads_ext.h for details).
  *
  * The following macros are defined to signal known failures to conform to the
  * <threads.h> specification on some systems.  See the implementation headers
@@ -51,8 +52,6 @@
 	!defined(PG_THREADS_USE_WINDOWS_H)
 #if !defined(WIN32)
 #define PG_THREADS_USE_PTHREAD_H
-#elif defined(_MSC_VER)
-#define PG_THREADS_USE_THREADS_H
 #else
 #define PG_THREADS_USE_WINDOWS_H
 #endif
