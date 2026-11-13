@@ -3437,6 +3437,53 @@ where t3.a is null;
          ->  Seq Scan on tenk1 t1
 (13 rows)
 
+-- but this is an antijoin: the upper join clause t3.b = 1 is strict for t3,
+-- so t3 cannot be null-extended in any matching row and its NOT NULL
+-- constraint applies after all
+explain (costs off)
+select * from tenk1 t1 left join
+  (tbl_anti t2 left join tbl_anti t3 on t2.c = t3.c)
+  on t1.unique1 = t2.b and t3.b = 1
+where t3.a is null;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Hash Anti Join
+   Hash Cond: (t1.unique1 = t2.b)
+   ->  Seq Scan on tenk1 t1
+   ->  Hash
+         ->  Hash Join
+               Hash Cond: (t2.c = t3.c)
+               ->  Seq Scan on tbl_anti t2
+               ->  Hash
+                     ->  Seq Scan on tbl_anti t3
+                           Filter: (b = 1)
+(10 rows)
+
+-- this is not an antijoin: the upper join clause is not strict for t3, so it
+-- cannot rule out matching rows with t3 null-extended
+explain (costs off)
+select * from tenk1 t1 left join
+  (tbl_anti t2 left join tbl_anti t3 on t2.c = t3.c)
+  on t1.unique1 = t2.b and (t3.b = 1 or t3.b is null)
+where t3.a is null;
+                   QUERY PLAN                   
+------------------------------------------------
+ Hash Right Join
+   Hash Cond: (t2.b = t1.unique1)
+   Filter: (t3.a IS NULL)
+   ->  Merge Left Join
+         Merge Cond: (t2.c = t3.c)
+         Filter: ((t3.b = 1) OR (t3.b IS NULL))
+         ->  Sort
+               Sort Key: t2.c
+               ->  Seq Scan on tbl_anti t2
+         ->  Sort
+               Sort Key: t3.c
+               ->  Seq Scan on tbl_anti t3
+   ->  Hash
+         ->  Seq Scan on tenk1 t1
+(14 rows)
+
 -- this is an antijoin: the strict join clause t2.c = t3.c guarantees t3.c is
 -- non-null
 explain (costs off)
@@ -3776,6 +3823,40 @@ where t3.a is null;
                      Sort Key: t3.c
                      ->  Seq Scan on tbl_anti t3
 (16 rows)
+
+-- but this is an antijoin: the strict inner-join clause t3.b = t4.b within
+-- the right input guarantees t3 is not null-extended in any row that input
+-- emits, so its NOT NULL constraint applies after all
+explain (costs off)
+select * from tbl_anti t1 full join
+  (tbl_anti t2 left join tbl_anti t3 on t2.c = t3.c
+   join tbl_anti t4 on t3.b = t4.b) on t1.b = t2.b
+where t3.a is null;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Merge Anti Join
+   Merge Cond: (t1.b = t2.b)
+   ->  Sort
+         Sort Key: t1.b
+         ->  Seq Scan on tbl_anti t1
+   ->  Sort
+         Sort Key: t2.b
+         ->  Merge Join
+               Merge Cond: (t4.b = t3.b)
+               ->  Sort
+                     Sort Key: t4.b
+                     ->  Seq Scan on tbl_anti t4
+               ->  Sort
+                     Sort Key: t3.b
+                     ->  Merge Join
+                           Merge Cond: (t2.c = t3.c)
+                           ->  Sort
+                                 Sort Key: t2.c
+                                 ->  Seq Scan on tbl_anti t2
+                           ->  Sort
+                                 Sort Key: t3.c
+                                 ->  Seq Scan on tbl_anti t3
+(22 rows)
 
 -- once the full join is reduced to an antijoin, its own quals can be passed
 -- down to its inputs, which a full join never allows; here that reduces the
