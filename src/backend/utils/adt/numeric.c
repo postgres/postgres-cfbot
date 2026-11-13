@@ -7514,6 +7514,21 @@ get_str_from_var_sci(const NumericVar *var, int rscale)
 
 	power_ten_int(exponent, &tmp_var);
 	div_var(var, &tmp_var, &tmp_var, rscale, true, true);
+
+	/*
+	 * Rounding can increase the absolute value of the significand to ten.
+	 * If so, increase the exponent and recompute the significand from the
+	 * original value.
+	 */
+	if (tmp_var.ndigits > 0 &&
+		(tmp_var.weight > 0 ||
+		 (tmp_var.weight == 0 && tmp_var.digits[0] >= 10)))
+	{
+		exponent++;
+		power_ten_int(exponent, &tmp_var);
+		div_var(var, &tmp_var, &tmp_var, rscale, true, true);
+	}
+
 	sig_out = get_str_from_var(&tmp_var);
 
 	free_var(&tmp_var);
