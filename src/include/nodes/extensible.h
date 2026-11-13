@@ -153,6 +153,21 @@ typedef struct CustomExecMethods
 											   void *coordinate);
 	void		(*ShutdownCustomScan) (CustomScanState *node);
 
+	/* Optional: estimate parallel instrumentation size */
+	Size		(*EstimateDSMInstrumentationCustomScan) (CustomScanState *node,
+														 ParallelContext *pcxt);
+	/* Optional: initialize parallel instrumentation DSM */
+	void		(*InitializeDSMInstrumentationCustomScan) (CustomScanState *node,
+														   ParallelContext *pcxt,
+														   void *coordinate);
+	/* Optional: initialize parallel instrumentation worker */
+	void		(*InitializeWorkerInstrumentationCustomScan) (CustomScanState *node,
+															  ParallelWorkerContext *pwcxt,
+															  void *coordinate);
+
+	/* Optional: retrieve parallel instrumentation */
+	void		(*RetrieveInstrumentationCustomScan) (CustomScanState *node);
+
 	/* Optional: print additional information in EXPLAIN */
 	void		(*ExplainCustomScan) (CustomScanState *node,
 									  List *ancestors,
