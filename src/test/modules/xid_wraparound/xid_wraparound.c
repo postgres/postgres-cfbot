@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include "access/xact.h"
+#include "access/varsup.h"
 #include "miscadmin.h"
 #include "storage/proc.h"
 #include "utils/xid8.h"

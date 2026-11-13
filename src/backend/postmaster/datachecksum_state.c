@@ -207,6 +207,7 @@
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/varsup.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"

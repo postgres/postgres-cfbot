@@ -25,6 +25,7 @@
 #include "access/htup_details.h"
 #include "access/slru.h"
 #include "access/transam.h"
+#include "access/varsup.h"
 #include "access/xloginsert.h"
 #include "access/xlogutils.h"
 #include "funcapi.h"
