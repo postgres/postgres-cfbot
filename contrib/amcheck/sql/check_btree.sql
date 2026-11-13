@@ -183,6 +183,110 @@ INSERT INTO varlena_bug VALUES (repeat('Test', 250));
 ALTER TABLE varlena_bug ALTER COLUMN v SET STORAGE extended;
 SELECT bt_index_check('varlena_bug_idx', true);
 
+-- HOT updates of rows indexed by expression and partial indexes must leave
+-- every index entry consistent with the heap.
+CREATE TABLE hot_expr (id int PRIMARY KEY, s text, d jsonb,
+                       status text, v int, n numeric) WITH (fillfactor = 50);
+CREATE INDEX hot_expr_lower ON hot_expr (lower(s));
+CREATE INDEX hot_expr_name ON hot_expr ((d->>'name'));
+CREATE INDEX hot_expr_partial ON hot_expr (v) WHERE status = 'active';
+CREATE INDEX hot_expr_numeric ON hot_expr ((n + 0));
+INSERT INTO hot_expr
+  SELECT g, 'abc' || g, jsonb_build_object('name', 'n' || g, 'age', g),
+         CASE WHEN g % 2 = 0 THEN 'active' ELSE 'done' END, g, 3
+    FROM generate_series(1, 200) g;
+UPDATE hot_expr SET s = upper(s);
+UPDATE hot_expr SET d = jsonb_set(d, '{age}', '0');
+UPDATE hot_expr SET v = v + 1000 WHERE status = 'done';
+UPDATE hot_expr SET status = 'done' WHERE id % 4 = 0;
+UPDATE hot_expr SET status = 'active' WHERE id % 3 = 0;
+UPDATE hot_expr SET n = 3.0 WHERE id % 5 = 0;
+UPDATE hot_expr SET d = jsonb_set(d, '{name}', '"x"') WHERE id % 7 = 0;
+SELECT bt_index_check('hot_expr_lower', heapallindexed => true);
+SELECT bt_index_check('hot_expr_name', heapallindexed => true);
+SELECT bt_index_check('hot_expr_partial', heapallindexed => true);
+SELECT bt_index_check('hot_expr_numeric', heapallindexed => true);
+SELECT bt_index_parent_check('hot_expr_partial', heapallindexed => true);
+DROP TABLE hot_expr;
+
+-- One UPDATE in which different rows are decided by different indexes: an
+-- expression index created first, a partial index created after it.
+CREATE TABLE hot_expr_multi (id int PRIMARY KEY, doc jsonb) WITH (fillfactor = 30);
+CREATE INDEX hot_expr_multi_status ON hot_expr_multi ((doc->>'status'));
+CREATE INDEX hot_expr_multi_vip ON hot_expr_multi ((doc->>'email'))
+  WHERE (doc->>'vip')::bool;
+INSERT INTO hot_expr_multi
+  SELECT g, jsonb_build_object('status', 'a', 'email', 'e' || g,
+                               'vip', g % 2 = 0, 'n', 0)
+    FROM generate_series(1, 3000) g;
+UPDATE hot_expr_multi SET doc = CASE
+    WHEN id % 4 = 0 THEN jsonb_set(doc, '{status}', '"b"')
+    WHEN id % 4 = 1 THEN jsonb_set(doc, '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    WHEN id % 4 = 2 THEN jsonb_set(jsonb_set(doc, '{status}', '"c"'),
+                                   '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    ELSE jsonb_set(doc, '{n}', '1') END;
+UPDATE hot_expr_multi SET doc = CASE
+    WHEN id % 3 = 0 THEN jsonb_set(doc, '{vip}', to_jsonb(NOT (doc->>'vip')::bool))
+    WHEN id % 3 = 1 THEN jsonb_set(doc, '{status}', '"d"')
+    ELSE jsonb_set(doc, '{n}', '2') END;
+SELECT bt_index_check('hot_expr_multi_status', heapallindexed => true);
+SELECT bt_index_check('hot_expr_multi_vip', heapallindexed => true);
+DROP TABLE hot_expr_multi;
+
+-- An UPDATE that writes back the value a row has, when the old value is
+-- stored compressed or out of line and the new one is not yet, is HOT: the
+-- index would store the same bytes.  Index-only scans must return the new
+-- row's value.  The values are sized from the block size.  e, 32 bytes
+-- short of a quarter of a block, makes the row longer than the TOAST
+-- threshold on its own, so it goes out of line, and still fits in a btree
+-- entry (no more than 8191 bytes, even with 32kB blocks); t, three eighths
+-- of a block, gets compressed.  With fillfactor 10 every page has room for
+-- the new versions, even with 1kB blocks.
+SELECT current_setting('block_size')::int * 3 / 8 AS tlen,
+       current_setting('block_size')::int / 4 - 32 AS elen \gset
+CREATE TABLE hot_bt_image (id int, t text, e text) WITH (fillfactor = 10);
+ALTER TABLE hot_bt_image ALTER COLUMN e SET STORAGE EXTERNAL;
+CREATE INDEX hot_bt_image_t ON hot_bt_image (t);
+CREATE INDEX hot_bt_image_e ON hot_bt_image (e) INCLUDE (id);
+INSERT INTO hot_bt_image
+  SELECT g, repeat('x', :tlen) || g, repeat('y', :elen) || g
+    FROM generate_series(1, 20) g;
+SELECT pg_column_compression(t) IS NOT NULL AS t_compressed,
+       pg_column_toast_chunk_id(e) IS NOT NULL AS e_out_of_line
+  FROM hot_bt_image WHERE id = 1;
+CREATE FUNCTION hot_bt_image_count(OUT updated bigint, OUT hot bigint)
+LANGUAGE sql AS $$
+  SELECT pg_stat_get_xact_tuples_updated('hot_bt_image'::regclass),
+         pg_stat_get_xact_tuples_hot_updated('hot_bt_image'::regclass) $$;
+BEGIN;
+UPDATE hot_bt_image SET t = repeat('x', :tlen) || id;
+SELECT * FROM hot_bt_image_count();
+UPDATE hot_bt_image SET e = e || '';
+SELECT * FROM hot_bt_image_count();
+UPDATE hot_bt_image SET t = repeat('x', :tlen) || (id + 100) WHERE id <= 5;
+SELECT * FROM hot_bt_image_count();
+COMMIT;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+CREATE FUNCTION hot_bt_image_plan(tlen int) RETURNS SETOF text
+LANGUAGE plpgsql AS
+$$ DECLARE l text; BEGIN
+  FOR l IN EXECUTE format('EXPLAIN (COSTS OFF)
+    SELECT right(t, 3) FROM hot_bt_image WHERE t > repeat(%L, %s)', 'x', tlen)
+  LOOP RETURN NEXT left(l, 40); END LOOP; END $$;
+SELECT * FROM hot_bt_image_plan(:tlen);
+SELECT right(t, 3) FROM hot_bt_image WHERE t > repeat('x', :tlen)
+  ORDER BY t COLLATE "C" LIMIT 3;
+SELECT count(*) FROM hot_bt_image WHERE t > repeat('x', :tlen);
+SELECT count(*) FROM hot_bt_image WHERE e > repeat('y', :elen);
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+SELECT bt_index_check('hot_bt_image_t', heapallindexed => true);
+SELECT bt_index_check('hot_bt_image_e', heapallindexed => true);
+DROP TABLE hot_bt_image;
+DROP FUNCTION hot_bt_image_count;
+DROP FUNCTION hot_bt_image_plan;
+
 -- cleanup
 DROP TABLE bttest_a;
 DROP TABLE bttest_b;

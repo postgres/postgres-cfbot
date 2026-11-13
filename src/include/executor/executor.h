@@ -758,6 +758,7 @@ extern void ExecCloseIndices(ResultRelInfo *resultRelInfo);
 #define		EIIT_ONLY_SUMMARIZING	(1<<2)
 extern List *ExecInsertIndexTuples(ResultRelInfo *resultRelInfo, EState *estate,
 								   uint32 flags, TupleTableSlot *slot,
+								   const Bitmapset *modified_idx_attrs,
 								   List *arbiterIndexes,
 								   bool *specConflict);
 extern bool ExecCheckIndexConstraints(ResultRelInfo *resultRelInfo,
@@ -818,5 +819,9 @@ extern ResultRelInfo *ExecLookupResultRelByOid(ModifyTableState *node,
 											   Oid resultoid,
 											   bool missing_ok,
 											   bool update_cache);
+extern Bitmapset *ExecUpdateModifiedIdxAttrs(ResultRelInfo *relinfo,
+											 TupleTableSlot *old_tts,
+											 TupleTableSlot *new_tts,
+											 EState *estate);
 
 #endif							/* EXECUTOR_H  */

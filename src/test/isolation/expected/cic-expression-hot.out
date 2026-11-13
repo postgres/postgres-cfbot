@@ -1,0 +1,43 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_lock s2_cic_s s1_upd_s s1_unlock s1_upd2 s1_check
+step s1_lock: SELECT pg_advisory_lock(4242);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step s2_cic_s: CREATE INDEX CONCURRENTLY cic_expr_idx ON cic_expr (cic_lower(s)); <waiting ...>
+step s1_upd_s: UPDATE cic_expr SET s = upper(s);
+step s1_unlock: SELECT pg_advisory_unlock(4242);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step s2_cic_s: <... completed>
+step s1_upd2: UPDATE cic_expr SET s = lower(s) || '';
+step s1_check: 
+	SET enable_seqscan = off;
+	SET enable_bitmapscan = off;
+	SELECT count(*) FROM cic_expr WHERE cic_lower(s) LIKE 'abc%';
+	SELECT count(*) FROM cic_expr WHERE cic_lower(s) = 'abc42';
+	RESET enable_seqscan;
+	RESET enable_bitmapscan;
+	SELECT indisvalid FROM pg_index WHERE indexrelid = 'cic_expr_idx'::regclass;
+
+count
+-----
+  100
+(1 row)
+
+count
+-----
+    1
+(1 row)
+
+indisvalid
+----------
+t         
+(1 row)
+
