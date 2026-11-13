@@ -303,7 +303,7 @@ VACUUM [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] [ <re
       update the database-wide statistics about oldest unfrozen XIDs.
       When this option is specified,
       the <replaceable class="parameter">table_and_columns</replaceable>
-      list must be empty, and no other option may be enabled
+      list must be empty, and no other option may be specified
       except <literal>VERBOSE</literal>.
      </para>
     </listitem>
