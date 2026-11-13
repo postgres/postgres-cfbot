@@ -139,4 +139,35 @@ $node->wait_for_log('terminating connection due to idle-session timeout',
 
 ok($psql_session->quit);
 
+#
+# 4. Test transaction timeout while blocked writing to the client.
+#
+$node->safe_psql('postgres',
+	"SELECT injection_points_detach('transaction-timeout');");
+
+$psql_session = $node->background_psql('postgres');
+my $pid = $psql_session->query_safe('SELECT pg_backend_pid()');
+$log_offset = -s $node->logfile;
+
+# Stop draining psql's stdout at the marker. COPY streams its output, so psql
+# will stop reading from the server once its stdout pipe fills up.
+$psql_session->query_until(
+	qr/copy_starting/, q(
+   \echo copy_starting
+   BEGIN;
+   SET LOCAL transaction_timeout = '5s';
+   COPY (SELECT repeat('x', 8192) FROM generate_series(1, 100000)) TO STDOUT;
+));
+$node->wait_for_event('client backend', 'ClientWrite');
+
+$node->wait_for_log(
+	qr/\[$pid\].*FATAL:\s+terminating connection due to transaction timeout/,
+	$log_offset);
+ok( $node->poll_query_until(
+		'postgres', qq[
+		SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE pid = $pid);
+	]),
+	'transaction timeout terminates the backend during ClientWrite');
+$psql_session->{run}->finish;
+
 done_testing();
