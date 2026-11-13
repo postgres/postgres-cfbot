@@ -46,7 +46,7 @@ static OffsetNumber _bt_findinsertloc(Relation rel,
 									  Relation heapRel);
 static void _bt_stepright(Relation rel, Relation heaprel,
 						  BTInsertState insertstate, BTStack stack);
-static void _bt_insertonpg(Relation rel, Relation heaprel, BTScanInsert itup_key,
+static bool _bt_insertonpg(Relation rel, Relation heaprel, BTScanInsert itup_key,
 						   Buffer buf,
 						   Buffer cbuf,
 						   BTStack stack,
@@ -58,7 +58,8 @@ static void _bt_insertonpg(Relation rel, Relation heaprel, BTScanInsert itup_key
 static Buffer _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key,
 						Buffer buf, Buffer cbuf, OffsetNumber newitemoff,
 						Size newitemsz, IndexTuple newitem, IndexTuple orignewitem,
-						IndexTuple nposting, uint16 postingoff);
+						IndexTuple nposting, uint16 postingoff,
+						bool *newitemplaced);
 static void _bt_insert_parent(Relation rel, Relation heaprel, Buffer buf,
 							  Buffer rbuf, BTStack stack, bool isroot, bool isonly);
 static void _bt_freestack(BTStack stack);
@@ -260,9 +261,28 @@ search:
 		 */
 		newitemoff = _bt_findinsertloc(rel, &insertstate, checkingunique,
 									   indexUnchanged, stack, heapRel);
-		_bt_insertonpg(rel, heapRel, itup_key, insertstate.buf, InvalidBuffer,
-					   stack, itup, insertstate.itemsz, newitemoff,
-					   insertstate.postingoff, false);
+		if (!_bt_insertonpg(rel, heapRel, itup_key, insertstate.buf,
+							InvalidBuffer, stack, itup, insertstate.itemsz,
+							newitemoff, insertstate.postingoff, false))
+		{
+			/*
+			 * A prefix-compressed leaf whose decoded items exceeded one page
+			 * was split without placing itup (no legal split point kept both
+			 * halves within a page once itup was added).  itup now fits a
+			 * plain-sized half; retry the insertion from the top.  (Redo the
+			 * uniqueness check too: we released the page lock, so another
+			 * backend may have inserted a conflicting duplicate meanwhile.)
+			 */
+			if (stack)
+				_bt_freestack(stack);
+			if (checkingunique && itup_key->heapkeyspace &&
+				!itup_key->anynullkeys)
+				itup_key->scantid = NULL;
+			insertstate.buf = InvalidBuffer;
+			insertstate.bounds_valid = false;
+			insertstate.postingoff = 0;
+			goto search;
+		}
 	}
 	else
 	{
@@ -347,9 +367,11 @@ _bt_search_insert(Relation rel, Relation heaprel, BTInsertState insertstate)
 			if (P_RIGHTMOST(opaque) &&
 				P_ISLEAF(opaque) &&
 				!P_IGNORE(opaque) &&
+				!P_HASPREFIX(opaque) &&
 				PageGetFreeSpace(page) > insertstate->itemsz &&
-				PageGetMaxOffsetNumber(page) >= P_HIKEY &&
-				_bt_compare(rel, insertstate->itup_key, page, P_HIKEY) > 0)
+				PageGetMaxOffsetNumber(page) >= P_FIRSTDATAKEY(opaque) &&
+				_bt_compare(rel, insertstate->itup_key, page,
+							P_FIRSTDATAKEY(opaque)) > 0)
 			{
 				/*
 				 * Caller can use the fastpath optimization because cached
@@ -910,12 +932,30 @@ _bt_findinsertloc(Relation rel,
 
 		/*
 		 * If the target page cannot fit newitem, try to avoid splitting the
-		 * page on insert by performing deletion or deduplication now
+		 * page on insert by performing deletion or deduplication now.  On a
+		 * prefix page the item is stored coded, which can be up to the coded
+		 * header larger than the plain tuple when it shares little, so
+		 * reserve that slack here to avoid a coded PageAddItem failure after
+		 * the fit check passed.
 		 */
-		if (PageGetFreeSpace(page) < insertstate->itemsz)
-			_bt_delete_or_dedup_one_page(rel, heapRel, insertstate, false,
-										 checkingunique, uniquedup,
-										 indexUnchanged);
+		{
+			Size		need = insertstate->itemsz;
+
+			if (P_HASPREFIX(opaque))
+				need += BTREE_PREFIX_CODE_OVERHEAD;
+
+			/*
+			 * A prefix page also splits once its decoded content nears the
+			 * split-fit limit, often before it is physically full; try
+			 * deletion/deduplication then too.
+			 */
+			if (PageGetFreeSpace(page) < need ||
+				(P_HASPREFIX(opaque) &&
+				 _bt_prefix_split_needed(page, insertstate->itemsz)))
+				_bt_delete_or_dedup_one_page(rel, heapRel, insertstate, false,
+											 checkingunique, uniquedup,
+											 indexUnchanged);
+		}
 	}
 	else
 	{
@@ -1113,7 +1153,7 @@ _bt_stepright(Relation rel, Relation heaprel, BTInsertState insertstate,
  *		INCOMPLETE_SPLIT flag on it, and release the buffer.
  *----------
  */
-static void
+static bool
 _bt_insertonpg(Relation rel,
 			   Relation heaprel,
 			   BTScanInsert itup_key,
@@ -1135,6 +1175,12 @@ _bt_insertonpg(Relation rel,
 	IndexTuple	oposting = NULL;
 	IndexTuple	origitup = NULL;
 	IndexTuple	nposting = NULL;
+	IndexTuple	codedposting = NULL;	/* nposting coded (prefix leaf) */
+	BTItemBuf	postbuf;
+	IndexTuple	additup;		/* tuple actually added (coded or plain) */
+	Size		additemsz;
+	bool		needsplit;
+	bool		newitemplaced = true;
 	XLogRecPtr	recptr;
 
 	page = BufferGetPage(buf);
@@ -1182,6 +1228,11 @@ _bt_insertonpg(Relation rel,
 		 */
 		Assert(isleaf && itup_key->heapkeyspace && itup_key->allequalimage);
 		oposting = (IndexTuple) PageGetItem(page, itemid);
+		if (P_HASPREFIX(opaque))
+		{
+			/* swap on the decoded tuple; coded below, before the split check */
+			oposting = CopyIndexTuple(_bt_getitem(page, newitemoff, &postbuf));
+		}
 
 		/*
 		 * postingoff value comes from earlier call to _bt_binsrch_posting().
@@ -1209,18 +1260,56 @@ _bt_insertonpg(Relation rel,
 		nposting = _bt_swap_posting(itup, oposting, postingoff);
 		/* itup now contains rightmost/max TID from oposting */
 
+		if (P_HASPREFIX(opaque))
+		{
+			/*
+			 * The page keeps the coded posting tuple; overwrite it with the
+			 * coded post-split version (same key, same size: the posting list
+			 * just trades one TID).  _bt_split decodes from the page, so give
+			 * it the plain nposting it expects.
+			 */
+			codedposting = _bt_prefix_recode(page, newitemoff, nposting);
+			Assert(IndexTupleSize(codedposting) == ItemIdGetLength(itemid));
+			pfree(oposting);
+			oposting = (IndexTuple) PageGetItem(page, itemid);
+		}
+
 		/* Alter offset so that newitem goes after posting list */
 		newitemoff = OffsetNumberNext(newitemoff);
 	}
 
 	/*
-	 * Do we need to split the page to fit the item on it?
-	 *
-	 * Note: PageGetFreeSpace() subtracts sizeof(ItemIdData) from its result,
-	 * so this comparison is correct even though we appear to be accounting
-	 * only for the item and not for its line pointer.
+	 * On a prefix leaf the new item is stored coded.  Compute its coded form
+	 * now (before any critical section; coding pallocs) so both the split
+	 * decision and the in-place insert below use it.  Plain tuples elsewhere.
 	 */
-	if (PageGetFreeSpace(page) < itemsz)
+	if (isleaf && P_HASPREFIX(opaque))
+	{
+		additup = _bt_prefix_encode_insert(page, newitemoff, itup);
+		additemsz = MAXALIGN(IndexTupleSize(additup));
+	}
+	else
+	{
+		additup = itup;
+		additemsz = itemsz;
+	}
+
+	/*
+	 * Do we need to split the page to fit the item?  For a prefix leaf we
+	 * split when the coded item would not fit the coded page, or when adding
+	 * its plain form would push the page's decoded content past one page (so
+	 * the split's decode-to-plain path still fits a page).
+	 *
+	 * Note: PageGetFreeSpace() subtracts sizeof(ItemIdData) from its result.
+	 */
+	if (isleaf && P_HASPREFIX(opaque))
+		needsplit =
+			PageGetFreeSpace(page) < additemsz ||
+			_bt_prefix_split_needed(page, itemsz);
+	else
+		needsplit = PageGetFreeSpace(page) < itemsz;
+
+	if (needsplit)
 	{
 		Buffer		rbuf;
 
@@ -1228,7 +1317,7 @@ _bt_insertonpg(Relation rel,
 
 		/* split the buffer into left and right halves */
 		rbuf = _bt_split(rel, heaprel, itup_key, buf, cbuf, newitemoff, itemsz,
-						 itup, origitup, nposting, postingoff);
+						 itup, origitup, nposting, postingoff, &newitemplaced);
 		PredicateLockPageSplit(rel,
 							   BufferGetBlockNumber(buf),
 							   BufferGetBlockNumber(rbuf));
@@ -1259,6 +1348,19 @@ _bt_insertonpg(Relation rel,
 #endif
 
 		_bt_insert_parent(rel, heaprel, buf, rbuf, stack, isroot, isonly);
+
+		if (additup != itup)
+			pfree(additup);
+
+		/* be tidy (posting split path) */
+		if (postingoff != 0)
+		{
+			pfree(nposting);
+			pfree(itup);
+			if (codedposting)
+				pfree(codedposting);
+		}
+		return newitemplaced;
 	}
 	else
 	{
@@ -1295,11 +1397,17 @@ _bt_insertonpg(Relation rel,
 		START_CRIT_SECTION();
 
 		if (postingoff != 0)
-			memcpy(oposting, nposting, MAXALIGN(IndexTupleSize(nposting)));
+		{
+			IndexTuple	src = codedposting ? codedposting : nposting;
 
-		if (PageAddItem(page, itup, itemsz, newitemoff, false, false) == InvalidOffsetNumber)
+			memcpy(oposting, src, MAXALIGN(IndexTupleSize(src)));
+		}
+
+		if (PageAddItem(page, additup, additemsz, newitemoff, false, false) == InvalidOffsetNumber)
 			elog(PANIC, "failed to add new item to block %u in index \"%s\"",
 				 BufferGetBlockNumber(buf), RelationGetRelationName(rel));
+		if (isleaf && P_HASPREFIX(opaque))
+			_bt_prefix_note_insert(page, additup);
 
 		MarkBufferDirty(buf);
 
@@ -1384,8 +1492,8 @@ _bt_insertonpg(Relation rel,
 			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 			if (postingoff == 0)
 			{
-				/* Just log itup from caller */
-				XLogRegisterBufData(0, itup, IndexTupleSize(itup));
+				/* Log the coded (or plain) tuple actually added to the page */
+				XLogRegisterBufData(0, additup, IndexTupleSize(additup));
 			}
 			else
 			{
@@ -1417,6 +1525,9 @@ _bt_insertonpg(Relation rel,
 		PageSetLSN(page, recptr);
 
 		END_CRIT_SECTION();
+
+		if (additup != itup)
+			pfree(additup);
 
 		/* Release subsidiary buffers */
 		if (BufferIsValid(metabuf))
@@ -1453,7 +1564,11 @@ _bt_insertonpg(Relation rel,
 		/* itup is actually a modified copy of caller's original */
 		pfree(nposting);
 		pfree(itup);
+		if (codedposting)
+			pfree(codedposting);
 	}
+
+	return true;
 }
 
 /*
@@ -1486,14 +1601,18 @@ _bt_insertonpg(Relation rel,
 static Buffer
 _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		  Buffer cbuf, OffsetNumber newitemoff, Size newitemsz, IndexTuple newitem,
-		  IndexTuple orignewitem, IndexTuple nposting, uint16 postingoff)
+		  IndexTuple orignewitem, IndexTuple nposting, uint16 postingoff,
+		  bool *newitemplaced)
 {
+	bool		placenewitem = true;	/* false: split existing items only */
+	bool		leftcoded;		/* left half written in BTP_PREFIX form? */
 	Buffer		rbuf;
 	Page		origpage;
 	Page		leftpage,
 				rightpage;
 	PGAlignedBlock leftpage_buf,
-				rightpage_buf;
+				rightpage_buf,
+				plainscratch_buf;	/* decoded plain copy of a coded origpage */
 	BlockNumber origpagenumber,
 				rightpagenumber;
 	BTPageOpaque ropaque,
@@ -1502,6 +1621,11 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	Buffer		sbuf = InvalidBuffer;
 	Page		spage = NULL;
 	BTPageOpaque sopaque = NULL;
+	bool		origprefix = false; /* was origpage a coded prefix page? */
+	bool		origprefix_array = false;	/* using decoded-item array path? */
+	Page		origbufpage;	/* the real buffer page (origpage may be
+								 * scratch) */
+	IndexTuple *ditems = NULL;	/* decoded data items (prefix split) */
 	Size		itemsz;
 	ItemId		itemid;
 	IndexTuple	firstright,
@@ -1532,11 +1656,62 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 * only workspace.
 	 */
 	origpage = BufferGetPage(buf);
+	origbufpage = origpage;
 	oopaque = BTPageGetOpaque(origpage);
 	isleaf = P_ISLEAF(oopaque);
 	isrightmost = P_RIGHTMOST(oopaque);
 	maxoff = PageGetMaxOffsetNumber(origpage);
 	origpagenumber = BufferGetBlockNumber(buf);
+
+	/*
+	 * A coded (BTP_PREFIX) leaf is split by reasoning about its decoded plain
+	 * items, since both halves are first written plain: either from a plain
+	 * scratch copy of the page (when the decoded items fit one page), or from
+	 * an array of the decoded items, in which case the split point is chosen
+	 * by _bt_prefix_findsplitloc from their plain sizes.  The two halves are
+	 * coded as whole pages at the end.
+	 */
+	if (P_HASPREFIX(oopaque))
+	{
+		Page		plain;
+
+		origprefix = true;
+
+		/*
+		 * Decode to plain.  If the decoded page fits BLCKSZ (the common
+		 * case), use it directly so upstream _bt_findsplitloc and the plain
+		 * reads -- including their heap-TID tiebreak at duplicate boundaries
+		 * -- apply unchanged.  If it exceeds a page (a heavily compressed
+		 * page), fall back to the decoded-item array and a size-balanced
+		 * split point.
+		 */
+		plain = _bt_prefix_try_plain_page(rel, origpage, (Page) plainscratch_buf.data);
+		if (plain != NULL)
+		{
+			OffsetNumber codedfirst = P_FIRSTDATAKEY(oopaque);
+
+			origpage = plain;
+			oopaque = BTPageGetOpaque(origpage);
+			maxoff = PageGetMaxOffsetNumber(origpage);
+			origprefix_array = false;
+
+			/*
+			 * newitemoff was computed against the coded page, whose data
+			 * items start one offset later (after the directory item).  The
+			 * plain scratch page has no directory, so shift newitemoff into
+			 * its offset space.
+			 */
+			newitemoff -= (codedfirst - P_FIRSTDATAKEY(oopaque));
+		}
+		else
+		{
+			IndexTuple	dhikey;
+			Size		dhikeysz;
+
+			(void) _bt_prefix_decode_items(origpage, &ditems, &dhikey, &dhikeysz);
+			origprefix_array = true;
+		}
+	}
 
 	/*
 	 * Choose a point to split origpage at.
@@ -1562,8 +1737,34 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 * newitem the firstright tuple, though, so this case isn't a special
 	 * case.
 	 */
-	firstrightoff = _bt_findsplitloc(rel, origpage, newitemoff, newitemsz,
-									 newitem, &newitemonleft);
+	if (origprefix_array)
+	{
+		firstrightoff = _bt_prefix_findsplitloc(rel, origpage, ditems,
+												newitemoff, newitemsz,
+												&newitemonleft);
+		if (!OffsetNumberIsValid(firstrightoff))
+		{
+			/*
+			 * No split of these decoded items plus newitem keeps both halves
+			 * within a plain page (newitem is large and the page already
+			 * dense).  Split the existing items alone; caller re-inserts
+			 * newitem into the appropriate half, which then fits (or splits
+			 * again by the ordinary rule).  Make newitemoff unreachable so
+			 * the transfer loop below never places newitem.
+			 */
+			placenewitem = false;
+			firstrightoff = _bt_prefix_findsplitloc(rel, origpage, ditems,
+													InvalidOffsetNumber, 0,
+													&newitemonleft);
+			newitemonleft = false;
+			newitemoff = maxoff + 2;	/* past the "goes at end" case too */
+			postingoff = 0;		/* posting split is part of the deferred
+								 * insert */
+		}
+	}
+	else
+		firstrightoff = _bt_findsplitloc(rel, origpage, newitemoff, newitemsz,
+										 newitem, &newitemonleft);
 
 	/* Use temporary buffer for leftpage */
 	leftpage = leftpage_buf.data;
@@ -1588,7 +1789,7 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 * updated version of the page.  We need this because XLogInsert will
 	 * examine the LSN and possibly dump it in a page image.
 	 */
-	PageSetLSN(leftpage, PageGetLSN(origpage));
+	PageSetLSN(leftpage, PageGetLSN(origbufpage));
 
 	/*
 	 * Determine page offset number of existing overlapped-with-orignewitem
@@ -1616,6 +1817,8 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 								  &newitem->t_tid) < 0);
 		Assert(BTreeTupleIsPosting(nposting));
 		origpagepostingoff = OffsetNumberPrev(newitemoff);
+		if (origprefix_array)
+			ditems[origpagepostingoff - P_FIRSTDATAKEY(oopaque)] = nposting;
 	}
 
 	/*
@@ -1647,11 +1850,19 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	else
 	{
 		/* existing item at firstrightoff becomes firstright */
-		itemid = PageGetItemId(origpage, firstrightoff);
-		itemsz = ItemIdGetLength(itemid);
-		firstright = (IndexTuple) PageGetItem(origpage, itemid);
-		if (firstrightoff == origpagepostingoff)
-			firstright = nposting;
+		if (origprefix_array)
+		{
+			firstright = ditems[firstrightoff - P_FIRSTDATAKEY(oopaque)];
+			itemsz = IndexTupleSize(firstright);
+		}
+		else
+		{
+			itemid = PageGetItemId(origpage, firstrightoff);
+			itemsz = ItemIdGetLength(itemid);
+			firstright = (IndexTuple) PageGetItem(origpage, itemid);
+			if (firstrightoff == origpagepostingoff)
+				firstright = nposting;
+		}
 	}
 
 	if (isleaf)
@@ -1671,10 +1882,15 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 			/* existing item before firstrightoff becomes lastleft */
 			lastleftoff = OffsetNumberPrev(firstrightoff);
 			Assert(lastleftoff >= P_FIRSTDATAKEY(oopaque));
-			itemid = PageGetItemId(origpage, lastleftoff);
-			lastleft = (IndexTuple) PageGetItem(origpage, itemid);
-			if (lastleftoff == origpagepostingoff)
-				lastleft = nposting;
+			if (origprefix_array)
+				lastleft = ditems[lastleftoff - P_FIRSTDATAKEY(oopaque)];
+			else
+			{
+				itemid = PageGetItemId(origpage, lastleftoff);
+				lastleft = (IndexTuple) PageGetItem(origpage, itemid);
+				if (lastleftoff == origpagepostingoff)
+					lastleft = nposting;
+			}
 		}
 
 		lefthighkey = _bt_truncate(rel, lastleft, firstright, itup_key);
@@ -1818,12 +2034,20 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	{
 		IndexTuple	dataitem;
 
-		itemid = PageGetItemId(origpage, i);
-		itemsz = ItemIdGetLength(itemid);
-		dataitem = (IndexTuple) PageGetItem(origpage, itemid);
+		if (origprefix_array)
+		{
+			dataitem = ditems[i - P_FIRSTDATAKEY(oopaque)];
+			itemsz = IndexTupleSize(dataitem);
+		}
+		else
+		{
+			itemid = PageGetItemId(origpage, i);
+			itemsz = ItemIdGetLength(itemid);
+			dataitem = (IndexTuple) PageGetItem(origpage, itemid);
+		}
 
 		/* replace original item with nposting due to posting split? */
-		if (i == origpagepostingoff)
+		if (!origprefix_array && i == origpagepostingoff)
 		{
 			Assert(BTreeTupleIsPosting(dataitem));
 			Assert(itemsz == MAXALIGN(IndexTupleSize(nposting)));
@@ -1884,7 +2108,7 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	}
 
 	/* Handle case where newitem goes at the end of rightpage */
-	if (i <= newitemoff)
+	if (placenewitem && i <= newitemoff)
 	{
 		/*
 		 * Can't have newitemonleft here; that would imply we were told to put
@@ -1947,6 +2171,28 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 * not starting the critical section till here because we haven't been
 	 * scribbling on the original page yet; see comments above.
 	 */
+
+	/*
+	 * Both halves were built as plain pages (the split-fit guarantee makes
+	 * the decoded items fit), but may have inherited BTP_PREFIX from a coded
+	 * original page; clear it.  Then, if prefix compression is enabled, code
+	 * each half as a whole page.  That must happen before the critical
+	 * section, since coding pallocs.
+	 */
+	if (isleaf)
+	{
+		lopaque->btpo_flags &= ~BTP_PREFIX;
+		ropaque->btpo_flags &= ~BTP_PREFIX;
+		if (_bt_prefix_enabled(rel))
+		{
+			_bt_prefix_compress_page(rel, leftpage);
+			_bt_prefix_compress_page(rel, rightpage);
+			lopaque = BTPageGetOpaque(leftpage);
+			ropaque = BTPageGetOpaque(rightpage);
+		}
+	}
+	leftcoded = P_HASPREFIX(lopaque);
+
 	START_CRIT_SECTION();
 
 	/*
@@ -1956,7 +2202,7 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	 * original.  We need to do this before writing the WAL record, so that
 	 * XLogInsert can WAL log an image of the page if necessary.
 	 */
-	memcpy(origpage, leftpage, BLCKSZ);
+	memcpy(origbufpage, leftpage, BLCKSZ);
 	/* leftpage, lopaque must not be used below here */
 
 	/*
@@ -2004,6 +2250,27 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		xlrec.postingoff = 0;
 		if (postingoff != 0 && origpagepostingoff < firstrightoff)
 			xlrec.postingoff = postingoff;
+
+		/*
+		 * A coded original page is described to redo in its decoded offset
+		 * space (see XLH_SPLIT_ORIG_CODED).  The plain-scratch path already
+		 * works there; the decoded-array path works in the coded page's
+		 * offsets, one past the directory item.
+		 */
+		xlrec.flags = 0;
+		if (origprefix)
+		{
+			xlrec.flags |= XLH_SPLIT_ORIG_CODED;
+			if (origprefix_array)
+			{
+				xlrec.firstrightoff--;
+				xlrec.newitemoff--;
+			}
+		}
+		if (leftcoded)
+			xlrec.flags |= XLH_SPLIT_LEFT_CODED;
+		if (P_HASPREFIX(ropaque))
+			xlrec.flags |= XLH_SPLIT_RIGHT_CODED;
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfBtreeSplit);
@@ -2083,7 +2350,7 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 	else
 		recptr = XLogGetFakeLSN(rel);
 
-	PageSetLSN(origpage, recptr);
+	PageSetLSN(origbufpage, recptr);
 	PageSetLSN(rightpage, recptr);
 	if (!isrightmost)
 		PageSetLSN(spage, recptr);
@@ -2105,6 +2372,7 @@ _bt_split(Relation rel, Relation heaprel, BTScanInsert itup_key, Buffer buf,
 		pfree(lefthighkey);
 
 	/* split's done */
+	*newitemplaced = placenewitem;
 	return rbuf;
 }
 

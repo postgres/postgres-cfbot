@@ -18,6 +18,7 @@ OBJS = \
 	nbtinsert.o \
 	nbtpage.o \
 	nbtpreprocesskeys.o \
+	nbtprefix.o \
 	nbtreadpage.o \
 	nbtree.o \
 	nbtsearch.o \

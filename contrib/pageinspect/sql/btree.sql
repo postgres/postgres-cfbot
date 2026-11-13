@@ -60,3 +60,27 @@ SHOW block_size \gset
 SELECT bt_page_items(decode(repeat('00', :block_size), 'hex'));
 
 DROP TABLE test1;
+
+-- A prefix-compressed leaf: data items are shown decoded, so data and htid
+-- read as on a plain page, while itemlen shows the stored (coded) size.
+CREATE TABLE test_prefix (u text COLLATE "C");
+INSERT INTO test_prefix
+  SELECT 'https://example.com/path/' || lpad(g::text, 4, '0')
+  FROM generate_series(1, 20) g;
+CREATE INDEX test_prefix_idx ON test_prefix (u) WITH (prefix_compression = on);
+CREATE INDEX test_plain_idx ON test_prefix (u);
+SELECT btpo_flags & 512 <> 0 AS coded FROM bt_page_stats('test_prefix_idx', 1);
+-- same decoded items as the plain index (offset 1 is the prefix directory)
+SELECT count(*) AS mismatches
+  FROM bt_page_items('test_prefix_idx', 1) c
+  FULL JOIN bt_page_items('test_plain_idx', 1) p ON p.itemoffset = c.itemoffset - 1
+  WHERE c.itemoffset > 1 AND (c.data IS DISTINCT FROM p.data OR c.htid IS DISTINCT FROM p.htid);
+-- and the same from a raw page image
+SELECT count(*) AS mismatches
+  FROM bt_page_items(get_raw_page('test_prefix_idx', 1)) c
+  JOIN bt_page_items('test_prefix_idx', 1) r USING (itemoffset)
+  WHERE c.data IS DISTINCT FROM r.data;
+-- coded items are smaller than the plain ones
+SELECT (SELECT sum(itemlen) FROM bt_page_items('test_prefix_idx', 1) WHERE itemoffset > 1) <
+       (SELECT sum(itemlen) FROM bt_page_items('test_plain_idx', 1)) AS smaller;
+DROP TABLE test_prefix;

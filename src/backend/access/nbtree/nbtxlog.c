@@ -186,6 +186,11 @@ btree_xlog_insert(bool isleaf, bool ismeta, bool posting,
 			/* Simple retail insertion */
 			if (PageAddItem(page, datapos, datalen, xlrec->offnum, false, false) == InvalidOffsetNumber)
 				elog(PANIC, "failed to add new item");
+			/* the logged item is the coded one on a prefix leaf */
+			if (isleaf && P_HASPREFIX(BTPageGetOpaque(page)))
+				_bt_prefix_note_insert(page,
+									   (IndexTuple) PageGetItem(page,
+																PageGetItemId(page, xlrec->offnum)));
 		}
 		else
 		{
@@ -215,15 +220,45 @@ btree_xlog_insert(bool isleaf, bool ismeta, bool posting,
 			/* Use mutable, aligned newitem copy in _bt_swap_posting() */
 			Assert(isleaf && postingoff > 0);
 			newitem = CopyIndexTuple((IndexTuple) datapos);
-			nposting = _bt_swap_posting(newitem, oposting, postingoff);
 
-			/* Replace existing posting list with post-split version */
-			memcpy(oposting, nposting, MAXALIGN(IndexTupleSize(nposting)));
+			if (P_HASPREFIX(BTPageGetOpaque(page)))
+			{
+				/*
+				 * Coded leaf: repeat _bt_insertonpg's steps -- swap on the
+				 * decoded posting list, then code both results against their
+				 * neighbors' groups (catalog-free, so redo can).
+				 */
+				BTItemBuf	pbuf;
+				IndexTuple	plainpost = CopyIndexTuple(_bt_getitem(page,
+																   OffsetNumberPrev(xlrec->offnum),
+																   &pbuf));
+				IndexTuple	codedpost;
+				IndexTuple	codednew;
 
-			/* Insert "final" new item (not orignewitem from WAL stream) */
-			Assert(IndexTupleSize(newitem) == datalen);
-			if (PageAddItem(page, newitem, datalen, xlrec->offnum, false, false) == InvalidOffsetNumber)
-				elog(PANIC, "failed to add posting split new item");
+				nposting = _bt_swap_posting(newitem, plainpost, postingoff);
+				codedpost = _bt_prefix_recode(page,
+											  OffsetNumberPrev(xlrec->offnum),
+											  nposting);
+				Assert(IndexTupleSize(codedpost) == ItemIdGetLength(itemid));
+				memcpy(oposting, codedpost, MAXALIGN(IndexTupleSize(codedpost)));
+				codednew = _bt_prefix_encode_insert(page, xlrec->offnum, newitem);
+				if (PageAddItem(page, codednew, MAXALIGN(IndexTupleSize(codednew)),
+								xlrec->offnum, false, false) == InvalidOffsetNumber)
+					elog(PANIC, "failed to add posting split new item");
+				_bt_prefix_note_insert(page, codednew);
+			}
+			else
+			{
+				nposting = _bt_swap_posting(newitem, oposting, postingoff);
+
+				/* Replace existing posting list with post-split version */
+				memcpy(oposting, nposting, MAXALIGN(IndexTupleSize(nposting)));
+
+				/* Insert "final" new item (not orignewitem from WAL stream) */
+				Assert(IndexTupleSize(newitem) == datalen);
+				if (PageAddItem(page, newitem, datalen, xlrec->offnum, false, false) == InvalidOffsetNumber)
+					elog(PANIC, "failed to add posting split new item");
+			}
 		}
 
 		PageSetLSN(page, lsn);
@@ -280,7 +315,11 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 	if (!isleaf)
 		_bt_clear_incomplete_split(record, 3);
 
-	/* Reconstruct right (new) sibling page from scratch */
+	/*
+	 * Reconstruct right (new) sibling page from scratch.  A coded right half
+	 * was logged as its coded items, directory included, which
+	 * _bt_restore_page lays out exactly as the primary did.
+	 */
 	rbuf = XLogInitBufferForRedo(record, 1);
 	datapos = XLogRecGetBlockData(record, 1, &datalen);
 	rpage = BufferGetPage(rbuf);
@@ -292,6 +331,8 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 	ropaque->btpo_next = spagenumber;
 	ropaque->btpo_level = xlrec->level;
 	ropaque->btpo_flags = isleaf ? BTP_LEAF : 0;
+	if (xlrec->flags & XLH_SPLIT_RIGHT_CODED)
+		ropaque->btpo_flags |= BTP_PREFIX;
 	ropaque->btpo_cycleid = 0;
 
 	_bt_restore_page(rpage, datapos, datalen);
@@ -320,7 +361,35 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 					left_hikeysz = 0;
 		Page		leftpage;
 		OffsetNumber leftoff,
+					firstdata,
 					replacepostingoff = InvalidOffsetNumber;
+		IndexTuple *ditems = NULL;	/* decoded items of a coded origpage */
+		IndexTuple *litems;		/* the left half's items, in order */
+		int			nlitems = 0;
+
+		/*
+		 * The original page's data items, as plain tuples.  For a coded page
+		 * (XLH_SPLIT_ORIG_CODED) the record's offsets are into the decoded
+		 * sequence, which starts at the prefix directory's offset.
+		 */
+		if (xlrec->flags & XLH_SPLIT_ORIG_CODED)
+		{
+			IndexTuple	dhikey;
+			Size		dhikeysz;
+
+			Assert(P_HASPREFIX(oopaque));
+			(void) _bt_prefix_decode_items(origpage, &ditems, &dhikey,
+										   &dhikeysz);
+			if (dhikey)
+				pfree(dhikey);
+			firstdata = BTPageGetPrefixOff(oopaque);
+		}
+		else
+			firstdata = P_FIRSTDATAKEY(oopaque);
+
+#define ORIG_ITEM(o) \
+	(ditems ? ditems[(o) - firstdata] : \
+	 (IndexTuple) PageGetItem(origpage, PageGetItemId(origpage, (o))))
 
 		datapos = XLogRecGetBlockData(record, 0, &datalen);
 
@@ -333,7 +402,6 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 
 			if (xlrec->postingoff != 0)
 			{
-				ItemId		itemid;
 				IndexTuple	oposting;
 
 				/* Posting list must be at offset number before new item's */
@@ -341,8 +409,7 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 
 				/* Use mutable, aligned newitem copy in _bt_swap_posting() */
 				newitem = CopyIndexTuple(newitem);
-				itemid = PageGetItemId(origpage, replacepostingoff);
-				oposting = (IndexTuple) PageGetItem(origpage, itemid);
+				oposting = ORIG_ITEM(replacepostingoff);
 				nposting = _bt_swap_posting(newitem, oposting,
 											xlrec->postingoff);
 			}
@@ -360,63 +427,87 @@ btree_xlog_split(bool newitemonleft, XLogReaderState *record)
 
 		Assert(datalen == 0);
 
-		leftpage = PageGetTempPageCopySpecial(origpage);
-
-		/* Add high key tuple from WAL record to temp page */
-		leftoff = P_HIKEY;
-		if (PageAddItem(leftpage, left_hikey, left_hikeysz, P_HIKEY, false, false) == InvalidOffsetNumber)
-			elog(ERROR, "failed to add high key to left page after split");
-		leftoff = OffsetNumberNext(leftoff);
-
-		for (off = P_FIRSTDATAKEY(oopaque); off < xlrec->firstrightoff; off++)
+		/* Collect the left half's items, in item number order */
+		litems = palloc(sizeof(IndexTuple) * (MaxIndexTuplesPerPage * 2 + 1));
+		for (off = firstdata; off < xlrec->firstrightoff; off++)
 		{
-			ItemId		itemid;
-			Size		itemsz;
-			IndexTuple	item;
-
 			/* Add replacement posting list when required */
 			if (off == replacepostingoff)
 			{
 				Assert(newitemonleft ||
 					   xlrec->firstrightoff == xlrec->newitemoff);
-				if (PageAddItem(leftpage, nposting, MAXALIGN(IndexTupleSize(nposting)), leftoff, false, false) == InvalidOffsetNumber)
-					elog(ERROR, "failed to add new posting list item to left page after split");
-				leftoff = OffsetNumberNext(leftoff);
+				litems[nlitems++] = nposting;
 				continue;		/* don't insert oposting */
 			}
 
 			/* add the new item if it was inserted on left page */
 			else if (newitemonleft && off == xlrec->newitemoff)
-			{
-				if (PageAddItem(leftpage, newitem, newitemsz, leftoff, false, false) == InvalidOffsetNumber)
-					elog(ERROR, "failed to add new item to left page after split");
-				leftoff = OffsetNumberNext(leftoff);
-			}
+				litems[nlitems++] = newitem;
 
-			itemid = PageGetItemId(origpage, off);
-			itemsz = ItemIdGetLength(itemid);
-			item = (IndexTuple) PageGetItem(origpage, itemid);
-			if (PageAddItem(leftpage, item, itemsz, leftoff, false, false) == InvalidOffsetNumber)
-				elog(ERROR, "failed to add old item to left page after split");
-			leftoff = OffsetNumberNext(leftoff);
+			litems[nlitems++] = ORIG_ITEM(off);
 		}
 
 		/* cope with possibility that newitem goes at the end */
 		if (newitemonleft && off == xlrec->newitemoff)
-		{
-			if (PageAddItem(leftpage, newitem, newitemsz, leftoff, false, false) == InvalidOffsetNumber)
-				elog(ERROR, "failed to add new item to left page after split");
-			leftoff = OffsetNumberNext(leftoff);
-		}
+			litems[nlitems++] = newitem;
+#undef ORIG_ITEM
 
-		PageRestoreTempPage(leftpage, origpage);
+		/*
+		 * The left half holds one item per original offset in
+		 * [firstdata, firstrightoff), plus newitem when it landed on the left
+		 * (a replaced posting list swaps nposting for oposting in place, so it
+		 * does not change the count).  A mismatch means the primary and redo
+		 * disagree on the split, which would diverge the standby; catch it
+		 * here rather than let a later byte compare puzzle it out.
+		 */
+		Assert(nlitems == (xlrec->firstrightoff - firstdata) +
+			   (newitemonleft ? 1 : 0));
 
-		/* Fix opaque fields */
+		/*
+		 * To retain the same physical order of the tuples that they had, we
+		 * initialize a temporary empty page for the left page and add all the
+		 * items to that in item number order.  This mirrors how _bt_split()
+		 * works.  Retaining the same physical order makes WAL consistency
+		 * checking possible.  See also _bt_restore_page(), which does the
+		 * same for the right page.
+		 */
+		leftpage = PageGetTempPageCopySpecial(origpage);
+
+		/* Fix opaque fields (the layout of a coded page depends on them) */
+		oopaque = BTPageGetOpaque(leftpage);
 		oopaque->btpo_flags = BTP_INCOMPLETE_SPLIT;
 		if (isleaf)
 			oopaque->btpo_flags |= BTP_LEAF;
 		oopaque->btpo_next = rightpagenumber;
 		oopaque->btpo_cycleid = 0;
+
+		if (xlrec->flags & XLH_SPLIT_LEFT_CODED)
+		{
+			/* lay out the coded left half exactly as _bt_split did */
+			if (!_bt_prefix_form_page(leftpage, left_hikey, litems, nlitems,
+									  true))
+				elog(PANIC, "failed to lay out prefix-compressed left page after split");
+		}
+		else
+		{
+			/* Add high key tuple from WAL record to temp page */
+			if (PageAddItem(leftpage, left_hikey, left_hikeysz, P_HIKEY, false, false) == InvalidOffsetNumber)
+				elog(ERROR, "failed to add high key to left page after split");
+			leftoff = OffsetNumberNext(P_HIKEY);
+
+			for (int i = 0; i < nlitems; i++)
+			{
+				if (PageAddItem(leftpage, litems[i],
+								MAXALIGN(IndexTupleSize(litems[i])), leftoff,
+								false, false) == InvalidOffsetNumber)
+					elog(ERROR, "failed to add item to left page after split");
+				leftoff = OffsetNumberNext(leftoff);
+			}
+		}
+
+		/* decoded items, nposting and newitem go with the redo memory context */
+		PageRestoreTempPage(leftpage, origpage);
+		pfree(litems);
 
 		PageSetLSN(origpage, lsn);
 		MarkBufferDirty(buf);
@@ -468,6 +559,8 @@ btree_xlog_dedup(XLogReaderState *record)
 		BTDedupState state;
 		BTDedupInterval *intervals;
 		Page		newpage;
+		bool		coded = P_HASPREFIX(opaque);
+		IndexTuple *ditems = NULL;
 
 		state = palloc_object(BTDedupStateData);
 		state->deduplicate = true;	/* unused */
@@ -497,13 +590,33 @@ btree_xlog_dedup(XLogReaderState *record)
 				elog(ERROR, "deduplication failed to add highkey");
 		}
 
+		/*
+		 * A prefix-compressed page is deduplicated on decoded copies of its
+		 * items and keeps its directory, as in _bt_dedup_pass.
+		 */
+		if (coded)
+		{
+			OffsetNumber prefixoff = BTPageGetPrefixOff(opaque);
+			ItemId		diritemid = PageGetItemId(page, prefixoff);
+			IndexTuple	dummyhikey;
+			Size		dummyhikeysz;
+
+			if (PageAddItem(newpage, PageGetItem(page, diritemid),
+							ItemIdGetLength(diritemid), prefixoff,
+							false, false) == InvalidOffsetNumber)
+				elog(ERROR, "deduplication failed to add prefix directory");
+			(void) _bt_prefix_decode_items(page, &ditems, &dummyhikey,
+										   &dummyhikeysz);
+		}
+
 		intervals = (BTDedupInterval *) ptr;
 		for (offnum = minoff;
 			 offnum <= maxoff;
 			 offnum = OffsetNumberNext(offnum))
 		{
 			ItemId		itemid = PageGetItemId(page, offnum);
-			IndexTuple	itup = (IndexTuple) PageGetItem(page, itemid);
+			IndexTuple	itup = coded ? ditems[offnum - minoff] :
+				(IndexTuple) PageGetItem(page, itemid);
 
 			if (offnum == minoff)
 				_bt_dedup_start_pending(state, itup, offnum);
@@ -516,12 +629,21 @@ btree_xlog_dedup(XLogReaderState *record)
 			}
 			else
 			{
-				_bt_dedup_finish_pending(newpage, state);
+				if (coded)
+					_bt_dedup_finish_pending_coded(page, newpage, state);
+				else
+					_bt_dedup_finish_pending(newpage, state);
 				_bt_dedup_start_pending(state, itup, offnum);
 			}
 		}
 
-		_bt_dedup_finish_pending(newpage, state);
+		if (coded)
+		{
+			_bt_dedup_finish_pending_coded(page, newpage, state);
+			_bt_prefix_recount(newpage);
+		}
+		else
+			_bt_dedup_finish_pending(newpage, state);
 		Assert(state->nintervals == xlrec->nintervals);
 		Assert(memcmp(state->intervals, intervals,
 					  state->nintervals * sizeof(BTDedupInterval)) == 0);
@@ -620,6 +742,7 @@ btree_xlog_vacuum(XLogReaderState *record)
 
 		if (xlrec->ndeleted > 0)
 			PageIndexMultiDelete(page, (OffsetNumber *) ptr, xlrec->ndeleted);
+		_bt_prefix_recount(page);
 
 		/*
 		 * Clear the vacuum cycle ID, and mark the page as not containing any
@@ -686,6 +809,7 @@ btree_xlog_delete(XLogReaderState *record)
 
 		if (xlrec->ndeleted > 0)
 			PageIndexMultiDelete(page, (OffsetNumber *) ptr, xlrec->ndeleted);
+		_bt_prefix_recount(page);
 
 		/*
 		 * Do *not* clear the vacuum cycle ID, but do mark the page as not

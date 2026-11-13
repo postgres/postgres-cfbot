@@ -153,6 +153,16 @@ static relopt_bool boolRelOpts[] =
 		},
 		true
 	},
+	{
+		{
+			"prefix_compression",
+			"Enables leaf key prefix compression for this btree index",
+			RELOPT_KIND_BTREE,
+			ShareUpdateExclusiveLock	/* since it applies only to later
+										 * whole-page writes */
+		},
+		false
+	},
 	/* list terminator */
 	{{NULL}}
 };

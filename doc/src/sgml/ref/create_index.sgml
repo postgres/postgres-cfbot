@@ -477,6 +477,43 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
     </note>
     </listitem>
    </varlistentry>
+
+   <varlistentry id="index-reloption-prefix-compression" xreflabel="prefix_compression">
+    <term><literal>prefix_compression</literal> (<type>boolean</type>)
+     <indexterm>
+      <primary><varname>prefix_compression</varname> storage parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+    <para>
+      Controls leaf key prefix compression.  When set to
+      <literal>ON</literal>, a leaf page may store the leading bytes that a
+      run of its tuples share just once and record only each tuple's
+      unshared remainder, which can substantially shrink indexes whose keys
+      share long leading bytes (for example URLs, <type>jsonb</type> paths,
+      zero-padded codes, or low-cardinality leading columns of a multicolumn
+      index).  It applies to key columns of any data type.  Compression saves
+      space and I/O at some cost in CPU time for inserts.  Set to
+      <literal>ON</literal> or <literal>OFF</literal> to enable or disable the
+      optimization.  The default is <literal>OFF</literal>.
+    </para>
+
+    <note>
+     <para>
+      Prefix compression only changes how keys are stored; comparisons always
+      see the original key values, so every collation and operator class
+      behaves identically with it on or off.  A leaf is compressed only when
+      it is written as a whole (during an index build, or either half of a
+      page split), so turning <literal>prefix_compression</literal> on or off
+      via <command>ALTER INDEX</command> does not rewrite the index: existing
+      pages are left as they are and are converted the next time they are
+      written whole (<command>REINDEX</command> converts them all at once).  No <command>REINDEX</command> is required, and indexes
+      upgraded with <application>pg_upgrade</application> keep working
+      unchanged.
+     </para>
+    </note>
+    </listitem>
+   </varlistentry>
    </variablelist>
 
    <para>

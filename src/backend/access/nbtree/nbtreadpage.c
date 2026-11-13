@@ -22,6 +22,7 @@
 #include "access/relscan.h"
 #include "storage/predicate.h"
 #include "utils/datum.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 
 
@@ -130,6 +131,30 @@ static bool _bt_verify_keys_with_arraykeys(IndexScanDesc scan);
  *
  * Returns true if any matching items found on the page, false if none.
  */
+/*
+ * _bt_scan_skip_key -- can _bt_readpage skip decoding the current item?
+ *
+ * On a prefix-compressed leaf, decoding an item costs a copy.  It is wasted
+ * when (a) this is not an index-only scan (so->currTuples == NULL), so only
+ * the heap TID or posting list is needed, both of which coding leaves in
+ * place in the on-page tuple; and (b) _bt_checkkeys would read no key
+ * attribute: every scan key is already proven satisfied for the whole page
+ * (startikey reached the end of the scan keys) and there are no array keys
+ * (array-key advancement reads the key regardless of startikey).  Then
+ * _bt_check_compare would compare nothing and report "passes, continue", so
+ * the caller treats the item as a match and reads it raw.
+ *
+ * The _bt_checkkeys call must be skipped, not just the decode: assert-enabled
+ * builds re-run _bt_check_compare from ikey 0 there to verify startikey, which
+ * would read the still-coded key.
+ */
+static inline bool
+_bt_scan_skip_key(BTScanOpaque so, BTReadPageState *pstate, bool arrayKeys)
+{
+	return so->currTuples == NULL && !arrayKeys &&
+		pstate->startikey >= so->numberOfKeys;
+}
+
 bool
 _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 			 bool firstpage)
@@ -141,6 +166,8 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 	OffsetNumber minoff;
 	OffsetNumber maxoff;
 	BTReadPageState pstate;
+	BTItemBuf	itupbuf;		/* decode workspace for a loop's current item */
+	BTItemBuf	finalbuf;		/* decode workspace for finaltup */
 	bool		arrayKeys,
 				ignore_killed_tuples = scan->ignore_killed_tuples;
 	int			itemIndex,
@@ -155,6 +182,26 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 	/* delay setting so->currPos.lsn until _bt_drop_lock_and_maybe_pin */
 	pstate.dir = so->currPos.dir = dir;
 	so->currPos.nextTupleOffset = 0;
+
+	/*
+	 * A prefix-compressed leaf can decode to up to two pages of tuples (see
+	 * _bt_prefix_split_needed), more than the BLCKSZ index-only scan
+	 * workspaces hold.  Grow them the first time such a page is read.
+	 */
+	if (unlikely(P_HASPREFIX(opaque)) && so->currTuples && !so->bigTuples)
+	{
+		char	   *big;
+
+		big = MemoryContextAlloc(GetMemoryChunkContext(so->currTuples),
+								 4 * BLCKSZ);
+		if (BTScanPosIsValid(so->markPos))
+			memcpy(big + 2 * BLCKSZ, so->markTuples,
+				   so->markPos.nextTupleOffset);
+		pfree(so->currTuples);
+		so->currTuples = big;
+		so->markTuples = big + 2 * BLCKSZ;
+		so->bigTuples = true;
+	}
 
 	/* either moreRight or moreLeft should be set now (may be unset later) */
 	Assert(ScanDirectionIsForward(dir) ? so->currPos.moreRight :
@@ -252,12 +299,23 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 				continue;
 			}
 
-			itup = (IndexTuple) PageGetItem(page, iid);
-			Assert(!BTreeTupleIsPivot(itup));
+			if (_bt_scan_skip_key(so, &pstate, arrayKeys))
+			{
+				/* only the heap TID(s) are needed: read the item raw */
+				itup = (IndexTuple) PageGetItem(page, iid);
+				Assert(!BTreeTupleIsPivot(itup));
+				pstate.offnum = offnum;
+				passes_quals = true;
+			}
+			else
+			{
+				itup = _bt_getitem(page, offnum, &itupbuf);
+				Assert(!BTreeTupleIsPivot(itup));
 
-			pstate.offnum = offnum;
-			passes_quals = _bt_checkkeys(scan, &pstate, arrayKeys,
-										 itup, indnatts);
+				pstate.offnum = offnum;
+				passes_quals = _bt_checkkeys(scan, &pstate, arrayKeys,
+											 itup, indnatts);
+			}
 
 			/*
 			 * Check if we need to skip ahead to a later tuple (only possible
@@ -353,9 +411,7 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 		{
 			if (minoff <= maxoff && !P_LEFTMOST(opaque))
 			{
-				ItemId		iid = PageGetItemId(page, minoff);
-
-				pstate.finaltup = (IndexTuple) PageGetItem(page, iid);
+				pstate.finaltup = _bt_getitem(page, minoff, &finalbuf);
 
 				if (unlikely(so->scanBehind) &&
 					!_bt_scanbehind_checkkeys(scan, dir, pstate.finaltup))
@@ -415,19 +471,29 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
 			else
 				tuple_alive = true;
 
-			itup = (IndexTuple) PageGetItem(page, iid);
-			Assert(!BTreeTupleIsPivot(itup));
-
 			pstate.offnum = offnum;
-			if (arrayKeys && offnum == minoff && pstate.forcenonrequired)
+			if (_bt_scan_skip_key(so, &pstate, arrayKeys))
 			{
-				/* Reset arrays, per _bt_set_startikey contract */
-				pstate.forcenonrequired = false;
-				pstate.startikey = 0;
-				_bt_start_array_keys(scan, dir);
+				/* only the heap TID(s) are needed: read the item raw */
+				itup = (IndexTuple) PageGetItem(page, iid);
+				Assert(!BTreeTupleIsPivot(itup));
+				passes_quals = true;
 			}
-			passes_quals = _bt_checkkeys(scan, &pstate, arrayKeys,
-										 itup, indnatts);
+			else
+			{
+				itup = _bt_getitem(page, offnum, &itupbuf);
+				Assert(!BTreeTupleIsPivot(itup));
+
+				if (arrayKeys && offnum == minoff && pstate.forcenonrequired)
+				{
+					/* Reset arrays, per _bt_set_startikey contract */
+					pstate.forcenonrequired = false;
+					pstate.startikey = 0;
+					_bt_start_array_keys(scan, dir);
+				}
+				passes_quals = _bt_checkkeys(scan, &pstate, arrayKeys,
+											 itup, indnatts);
+			}
 
 			if (arrayKeys && so->scanBehind)
 			{
@@ -596,7 +662,9 @@ _bt_set_startikey(IndexScanDesc scan, BTReadPageState *pstate)
 	BTScanOpaque so = (BTScanOpaque) scan->opaque;
 	Relation	rel = scan->indexRelation;
 	TupleDesc	tupdesc = RelationGetDescr(rel);
-	ItemId		iid;
+	ItemId		iid = NULL;
+	BTItemBuf	firstbuf,
+				lastbuf;
 	IndexTuple	firsttup,
 				lasttup;
 	int			startikey = 0,
@@ -616,12 +684,11 @@ _bt_set_startikey(IndexScanDesc scan, BTReadPageState *pstate)
 		return;
 
 	/* minoff is an offset to the lowest non-pivot tuple on the page */
-	iid = PageGetItemId(pstate->page, pstate->minoff);
-	firsttup = (IndexTuple) PageGetItem(pstate->page, iid);
+	(void) iid;
+	firsttup = _bt_getitem(pstate->page, pstate->minoff, &firstbuf);
 
 	/* maxoff is an offset to the highest non-pivot tuple on the page */
-	iid = PageGetItemId(pstate->page, pstate->maxoff);
-	lasttup = (IndexTuple) PageGetItem(pstate->page, iid);
+	lasttup = _bt_getitem(pstate->page, pstate->maxoff, &lastbuf);
 
 	/* Determine the first attribute whose values change on caller's page */
 	firstchangingattnum = _bt_keep_natts_fast(rel, firsttup, lasttup);
@@ -2053,6 +2120,7 @@ _bt_checkkeys_look_ahead(IndexScanDesc scan, BTReadPageState *pstate,
 	ScanDirection dir = pstate->dir;
 	OffsetNumber aheadoffnum;
 	IndexTuple	ahead;
+	BTItemBuf	aheadbuf;
 
 	Assert(!pstate->forcenonrequired);
 
@@ -2088,8 +2156,7 @@ _bt_checkkeys_look_ahead(IndexScanDesc scan, BTReadPageState *pstate,
 		aheadoffnum = Max((int) pstate->minoff,
 						  (int) pstate->offnum - pstate->targetdistance);
 
-	ahead = (IndexTuple) PageGetItem(pstate->page,
-									 PageGetItemId(pstate->page, aheadoffnum));
+	ahead = _bt_getitem(pstate->page, aheadoffnum, &aheadbuf);
 	if (_bt_tuple_before_array_skeys(scan, dir, ahead, tupdesc, tupnatts,
 									 false, 0, NULL))
 	{
