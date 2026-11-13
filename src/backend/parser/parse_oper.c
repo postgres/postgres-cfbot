@@ -809,6 +809,60 @@ make_op(ParseState *pstate, List *opname, Node *ltree, Node *rtree,
 						"internal"),
 				 parser_errposition(pstate, location)));
 
+	/*
+	 * transformAExprOp reads "ROW(..) op ROW(..)" and "ROW(..) op (SELECT
+	 * ..)" as a row comparison.  An operand gets into that form here when a
+	 * whole-row value of type record is coerced to the operator's composite
+	 * input type, which expands it into a ROW() (see
+	 * coerce_record_to_complex).  Show that coercion as a cast, else the
+	 * operator is printed in a form that reads back as a row comparison.  The
+	 * operands coerced here get their actual type set to the declared one, so
+	 * that make_fn_arguments does not coerce them again.
+	 */
+	if (nargs == 2)
+	{
+		bool		lrow;
+		bool		rrow;
+
+		if (actual_arg_types[0] == declared_arg_types[0])
+			lrow = IsA(ltree, RowExpr);
+		else
+			lrow = (actual_arg_types[0] == RECORDOID &&
+					ISCOMPLEX(declared_arg_types[0]));
+		if (actual_arg_types[1] == declared_arg_types[1])
+			rrow = IsA(rtree, RowExpr);
+		else
+			rrow = (actual_arg_types[1] == RECORDOID &&
+					ISCOMPLEX(declared_arg_types[1]));
+
+		if (lrow &&
+			(rrow ||
+			 (IsA(rtree, SubLink) &&
+			  ((SubLink *) rtree)->subLinkType == EXPR_SUBLINK)))
+		{
+			if (actual_arg_types[0] != declared_arg_types[0])
+			{
+				linitial(args) = coerce_type(pstate, ltree,
+											 actual_arg_types[0],
+											 declared_arg_types[0], -1,
+											 COERCION_IMPLICIT,
+											 COERCE_EXPLICIT_CAST,
+											 -1);
+				actual_arg_types[0] = declared_arg_types[0];
+			}
+			if (rrow && actual_arg_types[1] != declared_arg_types[1])
+			{
+				lsecond(args) = coerce_type(pstate, rtree,
+											actual_arg_types[1],
+											declared_arg_types[1], -1,
+											COERCION_IMPLICIT,
+											COERCE_EXPLICIT_CAST,
+											-1);
+				actual_arg_types[1] = declared_arg_types[1];
+			}
+		}
+	}
+
 	/* perform the necessary typecasting of arguments */
 	make_fn_arguments(pstate, args, actual_arg_types, declared_arg_types);
 
