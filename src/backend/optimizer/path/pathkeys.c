@@ -37,6 +37,7 @@ static bool matches_boolean_partition_clause(RestrictInfo *rinfo,
 											 int partkeycol);
 static Var *find_var_for_subquery_tle(RelOptInfo *rel, TargetEntry *tle);
 static bool right_merge_direction(PlannerInfo *root, PathKey *pathkey);
+static bool pathkey_has_sort_operator(PathKey *pathkey);
 
 
 /****************************************************************************
@@ -354,6 +355,35 @@ pathkeys_contained_in(List *keys1, List *keys2)
 }
 
 /*
+ * find_grouping_pathkey
+ *		Find a GROUP BY pathkey that 'pathkey' can stand in for.
+ *
+ * Searches the first 'num_groupby_pathkeys' items of 'group_pathkeys' for a
+ * pathkey with the same equivalence class and operator family as 'pathkey',
+ * ignoring sort direction and NULLS ordering.  Returns NULL if there is none.
+ * Pathkeys are canonical, so there can be at most one.
+ */
+static PathKey *
+find_grouping_pathkey(List *group_pathkeys, int num_groupby_pathkeys,
+					  PathKey *pathkey)
+{
+	ListCell   *lc;
+
+	foreach(lc, group_pathkeys)
+	{
+		PathKey    *gpk = (PathKey *) lfirst(lc);
+
+		if (foreach_current_index(lc) >= num_groupby_pathkeys)
+			break;
+		if (gpk->pk_eclass == pathkey->pk_eclass &&
+			gpk->pk_opfamily == pathkey->pk_opfamily)
+			return gpk;
+	}
+
+	return NULL;
+}
+
+/*
  * group_keys_reorder_by_pathkeys
  *		Reorder GROUP BY pathkeys and clauses to match the input pathkeys.
  *
@@ -363,6 +393,13 @@ pathkeys_contained_in(List *keys1, List *keys2)
  *		stay untouched.
  * 'num_groupby_pathkeys' is the number of first '*group_pathkeys' items to
  *		search matching pathkeys.
+ *
+ * An input pathkey matches a GROUP BY pathkey if both have the same
+ * equivalence class and operator family, even if they differ in sort
+ * direction or NULLS ordering.  Grouping only requires that equal values be
+ * adjacent, which the input ordering then guarantees, so in that case we use
+ * the input pathkey in place of the GROUP BY pathkey and a copy of the GROUP
+ * BY clause with its sort ordering adjusted to agree with it.
  *
  * Returns the number of GROUP BY keys with a matching pathkey.
  */
@@ -374,6 +411,8 @@ group_keys_reorder_by_pathkeys(List *pathkeys, List **group_pathkeys,
 	List	   *new_group_pathkeys = NIL,
 			   *new_group_clauses = NIL;
 	List	   *grouping_pathkeys;
+	List	   *replaced_pathkeys = NIL,
+			   *replaced_clauses = NIL;
 	ListCell   *lc;
 	int			n;
 
@@ -403,16 +442,22 @@ group_keys_reorder_by_pathkeys(List *pathkeys, List **group_pathkeys,
 	foreach(lc, pathkeys)
 	{
 		PathKey    *pathkey = (PathKey *) lfirst(lc);
+		PathKey    *group_pathkey;
 		SortGroupClause *sgc;
+		SortGroupClause *new_sgc;
 
 		/*
-		 * Pathkeys are built in a way that allows simply comparing pointers.
-		 * Give up if we can't find the matching pointer.  Also give up if
+		 * Give up if we've already matched all the grouping pathkeys, or if
 		 * there is no sortclause reference for some reason.
 		 */
 		if (foreach_current_index(lc) >= num_groupby_pathkeys ||
-			!list_member_ptr(grouping_pathkeys, pathkey) ||
 			pathkey->pk_eclass->ec_sortref == 0)
+			break;
+
+		/* Give up if there's no grouping pathkey this one can stand in for */
+		group_pathkey = find_grouping_pathkey(grouping_pathkeys,
+											  num_groupby_pathkeys, pathkey);
+		if (group_pathkey == NULL)
 			break;
 
 		/*
@@ -432,21 +477,221 @@ group_keys_reorder_by_pathkeys(List *pathkeys, List **group_pathkeys,
 		 */
 		Assert(OidIsValid(sgc->sortop));
 
+		/*
+		 * If the input pathkey's ordering differs from that of the GROUP BY
+		 * pathkey, make a copy of the clause that agrees with the input
+		 * pathkey.
+		 */
+		new_sgc = sgc;
+		if (pathkey != group_pathkey)
+		{
+			bool		reverse_sort = (pathkey->pk_cmptype == COMPARE_GT);
+			Oid			sortop = sgc->sortop;
+
+			if (sgc->reverse_sort != reverse_sort)
+			{
+				Oid			lefttype,
+							righttype;
+
+				op_input_types(sgc->sortop, &lefttype, &righttype);
+				sortop = get_opfamily_member_for_cmptype(pathkey->pk_opfamily,
+														 lefttype,
+														 righttype,
+														 pathkey->pk_cmptype);
+
+				/*
+				 * Give up if the operator family lacks the operator to sort
+				 * in the input pathkey's direction.  That is possible only
+				 * with an operator class that doesn't follow the btree rules,
+				 * but we needn't fail on it, as the GROUP BY keys can still
+				 * be sorted in their own direction.
+				 */
+				if (!OidIsValid(sortop))
+					break;
+			}
+
+			new_sgc = copyObject(sgc);
+			new_sgc->sortop = sortop;
+			new_sgc->reverse_sort = reverse_sort;
+			new_sgc->nulls_first = pathkey->pk_nulls_first;
+		}
+
+		replaced_pathkeys = lappend(replaced_pathkeys, group_pathkey);
+		replaced_clauses = lappend(replaced_clauses, sgc);
 		new_group_pathkeys = lappend(new_group_pathkeys, pathkey);
-		new_group_clauses = lappend(new_group_clauses, sgc);
+		new_group_clauses = lappend(new_group_clauses, new_sgc);
 	}
 
 	/* remember the number of pathkeys with a matching GROUP BY key */
 	n = list_length(new_group_pathkeys);
 
 	/* append the remaining group pathkeys (will be treated as not sorted) */
-	*group_pathkeys = list_concat_unique_ptr(new_group_pathkeys,
-											 *group_pathkeys);
-	*group_clauses = list_concat_unique_ptr(new_group_clauses,
-											*group_clauses);
+	foreach(lc, *group_pathkeys)
+	{
+		PathKey    *pathkey = (PathKey *) lfirst(lc);
+
+		if (!list_member_ptr(replaced_pathkeys, pathkey))
+			new_group_pathkeys = list_append_unique_ptr(new_group_pathkeys,
+														pathkey);
+	}
+	foreach(lc, *group_clauses)
+	{
+		SortGroupClause *sgc = (SortGroupClause *) lfirst(lc);
+
+		if (!list_member_ptr(replaced_clauses, sgc))
+			new_group_clauses = lappend(new_group_clauses, sgc);
+	}
+	*group_pathkeys = new_group_pathkeys;
+	*group_clauses = new_group_clauses;
 
 	list_free(grouping_pathkeys);
+	list_free(replaced_pathkeys);
+	list_free(replaced_clauses);
 	return n;
+}
+
+/*
+ * adjust_group_pathkeys_to_input
+ *		Make grouping pathkeys agree in sort direction with the input pathkeys.
+ *
+ * Returns a copy of 'group_pathkeys' in which each leading pathkey that has
+ * the same equivalence class and operator family as the pathkey at the same
+ * position of 'pathkeys' is replaced by the latter, even if they differ in
+ * sort direction or NULLS ordering.  Grouping only requires that equal values
+ * be adjacent, so sorting by the result is as good for grouping as sorting by
+ * 'group_pathkeys', and an input path sorted by 'pathkeys' may satisfy it
+ * where it would not satisfy 'group_pathkeys'.
+ *
+ * This is meant for grouping steps that don't care about the sort operators
+ * of their grouping clauses, such as partial aggregation, which compares the
+ * grouping keys only for equality and leaves the final aggregation to provide
+ * any ordering the query requires.
+ *
+ * As the result may be used to sort the input explicitly, stop at a pathkey
+ * whose operator family lacks the sort operator for the input pathkey's
+ * direction.  That is possible only with an operator class that doesn't
+ * follow the btree rules, as an index can provide such an ordering without
+ * the operator; but we needn't fail on it, as the remaining grouping pathkeys
+ * can still be sorted in their own direction.
+ *
+ * Like the reordering of the GROUP BY keys, this is done only if
+ * enable_group_by_reordering is on.
+ */
+List *
+adjust_group_pathkeys_to_input(List *group_pathkeys, List *pathkeys)
+{
+	List	   *result = list_copy(group_pathkeys);
+	ListCell   *lc1,
+			   *lc2;
+
+	if (!enable_group_by_reordering)
+		return result;
+
+	forboth(lc1, result, lc2, pathkeys)
+	{
+		PathKey    *group_pathkey = (PathKey *) lfirst(lc1);
+		PathKey    *pathkey = (PathKey *) lfirst(lc2);
+
+		if (group_pathkey->pk_eclass != pathkey->pk_eclass ||
+			group_pathkey->pk_opfamily != pathkey->pk_opfamily)
+			break;
+		if (group_pathkey->pk_cmptype != pathkey->pk_cmptype &&
+			!pathkey_has_sort_operator(pathkey))
+			break;
+		lfirst(lc1) = pathkey;
+	}
+
+	return result;
+}
+
+/*
+ * pathkey_has_sort_operator
+ *		Check that an explicit sort by 'pathkey' could be performed.
+ *
+ * prepare_sort_from_pathkeys() looks up the sort operator in the pathkey's
+ * operator family using the nominal type of the equivalence member it sorts
+ * by.  We don't know which member that will be, so require the operator for
+ * the type of every member.
+ */
+static bool
+pathkey_has_sort_operator(PathKey *pathkey)
+{
+	ListCell   *lc;
+
+	foreach(lc, pathkey->pk_eclass->ec_members)
+	{
+		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
+
+		if (!OidIsValid(get_opfamily_member_for_cmptype(pathkey->pk_opfamily,
+														em->em_datatype,
+														em->em_datatype,
+														pathkey->pk_cmptype)))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * get_window_group_keys_ordering
+ *		Reorder the GROUP BY keys to match the ordering of the first window.
+ *
+ * If there are window functions, the sort performed directly above the
+ * grouping step is the one required by the first window, rather than the one
+ * for ORDER BY, which is performed above the WindowAgg nodes.  So it can pay
+ * to group in the window's ordering, letting the sort for the grouping step
+ * also serve the window.  We reorder the GROUP BY keys to match as much of
+ * root->window_pathkeys as possible, taking on its sort direction and NULLS
+ * ordering, since grouping doesn't care about those.  The remaining group
+ * keys keep the order preprocess_groupclause() gave them, which matches the
+ * ORDER BY as far as possible; as WindowAgg nodes preserve their input
+ * ordering, that may save the final sort as well.
+ *
+ * This ordering is merely offered as one more candidate, rather than being
+ * applied to root->group_pathkeys, which also guide the planning of the
+ * scan/join steps below the grouping step (as query_pathkeys).  The window's
+ * ordering would be the wrong one to suggest there whenever the grouping step
+ * can't provide it as cheaply as an extra sort above the grouping step can,
+ * for instance when an index provides the original ordering.  So we leave it
+ * to the cost to decide.
+ *
+ * Like the other alternative orderings of the GROUP BY keys, this one is
+ * considered only if enable_group_by_reordering is on.
+ *
+ * Returns NULL if there is no such ordering that differs from
+ * root->group_pathkeys.
+ */
+GroupByOrdering *
+get_window_group_keys_ordering(PlannerInfo *root)
+{
+	GroupByOrdering *info;
+	List	   *pathkeys = root->group_pathkeys;
+	List	   *clauses = root->processed_groupClause;
+
+	if (!enable_group_by_reordering ||
+		root->window_pathkeys == NIL || root->group_pathkeys == NIL ||
+		root->parse->groupingSets ||
+		pathkeys_contained_in(root->window_pathkeys, root->group_pathkeys))
+		return NULL;
+
+	if (group_keys_reorder_by_pathkeys(root->window_pathkeys,
+									   &pathkeys, &clauses,
+									   root->num_groupby_pathkeys) == 0)
+		return NULL;
+
+	/*
+	 * The window's ordering may extend beyond the GROUP BY keys in their
+	 * original order, e.g. with an aggregate as a further window ORDER BY
+	 * key, in which case the reordering changes nothing.
+	 */
+	if (compare_pathkeys(pathkeys, root->group_pathkeys) == PATHKEYS_EQUAL)
+		return NULL;
+
+	info = makeNode(GroupByOrdering);
+	info->pathkeys = pathkeys;
+	info->clauses = clauses;
+
+	return info;
 }
 
 /*
@@ -461,7 +706,12 @@ group_keys_reorder_by_pathkeys(List *pathkeys, List **group_pathkeys,
  *
  * - GROUP BY keys as ordered by preprocess_groupclause() to match target
  *   ORDER BY clause (as much as possible),
- * - GROUP BY keys reordered to match 'path' ordering (as much as possible).
+ * - GROUP BY keys reordered to match 'path' ordering (as much as possible),
+ *   taking on the sort direction and NULLS ordering of 'path' where they
+ *   differ from those of the GROUP BY keys,
+ * - GROUP BY keys reordered to match the ordering required by the first
+ *   window (as much as possible), taking on its sort direction and NULLS
+ *   ordering likewise.
  */
 List *
 get_useful_group_keys_orderings(PlannerInfo *root, Path *path)
@@ -518,6 +768,29 @@ get_useful_group_keys_orderings(PlannerInfo *root, Path *path)
 		}
 	}
 
+	/*
+	 * Also try the ordering of the group keys that matches the first window,
+	 * unless the path's ordering already produced it above.  A partial match
+	 * is useful here even without incremental sort, since the grouping step's
+	 * input is sorted on all of the group keys anyway.
+	 */
+	info = get_window_group_keys_ordering(root);
+	if (info != NULL)
+	{
+		ListCell   *lc;
+
+		foreach(lc, infos)
+		{
+			GroupByOrdering *other = lfirst_node(GroupByOrdering, lc);
+
+			if (compare_pathkeys(info->pathkeys, other->pathkeys) ==
+				PATHKEYS_EQUAL)
+				break;
+		}
+		if (lc == NULL)
+			infos = lappend(infos, info);
+	}
+
 #ifdef USE_ASSERT_CHECKING
 	{
 		GroupByOrdering *pinfo = linitial_node(GroupByOrdering, infos);
@@ -533,8 +806,39 @@ get_useful_group_keys_orderings(PlannerInfo *root, Path *path)
 
 			Assert(list_length(info->clauses) == list_length(pinfo->clauses));
 			Assert(list_length(info->pathkeys) == list_length(pinfo->pathkeys));
-			Assert(list_difference(info->clauses, pinfo->clauses) == NIL);
-			Assert(list_difference_ptr(info->pathkeys, pinfo->pathkeys) == NIL);
+
+			/*
+			 * The clauses and pathkeys may differ from the original ones in
+			 * sort ordering, but they must cover the same GROUP BY items and
+			 * equivalence classes.
+			 */
+			foreach(lc1, info->clauses)
+			{
+				SortGroupClause *sgc = lfirst_node(SortGroupClause, lc1);
+				SortGroupClause *psgc;
+
+				psgc = get_sortgroupref_clause(sgc->tleSortGroupRef,
+											   pinfo->clauses);
+				Assert(sgc->eqop == psgc->eqop);
+			}
+			foreach(lc1, info->pathkeys)
+			{
+				PathKey    *pk = lfirst_node(PathKey, lc1);
+				bool		found = false;
+
+				foreach(lc2, pinfo->pathkeys)
+				{
+					PathKey    *ppk = lfirst_node(PathKey, lc2);
+
+					if (ppk->pk_eclass == pk->pk_eclass &&
+						ppk->pk_opfamily == pk->pk_opfamily)
+					{
+						found = true;
+						break;
+					}
+				}
+				Assert(found);
+			}
 
 			forboth(lc1, info->clauses, lc2, info->pathkeys)
 			{
@@ -542,6 +846,8 @@ get_useful_group_keys_orderings(PlannerInfo *root, Path *path)
 				PathKey    *pk = lfirst_node(PathKey, lc2);
 
 				Assert(pk->pk_eclass->ec_sortref == sgc->tleSortGroupRef);
+				Assert(sgc->reverse_sort == (pk->pk_cmptype == COMPARE_GT));
+				Assert(sgc->nulls_first == pk->pk_nulls_first);
 			}
 		}
 	}
@@ -2199,6 +2505,43 @@ count_common_leading_pathkeys_unordered(List *keys1, List *keys2)
 }
 
 /*
+ * count_common_leading_group_pathkeys
+ *		Returns the number of leading PathKeys in 'pathkeys' which are useful
+ *		for GROUP BY.
+ *
+ * This is like count_common_leading_pathkeys_unordered() applied to
+ * root->group_pathkeys, except that a pathkey matching a grouping key in
+ * everything but sort direction and NULLS ordering counts as useful too,
+ * unless enable_group_by_reordering is off.
+ */
+static int
+count_common_leading_group_pathkeys(PlannerInfo *root, List *pathkeys)
+{
+	int			ncommon = 0;
+
+	/* No point in searching pathkeys when there are no GROUP BY pathkeys */
+	if (root->group_pathkeys == NIL)
+		return 0;
+
+	if (!enable_group_by_reordering)
+		return count_common_leading_pathkeys_unordered(root->group_pathkeys,
+													   pathkeys);
+
+	foreach_node(PathKey, pathkey, pathkeys)
+	{
+		if (!list_member_ptr(root->group_pathkeys, pathkey) &&
+			find_grouping_pathkey(root->group_pathkeys,
+								  root->num_groupby_pathkeys,
+								  pathkey) == NULL)
+			break;
+
+		ncommon++;
+	}
+
+	return ncommon;
+}
+
+/*
  * truncate_useless_pathkeys
  *		Shorten the given PathKey List to just the useful PathKeys.  If all
  *		PathKeys are useful, return the input List, otherwise return a new
@@ -2246,10 +2589,11 @@ truncate_useless_pathkeys(PlannerInfo *root,
 	 * Check if these pathkeys are useful for GROUP BY or DISTINCT.  The order
 	 * of the pathkeys does not matter here as Unique and GroupAggregate for
 	 * these operations can take advantage of Paths presorted by any of the
-	 * GROUP BY/DISTINCT pathkeys.
+	 * GROUP BY/DISTINCT pathkeys.  For GROUP BY, the sort direction and NULLS
+	 * ordering of the grouping keys don't matter either, as
+	 * group_keys_reorder_by_pathkeys() can make them follow the input path.
 	 */
-	nuseful2 = count_common_leading_pathkeys_unordered(root->group_pathkeys,
-													   pathkeys);
+	nuseful2 = count_common_leading_group_pathkeys(root, pathkeys);
 	if (nuseful2 == ntotal)
 		return pathkeys;
 
