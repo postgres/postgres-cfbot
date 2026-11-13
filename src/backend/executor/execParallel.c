@@ -57,7 +57,9 @@
 /*
  * Magic numbers for parallel executor communication.  We use constants
  * greater than any 32-bit integer here so that values < 2^32 can be used
- * by individual parallel nodes to store their own state.
+ * by individual parallel nodes to store their own state.  For nodes that
+ * need additional keys beyond the plan_node_id (e.g. for parallel instrumentation
+ * chunks), see PARALLEL_KEY_NODE_INSTRUMENTATION in execParallel.h.
  */
 #define PARALLEL_KEY_EXECUTOR_FIXED		UINT64CONST(0xE000000000000001)
 #define PARALLEL_KEY_PLANNEDSTMT		UINT64CONST(0xE000000000000002)
@@ -306,6 +308,9 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 			if (planstate->plan->parallel_aware)
 				ExecCustomScanEstimate((CustomScanState *) planstate,
 									   e->pcxt);
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecCustomScanEstimateInstrumentation((CustomScanState *) planstate,
+												  e->pcxt);
 			break;
 		case T_BitmapHeapScanState:
 			if (planstate->plan->parallel_aware)
@@ -562,6 +567,9 @@ ExecParallelInitializeDSM(PlanState *planstate,
 			if (planstate->plan->parallel_aware)
 				ExecCustomScanInitializeDSM((CustomScanState *) planstate,
 											d->pcxt);
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecCustomScanInitializeDSMInstrumentation((CustomScanState *) planstate,
+													   d->pcxt);
 			break;
 		case T_BitmapHeapScanState:
 			if (planstate->plan->parallel_aware)
@@ -1191,6 +1199,9 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 		case T_TidRangeScanState:
 			ExecTidRangeScanRetrieveInstrumentation((TidRangeScanState *) planstate);
 			break;
+		case T_CustomScanState:
+			ExecCustomScanRetrieveInstrumentation((CustomScanState *) planstate);
+			break;
 		default:
 			break;
 	}
@@ -1476,6 +1487,9 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 			if (planstate->plan->parallel_aware)
 				ExecCustomScanInitializeWorker((CustomScanState *) planstate,
 											   pwcxt);
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecCustomScanInitializeWorkerInstrumentation((CustomScanState *) planstate,
+														  pwcxt);
 			break;
 		case T_BitmapHeapScanState:
 			if (planstate->plan->parallel_aware)

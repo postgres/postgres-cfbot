@@ -11,6 +11,7 @@
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "executor/execParallel.h"
 #include "executor/executor.h"
 #include "executor/nodeCustom.h"
 #include "miscadmin.h"
@@ -215,6 +216,82 @@ ExecCustomScanInitializeWorker(CustomScanState *node,
 		coordinate = shm_toc_lookup(pwcxt->toc, plan_node_id, false);
 		methods->InitializeWorkerCustomScan(node, pwcxt->toc, coordinate);
 	}
+}
+
+/* ----------------------------------------------------------------
+ *		Parallel instrumentation support
+ *
+ *		Unlike the parallel-aware callbacks above, these are invoked for
+ *		any CustomScan node that runs in parallel workers, so that the
+ *		provider can report per-worker statistics in EXPLAIN ANALYZE.  The
+ *		core executor owns the shm_toc chunk; the provider only estimates
+ *		its size and fills it in.
+ * ----------------------------------------------------------------
+ */
+void
+ExecCustomScanEstimateInstrumentation(CustomScanState *node,
+									  ParallelContext *pcxt)
+{
+	const CustomExecMethods *methods = node->methods;
+
+	if (!node->ss.ps.instrument || pcxt->nworkers == 0 ||
+		!methods->EstimateDSMInstrumentationCustomScan)
+		return;
+
+	node->pinstrument_len =
+		methods->EstimateDSMInstrumentationCustomScan(node, pcxt);
+	if (node->pinstrument_len > 0)
+	{
+		shm_toc_estimate_chunk(&pcxt->estimator, node->pinstrument_len);
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+	}
+}
+
+void
+ExecCustomScanInitializeDSMInstrumentation(CustomScanState *node,
+										   ParallelContext *pcxt)
+{
+	const CustomExecMethods *methods = node->methods;
+	void	   *coordinate;
+
+	if (!node->ss.ps.instrument || pcxt->nworkers == 0 ||
+		!methods->InitializeDSMInstrumentationCustomScan ||
+		node->pinstrument_len == 0)
+		return;
+
+	coordinate = shm_toc_allocate(pcxt->toc, node->pinstrument_len);
+	methods->InitializeDSMInstrumentationCustomScan(node, pcxt, coordinate);
+	shm_toc_insert(pcxt->toc,
+				   PARALLEL_KEY_NODE_INSTRUMENTATION(node->ss.ps.plan->plan_node_id),
+				   coordinate);
+}
+
+void
+ExecCustomScanInitializeWorkerInstrumentation(CustomScanState *node,
+											  ParallelWorkerContext *pwcxt)
+{
+	const CustomExecMethods *methods = node->methods;
+	void	   *coordinate;
+
+	if (!node->ss.ps.instrument ||
+		!methods->InitializeWorkerInstrumentationCustomScan)
+		return;
+
+	coordinate = shm_toc_lookup(pwcxt->toc,
+								PARALLEL_KEY_NODE_INSTRUMENTATION(node->ss.ps.plan->plan_node_id),
+								true);
+	if (coordinate)
+		methods->InitializeWorkerInstrumentationCustomScan(node, pwcxt,
+														   coordinate);
+}
+
+void
+ExecCustomScanRetrieveInstrumentation(CustomScanState *node)
+{
+	const CustomExecMethods *methods = node->methods;
+
+	if (methods->RetrieveInstrumentationCustomScan)
+		methods->RetrieveInstrumentationCustomScan(node);
 }
 
 void
