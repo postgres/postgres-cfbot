@@ -2261,6 +2261,7 @@ StartTransaction(void)
 	AtStart_GUC();
 	AtStart_Cache();
 	AfterTriggerBeginXact();
+	AtStart_BackendProgress(s->nestingLevel);
 
 	/*
 	 * done with start processing, set current transaction state to "in
@@ -2899,7 +2900,8 @@ AbortTransaction(void)
 
 	/* Clear wait information and command progress indicator */
 	pgstat_report_wait_end();
-	pgstat_progress_end_command();
+	AtEOXact_BackendProgress(s->nestingLevel);
+	pgstat_progress_end_command(true);
 
 	pgaio_error_cleanup();
 
@@ -5208,6 +5210,7 @@ StartSubTransaction(void)
 	AtSubStart_Memory();
 	AtSubStart_ResourceOwner();
 	AfterTriggerBeginSubXact();
+	AtSubStart_BackendProgress(s->nestingLevel);
 
 	s->state = TRANS_INPROGRESS;
 
@@ -5370,7 +5373,8 @@ AbortSubTransaction(void)
 	WaitLSNCleanup();
 
 	pgstat_report_wait_end();
-	pgstat_progress_end_command();
+	AtEOSubXact_BackendProgress(s->nestingLevel);
+	pgstat_progress_end_command(true);
 
 	pgaio_error_cleanup();
 

@@ -1406,7 +1406,7 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	/* Pop the error context stack */
 	error_context_stack = errcallback.previous;
 
-	pgstat_progress_end_command();
+	pgstat_progress_end_command(false);
 
 	vac_close_indexes(nindexes, indrels, RowExclusiveLock);
 	table_close(rel, ShareUpdateExclusiveLock);

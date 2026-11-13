@@ -191,7 +191,7 @@ bbsink_progress_archive_contents(bbsink *sink, size_t len)
 static void
 bbsink_progress_cleanup(bbsink *sink)
 {
-	pgstat_progress_end_command();
+	pgstat_progress_end_command(false);
 	bbsink_forward_cleanup(sink);
 }
 
