@@ -363,6 +363,7 @@ static void determineNotNullFlags(Archive *fout, PGresult *res, int r,
 								  int i_notnull_invalidoid,
 								  int i_notnull_noinherit,
 								  int i_notnull_islocal,
+								  int i_notnull_enforced,
 								  PQExpBuffer *invalidnotnulloids);
 static char *format_function_arguments(const FuncInfo *finfo, const char *funcargs,
 									   bool is_agg);
@@ -9208,6 +9209,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 	int			i_notnull_comment;
 	int			i_notnull_noinherit;
 	int			i_notnull_islocal;
+	int			i_notnull_enforced;
 	int			i_notnull_invalidoid;
 	int			i_attoptions;
 	int			i_attversion;
@@ -9331,12 +9333,13 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 
 	/*
 	 * Find out any NOT NULL markings for each column.  In 18 and up we read
-	 * pg_constraint to obtain the constraint name, and for valid constraints
-	 * also pg_description to obtain its comment.  notnull_noinherit is set
-	 * according to the NO INHERIT property.  For versions prior to 18, we
-	 * store an empty string as the name when a constraint is marked as
-	 * attnotnull (this cues dumpTableSchema to print the NOT NULL clause
-	 * without a name); also, such cases are never NO INHERIT.
+	 * pg_constraint to obtain the constraint name, and for valid and not
+	 * enforced constraints also pg_description to obtain its comment.
+	 * notnull_noinherit is set according to the NO INHERIT property.  For
+	 * versions prior to 18, we store an empty string as the name when a
+	 * constraint is marked as attnotnull (this cues dumpTableSchema to print
+	 * the NOT NULL clause without a name); also, such cases are never NO
+	 * INHERIT.
 	 *
 	 * For invalid constraints, we need to store their OIDs for processing
 	 * elsewhere, so we bring the pg_constraint.oid value when the constraint
@@ -9350,9 +9353,9 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 	if (fout->remoteVersion >= 180000)
 		appendPQExpBufferStr(q,
 							 "co.conname AS notnull_name,\n"
-							 "CASE WHEN co.convalidated THEN pt.description"
+							 "CASE WHEN (NOT co.conenforced OR co.convalidated) THEN pt.description"
 							 " ELSE NULL END AS notnull_comment,\n"
-							 "CASE WHEN NOT co.convalidated THEN co.oid "
+							 "CASE WHEN (NOT co.convalidated AND co.conenforced) THEN co.oid "
 							 "ELSE NULL END AS notnull_invalidoid,\n"
 							 "co.connoinherit AS notnull_noinherit,\n"
 							 "co.conislocal AS notnull_islocal,\n");
@@ -9366,6 +9369,11 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 							 "     WHEN a.attnotnull AND NOT a.attislocal THEN true\n"
 							 "     ELSE false\n"
 							 "END AS notnull_islocal,\n");
+
+	if (fout->remoteVersion >= 200000)
+		appendPQExpBufferStr(q, "co.conenforced AS notnull_enforced,\n");
+	else
+		appendPQExpBufferStr(q, "true AS notnull_enforced,\n");
 
 	if (fout->remoteVersion >= 140000)
 		appendPQExpBufferStr(q,
@@ -9450,6 +9458,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 	i_notnull_invalidoid = PQfnumber(res, "notnull_invalidoid");
 	i_notnull_noinherit = PQfnumber(res, "notnull_noinherit");
 	i_notnull_islocal = PQfnumber(res, "notnull_islocal");
+	i_notnull_enforced = PQfnumber(res, "notnull_enforced");
 	i_attoptions = PQfnumber(res, "attoptions");
 	i_attversion = PQfnumber(res, "attversion");
 	i_attcollation = PQfnumber(res, "attcollation");
@@ -9524,6 +9533,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 		tbinfo->notnull_invalid = pg_malloc_array(bool, numatts);
 		tbinfo->notnull_noinh = pg_malloc_array(bool, numatts);
 		tbinfo->notnull_islocal = pg_malloc_array(bool, numatts);
+		tbinfo->notnull_enforced = pg_malloc_array(bool, numatts);
 		tbinfo->attrdefs = pg_malloc_array(AttrDefInfo *, numatts);
 		hasdefaults = false;
 
@@ -9567,6 +9577,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 								  i_notnull_invalidoid,
 								  i_notnull_noinherit,
 								  i_notnull_islocal,
+								  i_notnull_enforced,
 								  &invalidnotnulloids);
 
 			tbinfo->notnull_comment[j] = PQgetisnull(res, r, i_notnull_comment) ?
@@ -10019,9 +10030,12 @@ determineNotNullFlags(Archive *fout, PGresult *res, int r,
 					  int i_notnull_invalidoid,
 					  int i_notnull_noinherit,
 					  int i_notnull_islocal,
+					  int i_notnull_enforced,
 					  PQExpBuffer *invalidnotnulloids)
 {
 	DumpOptions *dopt = fout->dopt;
+
+	tbinfo->notnull_enforced[j] = PQgetvalue(res, r, i_notnull_enforced)[0] == 't';
 
 	/*
 	 * If this not-null constraint is not valid, list its OID in
@@ -17408,6 +17422,9 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 
 						if (tbinfo->notnull_noinh[j])
 							appendPQExpBufferStr(q, " NO INHERIT");
+
+						if (!tbinfo->notnull_enforced[j])
+							appendPQExpBufferStr(q, " NOT ENFORCED");
 					}
 
 					/* Add collation if not default for the type */
@@ -17453,6 +17470,9 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 
 					if (tbinfo->notnull_noinh[j])
 						appendPQExpBufferStr(q, " NO INHERIT");
+
+					if (!tbinfo->notnull_enforced[j])
+						appendPQExpBufferStr(q, " NOT ENFORCED");
 				}
 			}
 
