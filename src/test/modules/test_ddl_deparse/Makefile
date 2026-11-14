@@ -33,7 +33,8 @@ REGRESS = test_ddl_deparse \
 	textsearch \
 	matviews \
 	deparse_create_table \
-	deparse_alter_table
+	deparse_alter_table \
+	deparse_drop_table
 
 TAP_TESTS = 1
 

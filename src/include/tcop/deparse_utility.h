@@ -14,6 +14,7 @@
 
 #include "access/attnum.h"
 #include "catalog/objectaddress.h"
+#include "lib/ilist.h"
 #include "nodes/nodes.h"
 #include "utils/aclchk_internal.h"
 
@@ -116,5 +117,24 @@ typedef struct CollectedCommand
 
 	struct CollectedCommand *parent;	/* when nested */
 } CollectedCommand;
+
+/*
+ * An object dropped by the current command, as reported by
+ * pg_event_trigger_dropped_objects().
+ */
+typedef struct SQLDropObject
+{
+	ObjectAddress address;
+	const char *schemaname;
+	const char *objname;
+	const char *objidentity;
+	const char *objecttype;
+	List	   *addrnames;
+	List	   *addrargs;
+	bool		original;
+	bool		normal;
+	bool		istemp;
+	slist_node	next;
+} SQLDropObject;
 
 #endif							/* DEPARSE_UTILITY_H */

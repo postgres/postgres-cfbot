@@ -17,7 +17,8 @@
 
 /* ddl_deparse.c */
 extern bool ddl_deparse_command_supported(const Node *parsetree);
-extern char *deparse_ddl_command(const Node *original_parsetree, List *cmds);
+extern char *deparse_ddl_command(const Node *original_parsetree, List *cmds,
+								 List *dropped);
 
 /* ddl_json.c */
 extern char *deparse_ddl_json_to_string(char *json_str);

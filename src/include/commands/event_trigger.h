@@ -75,6 +75,7 @@ extern void EventTriggerUndoInhibitCommandCollection(void);
 extern bool EventTriggerCommandCollectionActive(void);
 extern const Node *EventTriggerGetParsetree(void);
 extern List *EventTriggerGetCollectedCommands(void);
+extern List *EventTriggerGetDroppedObjects(void);
 
 extern void EventTriggerCollectSimpleCommand(ObjectAddress address,
 											 ObjectAddress secondaryObject,

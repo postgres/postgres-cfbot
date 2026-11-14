@@ -97,6 +97,7 @@ CREATE TEMP TABLE t_temp (a int);
 NOTICE:  deparsed DDL: CREATE TEMPORARY TABLE pg_temp.t_temp (a pg_catalog.int4)
 NOTICE:  DDL test: type simple, tag CREATE TABLE
 DROP TABLE t_temp;
+NOTICE:  deparsed DDL: DROP TABLE pg_temp.t_temp
 -- Identity sequence options that parse analysis consumes are still in the raw
 -- tree.  SEQUENCE NAME has to be emitted; OWNED BY is dropped, since
 -- execution overrides it.  The core tests use neither.

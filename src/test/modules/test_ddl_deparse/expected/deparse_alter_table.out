@@ -374,6 +374,7 @@ ALTER TABLE IF EXISTS deparse_at.guarded2 SET SCHEMA deparse_guard;
 NOTICE:  deparsed DDL: ALTER TABLE IF EXISTS deparse_at.guarded2 SET SCHEMA deparse_guard
 NOTICE:  DDL test: type simple, tag ALTER TABLE
 DROP TABLE deparse_guard.guarded2;
+NOTICE:  deparsed DDL: DROP TABLE deparse_guard.guarded2
 DROP SCHEMA deparse_guard;
 -- IF EXISTS on a missing table is a no-op: nothing is collected, so there is
 -- nothing to deparse and no warning.
