@@ -1838,6 +1838,110 @@ ends_with(const char *s, char c)
 }
 
 /*
+ * Read a plain word (ASCII letters, digits and underscores) at *p into buf,
+ * downcased the way the server downcases unquoted identifiers, and advance
+ * *p past it.  Returns false if there is no such word or it doesn't fit.
+ */
+static bool
+read_option_word(const char **p, char *buf, size_t bufsize)
+{
+	size_t		len = strspn(*p, "abcdefghijklmnopqrstuvwxyz"
+							 "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+							 "0123456789_");
+
+	if (len == 0 || len >= bufsize)
+		return false;
+	for (size_t i = 0; i < len; i++)
+		buf[i] = pg_ascii_tolower((unsigned char) (*p)[i]);
+	buf[len] = '\0';
+	*p += len;
+	return true;
+}
+
+/*
+ * Given a completed parenthesized option list for REPACK, such as
+ * "(CONCURRENTLY, VERBOSE OFF)", report whether it turns on an option that
+ * makes the server require an explicit table name: CONCURRENTLY or ANALYZE
+ * (also spelled ANALYSE).  As on the server, the last setting of an option
+ * wins.
+ *
+ * Only option names and values written as plain unquoted words are
+ * understood.  Anything else (quoted names or values, signed numbers,
+ * comments, ...) makes us return false, so that the caller keeps offering
+ * every completion that might be valid.
+ */
+static bool
+repack_options_require_table(const char *options)
+{
+	const char *p = options;
+	bool		concurrently = false;
+	bool		analyze = false;
+
+	if (*p++ != '(')
+		return false;
+
+	for (;;)
+	{
+		char		name[NAMEDATALEN];
+		char		value[NAMEDATALEN];
+		bool		has_value;
+		bool	   *target;
+
+		/* an option name is an identifier, so it can't start with a digit */
+		while (isspace((unsigned char) *p))
+			p++;
+		if (isdigit((unsigned char) *p) ||
+			!read_option_word(&p, name, sizeof(name)))
+			return false;
+
+		while (isspace((unsigned char) *p))
+			p++;
+		has_value = (*p != ',' && *p != ')');
+		if (has_value)
+		{
+			if (!read_option_word(&p, value, sizeof(value)))
+				return false;
+			while (isspace((unsigned char) *p))
+				p++;
+			if (*p != ',' && *p != ')')
+				return false;
+		}
+
+		if (strcmp(name, "concurrently") == 0)
+			target = &concurrently;
+		else if (strcmp(name, "analyze") == 0 || strcmp(name, "analyse") == 0)
+			target = &analyze;
+		else
+			target = NULL;		/* an option we don't care about */
+
+		if (target != NULL)
+		{
+			/* Interpret the value the way defGetBoolean() does */
+			if (!has_value ||
+				strcmp(value, "true") == 0 ||
+				strcmp(value, "on") == 0 ||
+				strcmp(value, "1") == 0)
+				*target = true;
+			else if (strcmp(value, "false") == 0 ||
+					 strcmp(value, "off") == 0 ||
+					 strcmp(value, "0") == 0)
+				*target = false;
+			else
+				return false;
+		}
+
+		if (*p++ == ')')
+			break;
+	}
+
+	/* The option list must end here */
+	if (*p != '\0')
+		return false;
+
+	return concurrently || analyze;
+}
+
+/*
  * The completion function.
  *
  * According to readline spec this gets passed the text entered so far and its
@@ -5127,8 +5231,17 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_clusterables,
 										"(", "USING INDEX");
 	else if (Matches("REPACK", "(*)"))
-		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_clusterables,
-										"USING INDEX");
+	{
+		/*
+		 * REPACK (CONCURRENTLY) and REPACK (ANALYZE) need a table name, so
+		 * don't offer USING INDEX right away in those cases.
+		 */
+		if (repack_options_require_table(prev_wd))
+			COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_clusterables);
+		else
+			COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_clusterables,
+											"USING INDEX");
+	}
 	else if (Matches("REPACK", MatchAnyExcept("(")))
 		COMPLETE_WITH("USING INDEX");
 	else if (Matches("REPACK", "(*)", MatchAnyExcept("(")))
