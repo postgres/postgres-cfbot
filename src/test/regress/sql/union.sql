@@ -362,6 +362,20 @@ select from cte union select from cte;
 with cte as not materialized (select s from generate_series(1,5) s)
 select from cte union select from cte;
 
+-- Ensure no sort is added to a parallel plan with no sort keys
+-- test_plan_advice cannot enforce Gather advice for a set operation
+set client_min_messages = error;
+set cpu_tuple_cost = 1000;
+set min_parallel_table_scan_size = 1;
+
+explain (costs off)
+select from tenk1 union select from tenk2;
+select from tenk1 union select from tenk2;
+
+reset cpu_tuple_cost;
+reset min_parallel_table_scan_size;
+reset client_min_messages;
+
 reset enable_hashagg;
 reset enable_groupagg;
 
