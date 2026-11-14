@@ -1284,23 +1284,22 @@ ExecInsert(ModifyTableContext *context,
 	 * because they happen on different tables.
 	 */
 	ar_insert_trig_tcs = mtstate->mt_transition_capture;
-	if (mtstate->operation == CMD_UPDATE && mtstate->mt_transition_capture
-		&& mtstate->mt_transition_capture->tcs_update_new_table)
+	if (mtstate->operation == CMD_UPDATE ||
+		(mtstate->operation == CMD_MERGE &&
+		 mtstate->mt_merge_action->mas_action->commandType == CMD_UPDATE))
 	{
-		ExecARUpdateTriggers(estate, resultRelInfo,
-							 NULL, NULL,
-							 NULL,
-							 NULL,
-							 slot,
-							 NULL,
-							 NULL,
-							 mtstate->mt_transition_capture,
-							 false);
+		if (ar_insert_trig_tcs && ar_insert_trig_tcs->tcs_update_new_table)
+			ExecARUpdateTriggers(estate, resultRelInfo,
+								 NULL, NULL,
+								 NULL,
+								 NULL,
+								 slot,
+								 NULL,
+								 NULL,
+								 mtstate->mt_transition_capture,
+								 false);
 
-		/*
-		 * We've already captured the NEW TABLE row, so make sure any AR
-		 * INSERT trigger fired below doesn't capture it again.
-		 */
+		/* A moved row does not belong in the INSERT transition table. */
 		ar_insert_trig_tcs = NULL;
 	}
 
@@ -1568,19 +1567,16 @@ ExecDeleteEpilogue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * because they happen on different tables.
 	 */
 	ar_delete_trig_tcs = mtstate->mt_transition_capture;
-	if (mtstate->operation == CMD_UPDATE && mtstate->mt_transition_capture &&
-		mtstate->mt_transition_capture->tcs_update_old_table)
+	if (changingPart)
 	{
-		ExecARUpdateTriggers(estate, resultRelInfo,
-							 NULL, NULL,
-							 tupleid, oldtuple,
-							 NULL, NULL, NIL, mtstate->mt_transition_capture,
-							 false);
+		if (ar_delete_trig_tcs && ar_delete_trig_tcs->tcs_update_old_table)
+			ExecARUpdateTriggers(estate, resultRelInfo,
+								 NULL, NULL,
+								 tupleid, oldtuple,
+								 NULL, NULL, NIL, mtstate->mt_transition_capture,
+								 false);
 
-		/*
-		 * We've already captured the OLD TABLE row, so make sure any AR
-		 * DELETE trigger fired below doesn't capture it again.
-		 */
+		/* A moved row does not belong in the DELETE transition table. */
 		ar_delete_trig_tcs = NULL;
 	}
 
