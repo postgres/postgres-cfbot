@@ -285,6 +285,7 @@ brinhandler(PG_FUNCTION_ARGS)
 		.ambuildempty = brinbuildempty,
 		.aminsert = brininsert,
 		.aminsertcleanup = brininsertcleanup,
+		.amnotifydelete = NULL,
 		.ambulkdelete = brinbulkdelete,
 		.amvacuumcleanup = brinvacuumcleanup,
 		.amcanreturn = NULL,

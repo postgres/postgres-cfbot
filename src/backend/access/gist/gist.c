@@ -90,6 +90,7 @@ gisthandler(PG_FUNCTION_ARGS)
 		.ambuildempty = gistbuildempty,
 		.aminsert = gistinsert,
 		.aminsertcleanup = NULL,
+		.amnotifydelete = NULL,
 		.ambulkdelete = gistbulkdelete,
 		.amvacuumcleanup = gistvacuumcleanup,
 		.amcanreturn = gistcanreturn,

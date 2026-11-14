@@ -189,7 +189,8 @@ static void apply_concurrent_insert(Relation rel, TupleTableSlot *slot,
 static void apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 									TupleTableSlot *ondisk_tuple,
 									ChangeContext *chgcxt);
-static void apply_concurrent_delete(Relation rel, TupleTableSlot *slot);
+static void apply_concurrent_delete(Relation rel, TupleTableSlot *slot,
+									ChangeContext *chgcxt);
 static void restore_tuple(BufFile *file, Relation relation,
 						  TupleTableSlot *slot);
 static void prepare_concurrent_update(TupleTableSlot *dest,
@@ -2839,7 +2840,7 @@ apply_concurrent_changes(BufFile *file, ChangeContext *chgcxt)
 			found = find_target_tuple(rel, chgcxt, spilled_tuple, ondisk_tuple);
 			if (!found)
 				elog(ERROR, "could not find target tuple");
-			apply_concurrent_delete(rel, ondisk_tuple);
+			apply_concurrent_delete(rel, ondisk_tuple, chgcxt);
 		}
 		else if (kind == CHANGE_UPDATE_NEW)
 		{
@@ -2939,6 +2940,11 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 
 		if (update_indexes == TU_Summarizing)
 			flags |= EIIT_ONLY_SUMMARIZING;
+		ExecNotifyIndexesOfDelete(chgcxt->cc_rri,
+								  chgcxt->cc_estate,
+								  flags,
+								  &(ondisk_tuple->tts_tid),
+								  ondisk_tuple);
 		ExecInsertIndexTuples(chgcxt->cc_rri,
 							  chgcxt->cc_estate,
 							  flags,
@@ -2950,7 +2956,8 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 }
 
 static void
-apply_concurrent_delete(Relation rel, TupleTableSlot *slot)
+apply_concurrent_delete(Relation rel, TupleTableSlot *slot,
+						ChangeContext *chgcxt)
 {
 	TM_Result	res;
 	TM_FailureData tmfd;
@@ -2971,6 +2978,11 @@ apply_concurrent_delete(Relation rel, TupleTableSlot *slot)
 				errmsg("could not apply concurrent %s on relation \"%s\"",
 					   "DELETE", RelationGetRelationName(rel)));
 
+	ExecNotifyIndexesOfDelete(chgcxt->cc_rri,
+							  chgcxt->cc_estate,
+							  0,
+							  &(slot->tts_tid),
+							  slot);
 	pgstat_progress_incr_param(PROGRESS_REPACK_HEAP_TUPLES_DELETED, 1);
 }
 
