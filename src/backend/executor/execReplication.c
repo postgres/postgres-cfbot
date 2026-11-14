@@ -1041,7 +1041,7 @@ ExecSimpleRelationUpdate(ResultRelInfo *resultRelInfo,
 
 		if (resultRelInfo->ri_NumIndices > 0 && (update_indexes != TU_None))
 		{
-			uint32		flags = EIIT_IS_UPDATE;
+			uint32		flags = EIIT_IS_UPDATE | EIIT_NEW_DATUMS;
 
 			if (conflictindexes != NIL)
 				flags |= EIIT_NO_DUPE_ERROR;

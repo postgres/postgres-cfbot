@@ -756,6 +756,26 @@ extern void ExecCloseIndices(ResultRelInfo *resultRelInfo);
 #define		EIIT_IS_UPDATE			(1<<0)
 #define		EIIT_NO_DUPE_ERROR		(1<<1)
 #define		EIIT_ONLY_SUMMARIZING	(1<<2)
+#define		EIIT_NEW_DATUMS			(1<<3)	/* use ri_NewIndexDatums */
+
+/*
+ * What ExecUpdateModifiedIdxAttrs() found out about one index for the new
+ * row of an UPDATE (see ri_NewIndexDatums).
+ */
+typedef enum NewIndexDatumsState
+{
+	NEWIDX_UNKNOWN,				/* not evaluated for this row */
+	NEWIDX_OUTSIDE,				/* new row does not satisfy the predicate */
+	NEWIDX_DATUMS,				/* new row's datums are in values/isnull */
+} NewIndexDatumsState;
+
+typedef struct NewIndexDatums
+{
+	NewIndexDatumsState state;
+	Datum	   *values;			/* ii_NumIndexAttrs entries */
+	bool	   *isnull;
+} NewIndexDatums;
+
 extern List *ExecInsertIndexTuples(ResultRelInfo *resultRelInfo, EState *estate,
 								   uint32 flags, TupleTableSlot *slot,
 								   const Bitmapset *modified_idx_attrs,

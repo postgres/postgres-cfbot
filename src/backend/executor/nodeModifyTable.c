@@ -358,17 +358,52 @@ IndexDatumsDiffer(Relation heapRel, Relation indexRel, IndexInfo *indexInfo,
 }
 
 /*
- * Would the update from old_tts to new_tts give this index a new entry, or
- * take one away?  "changed" are the attributes the update changed that the
- * index uses, as for IndexDatumsDiffer().
+ * Remember what was found out about the i'th index for the new row, for
+ * FormIndexDatumForRow() in execIndexing.c to use.
+ */
+static void
+SaveNewIndexDatums(ResultRelInfo *resultRelInfo, int i, EState *estate,
+				   NewIndexDatumsState state,
+				   const Datum *values, const bool *isnull)
+{
+	NewIndexDatums *nid;
+	int			natts = resultRelInfo->ri_IndexRelationInfo[i]->ii_NumIndexAttrs;
+
+	if (resultRelInfo->ri_NewIndexDatums == NULL)
+		resultRelInfo->ri_NewIndexDatums =
+			MemoryContextAllocZero(estate->es_query_cxt,
+								   sizeof(NewIndexDatums) *
+								   resultRelInfo->ri_NumIndices);
+	nid = &resultRelInfo->ri_NewIndexDatums[i];
+	nid->state = state;
+	if (state != NEWIDX_DATUMS)
+		return;
+	if (nid->values == NULL)
+	{
+		nid->values = MemoryContextAlloc(estate->es_query_cxt,
+										 sizeof(Datum) * natts);
+		nid->isnull = MemoryContextAlloc(estate->es_query_cxt,
+										 sizeof(bool) * natts);
+	}
+	/* by-reference datums still point into per-tuple memory */
+	memcpy(nid->values, values, sizeof(Datum) * natts);
+	memcpy(nid->isnull, isnull, sizeof(bool) * natts);
+}
+
+/*
+ * Would the update from old_tts to new_tts give the i'th index a new entry,
+ * or take one away?  "changed" are the attributes the update changed that
+ * the index uses, as for IndexDatumsDiffer().
  *
  * The index datums are formed in the per-tuple memory context, which
  * callers reset for each row.  The predicate's ExprState is kept in the
  * IndexInfo, as ExecInsertIndexTuples() keeps it; ExecPrepareQual() builds
- * it in the query context.
+ * it in the query context.  What is learned of the new row is saved, so
+ * that inserting its index entries need not evaluate the index's
+ * expressions or predicate again.
  */
 static bool
-IndexEntryChanges(ResultRelInfo *resultRelInfo, Relation indexRel,
+IndexEntryChanges(ResultRelInfo *resultRelInfo, int i, Relation indexRel,
 				  IndexInfo *indexInfo, const Bitmapset *changed,
 				  TupleTableSlot *old_tts, TupleTableSlot *new_tts,
 				  EState *estate)
@@ -402,6 +437,9 @@ IndexEntryChanges(ResultRelInfo *resultRelInfo, Relation indexRel,
 		 * rows the index holds.  A row outside it on both sides is none of
 		 * the index's business.
 		 */
+		if (!new_member)
+			SaveNewIndexDatums(resultRelInfo, i, estate, NEWIDX_OUTSIDE,
+							   NULL, NULL);
 		if (old_member != new_member)
 			return true;
 		if (!old_member)
@@ -419,6 +457,8 @@ IndexEntryChanges(ResultRelInfo *resultRelInfo, Relation indexRel,
 							   indexInfo, changed, old_values, old_isnull,
 							   new_values, new_isnull);
 	MemoryContextSwitchTo(oldcxt);
+	SaveNewIndexDatums(resultRelInfo, i, estate, NEWIDX_DATUMS,
+					   new_values, new_isnull);
 	return result;
 }
 
@@ -502,7 +542,7 @@ IndexUnaffected(ResultRelInfo *resultRelInfo, int i, Bitmapset *mine,
 #ifdef USE_ASSERT_CHECKING
 	if (proven)
 	{
-		if (IndexEntryChanges(resultRelInfo,
+		if (IndexEntryChanges(resultRelInfo, i,
 							  resultRelInfo->ri_IndexRelationDescs[i],
 							  indexInfo, mine, old_tts, new_tts,
 							  estate))
@@ -515,7 +555,7 @@ IndexUnaffected(ResultRelInfo *resultRelInfo, int i, Bitmapset *mine,
 		return true;
 #endif
 
-	return !IndexEntryChanges(resultRelInfo,
+	return !IndexEntryChanges(resultRelInfo, i,
 							  resultRelInfo->ri_IndexRelationDescs[i],
 							  indexInfo, mine, old_tts, new_tts,
 							  estate);
@@ -581,6 +621,11 @@ ExecUpdateModifiedIdxAttrs(ResultRelInfo *resultRelInfo,
 	Bitmapset  *attrs;
 	Bitmapset  *exprattrs;
 	Bitmapset  *candidates;
+
+	/* what follows describes this row */
+	if (resultRelInfo->ri_NewIndexDatums != NULL)
+		for (int i = 0; i < resultRelInfo->ri_NumIndices; i++)
+			resultRelInfo->ri_NewIndexDatums[i].state = NEWIDX_UNKNOWN;
 
 	if (resultRelInfo->ri_NumIndices == 0)
 		return NULL;
@@ -3011,7 +3056,7 @@ ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 	/* insert index entries for tuple if necessary */
 	if (resultRelInfo->ri_NumIndices > 0 && (updateCxt->updateIndexes != TU_None))
 	{
-		uint32		flags = EIIT_IS_UPDATE;
+		uint32		flags = EIIT_IS_UPDATE | EIIT_NEW_DATUMS;
 
 		if (updateCxt->updateIndexes == TU_Summarizing)
 			flags |= EIIT_ONLY_SUMMARIZING;

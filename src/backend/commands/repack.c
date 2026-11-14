@@ -2942,7 +2942,7 @@ apply_concurrent_update(Relation rel, TupleTableSlot *spilled_tuple,
 
 	if (update_indexes != TU_None)
 	{
-		uint32		flags = EIIT_IS_UPDATE;
+		uint32		flags = EIIT_IS_UPDATE | EIIT_NEW_DATUMS;
 
 		if (update_indexes == TU_Summarizing)
 			flags |= EIIT_ONLY_SUMMARIZING;
