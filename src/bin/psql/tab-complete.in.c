@@ -930,6 +930,17 @@ static const SchemaQuery Query_for_list_of_indexables = {
 	.result = "c.relname",
 };
 
+/* Relations supporting CREATE INDEX CONCURRENTLY */
+static const SchemaQuery Query_for_list_of_concurrent_indexables = {
+	.catname = "pg_catalog.pg_class c",
+	.selcondition =
+	"c.relkind IN (" CppAsString2(RELKIND_RELATION) ", "
+	CppAsString2(RELKIND_MATVIEW) ")",
+	.viscondition = "pg_catalog.pg_table_is_visible(c.oid)",
+	.namespace = "c.relnamespace",
+	.result = "c.relname",
+};
+
 /*
  * Relations supporting VACUUM are currently same as those supporting
  * indexing.
@@ -3548,10 +3559,17 @@ match_previous_words(int pattern_id,
 
 	/*
 	 * Complete ... INDEX|CONCURRENTLY [<name>] ON with a list of relations
-	 * that indexes can be created on
+	 * that indexes can be created on.  CREATE INDEX CONCURRENTLY doesn't
+	 * support partitioned tables, so leave those out after CONCURRENTLY. The
+	 * plain rule must not match any CONCURRENTLY form (not even one with an
+	 * index named "index"), or it would offer partitioned tables anyway
+	 * whenever the CONCURRENTLY rule finds no match.
 	 */
-	else if (TailMatches("INDEX|CONCURRENTLY", MatchAny, "ON") ||
-			 TailMatches("INDEX|CONCURRENTLY", "ON"))
+	else if (TailMatches("CONCURRENTLY", MatchAny, "ON") ||
+			 TailMatches("CONCURRENTLY", "ON"))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_concurrent_indexables);
+	else if (TailMatches("CREATE|UNIQUE", "INDEX", MatchAnyExcept("CONCURRENTLY"), "ON") ||
+			 TailMatches("CREATE|UNIQUE", "INDEX", "ON"))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_indexables);
 
 	/*
