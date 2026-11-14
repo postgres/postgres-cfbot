@@ -17,6 +17,11 @@
 
 #include "postgres.h"
 
+#include <signal.h>
+#ifndef WIN32
+#include <unistd.h>
+#endif
+
 #include "fmgr.h"
 #include "funcapi.h"
 #include "injection_points.h"
@@ -87,11 +92,30 @@ static bool injection_point_local = false;
 
 static void injection_shmem_request(void *arg);
 static void injection_shmem_init(void *arg);
+#ifdef WIN32
+static void injection_abort_handler(int signal);
+#else
+static void injection_abort_handler(SIGNAL_ARGS);
+#endif
 
 static const ShmemCallbacks injection_shmem_callbacks = {
 	.request_fn = injection_shmem_request,
 	.init_fn = injection_shmem_init,
 };
+
+/*
+ * Intercept abort() without creating a core file.  Exit code 42 distinguishes
+ * this path from the exit code 2 used when a core dump is suppressed.
+ */
+static void
+#ifdef WIN32
+injection_abort_handler(int signal)
+#else
+injection_abort_handler(SIGNAL_ARGS)
+#endif
+{
+	_exit(42);
+}
 
 /*
  * Routine for shared memory area initialization, used as a callback
@@ -451,6 +475,33 @@ injection_points_run(PG_FUNCTION_ARGS)
 		arg = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
 	INJECTION_POINT(name, arg);
+
+	PG_RETURN_VOID();
+}
+
+/* Test PANIC core-dump suppression with ENOSPC or EIO. */
+PG_FUNCTION_INFO_V1(injection_points_test_panic_core_dump);
+Datum
+injection_points_test_panic_core_dump(PG_FUNCTION_ARGS)
+{
+	int			errnum = PG_GETARG_BOOL(0) ? ENOSPC : EIO;
+	bool		reenable_abort = PG_GETARG_BOOL(1);
+
+#ifdef WIN32
+	if (signal(SIGABRT, injection_abort_handler) == SIG_ERR)
+		elog(ERROR, "could not install SIGABRT handler");
+#else
+	pqsignal(SIGABRT, injection_abort_handler);
+#endif
+
+	START_CRIT_SECTION();
+	errno = errnum;
+	ereport(ERROR,
+			(errcode_for_file_access(),
+			 errnocoredump_on_errno(ENOSPC),
+			 reenable_abort ? errabort(true) : 0,
+			 errmsg("PANIC requested by test")));
+	END_CRIT_SECTION();
 
 	PG_RETURN_VOID();
 }
