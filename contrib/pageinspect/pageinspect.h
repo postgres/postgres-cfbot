@@ -25,6 +25,8 @@ enum pageinspect_version
 	PAGEINSPECT_V1_9,
 };
 
+#define IS_INDEX(r) ((r)->rd_rel->relkind == RELKIND_INDEX)
+
 /* in rawpage.c */
 extern Page get_page_from_raw(bytea *raw_page);
 extern void check_relation_supported(Relation rel, ForkNumber forknum);
