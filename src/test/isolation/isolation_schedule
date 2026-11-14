@@ -47,6 +47,7 @@ test: eval-plan-qual-resjunk
 test: eval-plan-qual-rowtype-alter
 test: eval-plan-qual-trigger
 test: eval-plan-qual-partition-prune
+test: eval-plan-qual-knn
 test: inplace-inval
 test: intra-grant-inplace
 test: intra-grant-inplace-db

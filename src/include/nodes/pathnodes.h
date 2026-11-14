@@ -1450,6 +1450,8 @@ typedef struct IndexOptInfo
 	/* AM's cost estimator */
 	/* Rather than include amapi.h here, we declare amcostestimate like this */
 	void		(*amcostestimate) (struct PlannerInfo *, struct IndexPath *, double, Cost *, Cost *, Selectivity *, double *, double *) pg_node_attr(read_write_ignore);
+	/* AM's amcanreturnorderby, or NULL */
+	bool		(*amcanreturnorderby) (Oid, Oid, Oid) pg_node_attr(read_write_ignore);
 } IndexOptInfo;
 
 /*
@@ -3645,6 +3647,9 @@ typedef struct SemiAntiJoinFactors
  * ojrelids are the outer joins computed at this join (sjinfo's own OJ, if
  *		any, plus any pushed-down OJs completed here); input paths must not
  *		be parameterized by any of these
+ * extras_outer and extras_inner are each input rel's cheapest unparameterized
+ *		path that emits extra values, if that isn't its cheapest path anyway
+ *		(see cheapest_extras_path() in joinpath.c), else NULL
  */
 typedef struct JoinPathExtraData
 {
@@ -3656,6 +3661,8 @@ typedef struct JoinPathExtraData
 	Relids		param_source_rels;
 	uint64		pgs_mask;
 	Relids		ojrelids;
+	Path	   *extras_outer;
+	Path	   *extras_inner;
 } JoinPathExtraData;
 
 /*

@@ -89,3 +89,37 @@ SELECT a, a <-> '2004-10-26 08:55:08' FROM timestamptmp ORDER BY a <-> '2004-10-
  Mon Nov 29 20:12:43 2004 | @ 34 days 11 hours 17 mins 35 secs
 (3 rows)
 
+-- An ordering scan that hands an exact point distance to the target list
+-- while another ORDER BY key, here an interval, is of a by-reference type.
+CREATE TABLE timestamppt (p point, a timestamp);
+INSERT INTO timestamppt
+  SELECT point(i % 7, i % 11), '2004-10-26 08:55:08'::timestamp + i * interval '37 min'
+  FROM generate_series(1, 600) i;
+CREATE INDEX timestamppt_idx ON timestamppt USING gist (p, a);
+SET enable_indexonlyscan=off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT p <-> point(3, 4) AS d, a <-> '2004-10-26 08:55:08' AS da
+  FROM timestamppt
+  ORDER BY p <-> point(3, 4), a <-> '2004-10-26 08:55:08' LIMIT 3;
+                                                               QUERY PLAN                                                               
+----------------------------------------------------------------------------------------------------------------------------------------
+ Limit
+   Output: ((p <-> '(3,4)'::point)), ((a <-> 'Tue Oct 26 08:55:08 2004'::timestamp without time zone))
+   ->  Index Scan using timestamppt_idx on public.timestamppt
+         Output: ((p <-> '(3,4)'::point)), (a <-> 'Tue Oct 26 08:55:08 2004'::timestamp without time zone)
+         Order By: ((timestamppt.p <-> '(3,4)'::point) AND (timestamppt.a <-> 'Tue Oct 26 08:55:08 2004'::timestamp without time zone))
+         Order By Values Used: 1
+(6 rows)
+
+SELECT p <-> point(3, 4) AS d, a <-> '2004-10-26 08:55:08' AS da
+  FROM timestamppt
+  ORDER BY p <-> point(3, 4), a <-> '2004-10-26 08:55:08' LIMIT 3;
+ d |            da             
+---+---------------------------
+ 0 | @ 1 day 12 hours 23 mins
+ 0 | @ 3 days 11 hours 52 mins
+ 0 | @ 5 days 11 hours 21 mins
+(3 rows)
+
+RESET enable_indexonlyscan;
+DROP TABLE timestamppt;
