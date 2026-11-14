@@ -440,6 +440,17 @@ make_tuple_indirect(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(newtup->t_data);
 }
 
+static ExpandedRecordHeader *
+get_test_expanded_record(FunctionCallInfo fcinfo, int argno)
+{
+	Oid			argtype = get_fn_expr_argtype(fcinfo->flinfo, argno);
+
+	if (!OidIsValid(argtype) || !type_is_rowtype(argtype))
+		elog(ERROR, "argument must be of a composite type");
+
+	return DatumGetExpandedRecord(fcinfo->args[argno].value);
+}
+
 /*
  * Functions for testing expanded records built from a flat composite datum.
  *
@@ -456,7 +467,7 @@ PG_FUNCTION_INFO_V1(expanded_record_identity);
 Datum
 expanded_record_identity(PG_FUNCTION_ARGS)
 {
-	ExpandedRecordHeader *erh = PG_GETARG_EXPANDED_RECORD(0);
+	ExpandedRecordHeader *erh = get_test_expanded_record(fcinfo, 0);
 
 	PG_RETURN_EXPANDED_RECORD(erh);
 }
@@ -472,7 +483,7 @@ PG_FUNCTION_INFO_V1(expanded_record_info);
 Datum
 expanded_record_info(PG_FUNCTION_ARGS)
 {
-	ExpandedRecordHeader *erh = PG_GETARG_EXPANDED_RECORD(0);
+	ExpandedRecordHeader *erh = get_test_expanded_record(fcinfo, 0);
 	TupleDesc	tupdesc = expanded_record_get_tupdesc(erh);
 
 	PG_RETURN_TEXT_P(cstring_to_text(psprintf("type %s, typmod is default: %s, natts %d",
@@ -489,7 +500,7 @@ PG_FUNCTION_INFO_V1(expanded_record_field_text);
 Datum
 expanded_record_field_text(PG_FUNCTION_ARGS)
 {
-	ExpandedRecordHeader *erh = PG_GETARG_EXPANDED_RECORD(0);
+	ExpandedRecordHeader *erh = get_test_expanded_record(fcinfo, 0);
 	int			fnum = PG_GETARG_INT32(1);
 	TupleDesc	tupdesc = expanded_record_get_tupdesc(erh);
 	Datum		val;
