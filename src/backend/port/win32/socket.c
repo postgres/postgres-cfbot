@@ -285,15 +285,23 @@ pgwin32_waitforsinglesocket(SOCKET s, int what, int timeout)
 }
 
 /*
- * Create a socket, setting it to overlapped and non-blocking
+ * Create a socket, setting it to overlapped and non-blocking, and to
+ * non-inheritable if type includes SOCK_CLOEXEC
  */
 SOCKET
 pgwin32_socket(int af, int type, int protocol)
 {
 	SOCKET		s;
 	unsigned long on = 1;
+	DWORD		flags = WSA_FLAG_OVERLAPPED;
 
-	s = WSASocket(af, type, protocol, NULL, 0, WSA_FLAG_OVERLAPPED);
+	if (type & SOCK_CLOEXEC)
+	{
+		flags |= WSA_FLAG_NO_HANDLE_INHERIT;
+		type &= ~SOCK_CLOEXEC;
+	}
+
+	s = WSASocket(af, type, protocol, NULL, 0, flags);
 	if (s == INVALID_SOCKET)
 	{
 		TranslateSocketError();

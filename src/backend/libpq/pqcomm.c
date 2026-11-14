@@ -295,12 +295,9 @@ pq_init(ClientSocket *client_sock)
 				(errmsg("could not set socket to nonblocking mode: %m")));
 #endif
 
-#ifndef WIN32
-
 	/* Don't give the socket to any subprograms we execute. */
-	if (fcntl(port->sock, F_SETFD, FD_CLOEXEC) < 0)
-		elog(FATAL, "fcntl(F_SETFD) failed on socket: %m");
-#endif
+	if (!socket_set_cloexec(port->sock))
+		elog(FATAL, "could not set socket to close-on-exec mode: %m");
 
 	FeBeWaitSet = CreateWaitEventSet(NULL, FeBeWaitSetNEvents);
 	socket_pos = AddWaitEventToSet(FeBeWaitSet, WL_SOCKET_WRITEABLE,
@@ -536,7 +533,13 @@ ListenServerPort(int family, const char *hostName, unsigned short portNumber,
 			addrDesc = addrBuf;
 		}
 
-		if ((fd = socket(addr->ai_family, SOCK_STREAM, 0)) == PGINVALID_SOCKET)
+		/* Don't give the listen socket to any subprograms we execute. */
+#ifdef SOCK_CLOEXEC
+		fd = socket(addr->ai_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#else
+		fd = socket(addr->ai_family, SOCK_STREAM, 0);
+#endif
+		if (fd == PGINVALID_SOCKET)
 		{
 			ereport(LOG,
 					(errcode_for_socket_access(),
@@ -545,11 +548,12 @@ ListenServerPort(int family, const char *hostName, unsigned short portNumber,
 							familyDesc, addrDesc)));
 			continue;
 		}
+#ifndef SOCK_CLOEXEC
+		if (!socket_set_cloexec(fd))
+			elog(FATAL, "could not set socket to close-on-exec mode: %m");
+#endif
 
 #ifndef WIN32
-		/* Don't give the listen socket to any subprograms we execute. */
-		if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
-			elog(FATAL, "fcntl(F_SETFD) failed on socket: %m");
 
 		/*
 		 * Without the SO_REUSEADDR flag, a new postmaster can't be started
