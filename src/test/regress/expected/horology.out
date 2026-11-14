@@ -3770,6 +3770,8 @@ SELECT to_timestamp('2015-02-11 86000', 'YYYY-MM-DD SSSSS');  -- ok
 
 SELECT to_timestamp('2015-02-11 86400', 'YYYY-MM-DD SSSSS');
 ERROR:  date/time field value out of range: "2015-02-11 86400"
+SELECT to_timestamp('2024-01-01 -1', 'YYYY-MM-DD SSSSS');
+ERROR:  date/time field value out of range: "2024-01-01 -1"
 SELECT to_timestamp('1000000000,999', 'Y,YYY');
 ERROR:  value for "Y,YYY" in source string is out of range
 SELECT to_timestamp('0.-2147483648', 'SS.MS');
@@ -3812,6 +3814,48 @@ SELECT to_date('2016 366', 'YYYY DDD');  -- ok
 
 SELECT to_date('2016 367', 'YYYY DDD');
 ERROR:  date/time field value out of range: "2016 367"
+SELECT to_date('2024 1000', 'YYYY DDD');
+ERROR:  date/time field value out of range: "2024 1000"
+SELECT to_date('2024 999', 'IYYY IDDD');
+ERROR:  date/time field value out of range: "2024 999"
+SELECT to_date('2024 372', 'IYYY IDDD');
+ERROR:  date/time field value out of range: "2024 372"
+SELECT to_date('2024 371', 'IYYY IDDD');  -- ok
+  to_date   
+------------
+ 01-05-2025
+(1 row)
+
+SELECT to_date('2024 XIII', 'YYYY RM');
+ERROR:  date/time field value out of range: "2024 XIII"
+SELECT to_date('2024 IIII', 'YYYY RM');
+ERROR:  date/time field value out of range: "2024 IIII"
+SELECT to_date('2024 XII', 'YYYY RM');  -- ok
+  to_date   
+------------
+ 12-01-2024
+(1 row)
+
+SELECT to_date('2024 54', 'IYYY IW');
+ERROR:  date/time field value out of range: "2024 54"
+SELECT to_date('2024 99', 'IYYY IW');
+ERROR:  date/time field value out of range: "2024 99"
+SELECT to_date('2024 53', 'IYYY IW');  -- ok
+  to_date   
+------------
+ 12-30-2024
+(1 row)
+
+SELECT to_date('2024 01 8', 'IYYY IW ID');
+ERROR:  date/time field value out of range: "2024 01 8"
+SELECT to_date('2024 01 0', 'IYYY IW ID');
+ERROR:  date/time field value out of range: "2024 01 0"
+SELECT to_date('2024 01 7', 'IYYY IW ID');  -- ok
+  to_date   
+------------
+ 01-07-2024
+(1 row)
+
 SELECT to_date('0000-02-01','YYYY-MM-DD');  -- allowed, though it shouldn't be
     to_date    
 ---------------
