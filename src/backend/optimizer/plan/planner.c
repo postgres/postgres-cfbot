@@ -26,6 +26,7 @@
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "common/hashfn.h"
 #include "executor/executor.h"
 #include "foreign/fdwapi.h"
 #include "jit/jit.h"
@@ -9250,42 +9251,128 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	}
 }
 
+/* Hash table entry in glob->subplanNameHash. */
+typedef struct
+{
+	uint32		status;
+	const char *name;
+	bool		used;			/* is the name itself in use? */
+	unsigned	next_suffix;	/* name_N is taken for N < next_suffix */
+} SubplanNameEntry;
+
+/* Threshold for switching from list to hash table */
+#define SUBPLAN_NAME_HASH_THRESHOLD 32
+
+#define SH_PREFIX               subplan_name
+#define SH_ELEMENT_TYPE			SubplanNameEntry
+#define SH_KEY_TYPE             const char *
+#define SH_KEY                  name
+#define SH_HASH_KEY(tb, key)	\
+	hash_bytes((const unsigned char *) (key), strlen(key))
+#define SH_EQUAL(tb, a, b)		(strcmp(a, b) == 0)
+#define SH_SCOPE                static inline
+#define SH_DECLARE
+#define SH_DEFINE
+#include "lib/simplehash.h"
+
+/*
+ * Enter "name", which is now in use, into the hash table.
+ */
+static void
+enter_subplan_name(subplan_name_hash *tb, char *name)
+{
+	SubplanNameEntry *entry;
+	bool		found;
+
+	entry = subplan_name_insert(tb, name, &found);
+	if (!found)
+		entry->next_suffix = 1;
+	entry->used = true;
+}
+
+/*
+ * Is "name" in glob->subplanNames?
+ */
+static bool
+subplan_name_in_use(PlannerGlobal *glob, const char *name)
+{
+	if (glob->subplanNameHash)
+	{
+		SubplanNameEntry *entry;
+
+		entry = subplan_name_lookup(glob->subplanNameHash, name);
+		return entry != NULL && entry->used;
+	}
+
+	foreach_ptr(char, subplan_name, glob->subplanNames)
+	{
+		if (strcmp(subplan_name, name) == 0)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Add "name" to glob->subplanNames, and to glob->subplanNameHash if built.
+ */
+static void
+add_subplan_name(PlannerGlobal *glob, char *name)
+{
+	glob->subplanNames = lappend(glob->subplanNames, name);
+	if (glob->subplanNameHash)
+		enter_subplan_name(glob->subplanNameHash, name);
+}
+
 /*
  * Choose a unique name for some subroot.
  *
- * Modifies glob->subplanNames to track names already used.
+ * Modifies glob->subplanNames to track names already used.  Once there are
+ * many of them, they are also kept in glob->subplanNameHash, so that we
+ * don't have to search the list for each name we try.
+ *
+ * The hash table also remembers, for each base name, the smallest N
+ * that might give a free "name_N": since names are never released,
+ * every smaller N is known to be taken, and we start the search there.
  */
 char *
 choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 {
 	unsigned	n;
 
+	/* Switch to using hash lookup when the list grows "too long". */
+	if (!glob->subplanNameHash &&
+		list_length(glob->subplanNames) >= SUBPLAN_NAME_HASH_THRESHOLD)
+	{
+		glob->subplanNameHash =
+			subplan_name_create(CurrentMemoryContext,
+								list_length(glob->subplanNames), NULL);
+		foreach_ptr(char, subplan_name, glob->subplanNames)
+			enter_subplan_name(glob->subplanNameHash, subplan_name);
+	}
+
 	/*
 	 * If a numeric suffix is not required, then search the list of
 	 * previously-assigned names for a match. If none is found, then we can
 	 * use the provided name without modification.
 	 */
-	if (!always_number)
+	if (!always_number && !subplan_name_in_use(glob, name))
 	{
-		bool		found = false;
+		/* pstrdup here is just to avoid cast-away-const */
+		char	   *chosen_name = pstrdup(name);
 
-		foreach_ptr(char, subplan_name, glob->subplanNames)
-		{
-			if (strcmp(subplan_name, name) == 0)
-			{
-				found = true;
-				break;
-			}
-		}
+		add_subplan_name(glob, chosen_name);
+		return chosen_name;
+	}
 
-		if (!found)
-		{
-			/* pstrdup here is just to avoid cast-away-const */
-			char	   *chosen_name = pstrdup(name);
+	/* With the hash table, start where the last search for this name ended. */
+	n = 1;
+	if (glob->subplanNameHash)
+	{
+		SubplanNameEntry *entry;
 
-			glob->subplanNames = lappend(glob->subplanNames, chosen_name);
-			return chosen_name;
-		}
+		entry = subplan_name_lookup(glob->subplanNameHash, name);
+		if (entry)
+			n = entry->next_suffix;
 	}
 
 	/*
@@ -9293,23 +9380,27 @@ choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 	 * in use, then loop until we find a positive integer that produces a
 	 * novel name.
 	 */
-	for (n = 1; true; ++n)
+	for (; true; ++n)
 	{
 		char	   *proposed_name = psprintf("%s_%u", name, n);
-		bool		found = false;
 
-		foreach_ptr(char, subplan_name, glob->subplanNames)
+		if (!subplan_name_in_use(glob, proposed_name))
 		{
-			if (strcmp(subplan_name, proposed_name) == 0)
+			add_subplan_name(glob, proposed_name);
+			if (glob->subplanNameHash)
 			{
-				found = true;
-				break;
-			}
-		}
+				SubplanNameEntry *entry;
+				bool		found;
 
-		if (!found)
-		{
-			glob->subplanNames = lappend(glob->subplanNames, proposed_name);
+				entry = subplan_name_insert(glob->subplanNameHash,
+											name, &found);
+				if (!found)
+				{
+					entry->name = pstrdup(name);
+					entry->used = false;
+				}
+				entry->next_suffix = n + 1;
+			}
 			return proposed_name;
 		}
 
