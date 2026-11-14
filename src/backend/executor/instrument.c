@@ -23,8 +23,10 @@
 #include "utils/guc_hooks.h"
 
 BufferUsage pgBufferUsage;
+BufferUsage pgBufferUsageFromWorkers;
 static BufferUsage save_pgBufferUsage;
 WalUsage	pgWalUsage;
+WalUsage	pgWalUsageFromWorkers;
 static WalUsage save_pgWalUsage;
 
 static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
@@ -292,12 +294,32 @@ InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
 	WalUsageAccumDiff(walusage, &pgWalUsage, &save_pgWalUsage);
 }
 
-/* accumulate work done by workers in leader's stats */
+/*
+ * Accumulate work done by workers in leader's stats.
+ *
+ * Also keep track of how much of the leader's totals came from workers, so
+ * that consumers that feed the cumulative statistics system can separate the
+ * leader only activity (by subtracting the worker activity from the totals)
+ * to avoid double counting due to workers also reporting it themselves.
+ */
 void
 InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
 {
 	BufferUsageAdd(&pgBufferUsage, bufusage);
 	WalUsageAdd(&pgWalUsage, walusage);
+	BufferUsageAdd(&pgBufferUsageFromWorkers, bufusage);
+	WalUsageAdd(&pgWalUsageFromWorkers, walusage);
+}
+
+/*
+ * Compute this process' own WAL usage into *walusage: pgWalUsage less what a
+ * parallel leader accumulated from its workers.
+ */
+void
+ComputeOwnWalUsage(WalUsage *walusage)
+{
+	memset(walusage, 0, sizeof(WalUsage));
+	WalUsageAccumDiff(walusage, &pgWalUsage, &pgWalUsageFromWorkers);
 }
 
 /* dst += add */
