@@ -93,6 +93,7 @@ SecLabelSupportsObjectType(ObjectType objtype)
 		case OBJECT_TSPARSER:
 		case OBJECT_TSTEMPLATE:
 		case OBJECT_USER_MAPPING:
+		case OBJECT_WHOLE_ROW:
 			return false;
 
 			/*
