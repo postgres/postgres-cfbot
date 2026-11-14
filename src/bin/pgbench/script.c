@@ -1,0 +1,921 @@
+/*-------------------------------------------------------------------------
+ *
+ * script.c
+ *	  Script parsing and built-in scripts for pgbench
+ *
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
+ *
+ * src/bin/pgbench/script.c
+ *
+ *-------------------------------------------------------------------------
+ */
+#include "postgres_fe.h"
+
+#include <ctype.h>
+#include <limits.h>
+
+#include "common/logging.h"
+#include "fe_utils/conditional.h"
+#include "pgbench.h"
+#include "random.h"
+#include "script.h"
+
+QueryMode querymode = QUERY_SIMPLE;
+const char *const QUERYMODE[] = {"simple", "extended", "prepared"};
+
+ParsedScript sql_script[MAX_SCRIPTS];	/* SQL script files */
+int	num_scripts;		/* number of scripts in sql_script[] */
+int64 total_weight = 0;
+
+static const BuiltinScript builtin_script[] =
+{
+	{
+		"tpcb-like",
+		"<builtin: TPC-B (sort of)>",
+		"\\set aid random(1, " CppAsString2(naccounts) " * :scale)\n"
+		"\\set bid random(1, " CppAsString2(nbranches) " * :scale)\n"
+		"\\set tid random(1, " CppAsString2(ntellers) " * :scale)\n"
+		"\\set delta random(-5000, 5000)\n"
+		"BEGIN;\n"
+		"UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;\n"
+		"SELECT abalance FROM pgbench_accounts WHERE aid = :aid;\n"
+		"UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;\n"
+		"UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;\n"
+		"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);\n"
+		"END;\n"
+	},
+	{
+		"simple-update",
+		"<builtin: simple update>",
+		"\\set aid random(1, " CppAsString2(naccounts) " * :scale)\n"
+		"\\set bid random(1, " CppAsString2(nbranches) " * :scale)\n"
+		"\\set tid random(1, " CppAsString2(ntellers) " * :scale)\n"
+		"\\set delta random(-5000, 5000)\n"
+		"BEGIN;\n"
+		"UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;\n"
+		"SELECT abalance FROM pgbench_accounts WHERE aid = :aid;\n"
+		"INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);\n"
+		"END;\n"
+	},
+	{
+		"select-only",
+		"<builtin: select only>",
+		"\\set aid random(1, " CppAsString2(naccounts) " * :scale)\n"
+		"SELECT abalance FROM pgbench_accounts WHERE aid = :aid;\n"
+	}
+};
+
+static void addScript(const ParsedScript *script);
+
+/* callback functions for our flex lexer */
+static const PsqlScanCallbacks pgbench_callbacks = {
+	NULL,						/* don't need get_variable functionality */
+};
+
+/*
+ * Convert command name to meta-command enum identifier
+ */
+static MetaCommand
+getMetaCommand(const char *cmd)
+{
+	MetaCommand mc;
+
+	if (cmd == NULL)
+		mc = META_NONE;
+	else if (pg_strcasecmp(cmd, "set") == 0)
+		mc = META_SET;
+	else if (pg_strcasecmp(cmd, "setshell") == 0)
+		mc = META_SETSHELL;
+	else if (pg_strcasecmp(cmd, "shell") == 0)
+		mc = META_SHELL;
+	else if (pg_strcasecmp(cmd, "sleep") == 0)
+		mc = META_SLEEP;
+	else if (pg_strcasecmp(cmd, "if") == 0)
+		mc = META_IF;
+	else if (pg_strcasecmp(cmd, "elif") == 0)
+		mc = META_ELIF;
+	else if (pg_strcasecmp(cmd, "else") == 0)
+		mc = META_ELSE;
+	else if (pg_strcasecmp(cmd, "endif") == 0)
+		mc = META_ENDIF;
+	else if (pg_strcasecmp(cmd, "gset") == 0)
+		mc = META_GSET;
+	else if (pg_strcasecmp(cmd, "aset") == 0)
+		mc = META_ASET;
+	else if (pg_strcasecmp(cmd, "startpipeline") == 0)
+		mc = META_STARTPIPELINE;
+	else if (pg_strcasecmp(cmd, "syncpipeline") == 0)
+		mc = META_SYNCPIPELINE;
+	else if (pg_strcasecmp(cmd, "endpipeline") == 0)
+		mc = META_ENDPIPELINE;
+	else
+		mc = META_NONE;
+	return mc;
+}
+
+/* return a script number with a weighted choice. */
+int
+chooseScript(TState *thread)
+{
+	int			i = 0;
+	int64		w;
+
+	if (num_scripts == 1)
+		return 0;
+
+	w = getrand(&thread->ts_choose_rs, 0, total_weight - 1);
+	do
+	{
+		w -= sql_script[i++].weight;
+	} while (w >= 0);
+
+	return i - 1;
+}
+
+/*
+ * Replace :param with $n throughout the command's SQL text, which
+ * is a modifiable string in cmd->lines.
+ */
+static bool
+parseQuery(Command *cmd)
+{
+	char	   *sql,
+			   *p;
+
+	cmd->argc = 1;
+
+	p = sql = pg_strdup(cmd->lines.data);
+	while ((p = strchr(p, ':')) != NULL)
+	{
+		char		var[13];
+		char	   *name;
+		int			eaten;
+
+		name = parseVariable(p, &eaten);
+		if (name == NULL)
+		{
+			while (*p == ':')
+			{
+				p++;
+			}
+			continue;
+		}
+
+		/*
+		 * cmd->argv[0] is the SQL statement itself, so the max number of
+		 * arguments is one less than MAX_ARGS
+		 */
+		if (cmd->argc >= MAX_ARGS)
+		{
+			pg_log_error("statement has too many arguments (maximum is %d): %s",
+						 MAX_ARGS - 1, cmd->lines.data);
+			pg_free(name);
+			return false;
+		}
+
+		sprintf(var, "$%d", cmd->argc);
+		p = replaceVariable(&sql, p, eaten, var);
+
+		cmd->argv[cmd->argc] = name;
+		cmd->argc++;
+	}
+
+	Assert(cmd->argv[0] == NULL);
+	cmd->argv[0] = sql;
+	return true;
+}
+
+/*
+ * syntax error while parsing a script (in practice, while parsing a
+ * backslash command, because we don't detect syntax errors in SQL)
+ *
+ * source: source of script (filename or builtin-script ID)
+ * lineno: line number within script (count from 1)
+ * line: whole line of backslash command, if available
+ * command: backslash command name, if available
+ * msg: the actual error message
+ * more: optional extra message
+ * column: zero-based column number, or -1 if unknown
+ */
+void
+syntax_error(const char *source, int lineno,
+			 const char *line, const char *command,
+			 const char *msg, const char *more, int column)
+{
+	PQExpBufferData buf;
+
+	initPQExpBuffer(&buf);
+
+	printfPQExpBuffer(&buf, "%s:%d: %s", source, lineno, msg);
+	if (more != NULL)
+		appendPQExpBuffer(&buf, " (%s)", more);
+	if (column >= 0 && line == NULL)
+		appendPQExpBuffer(&buf, " at column %d", column + 1);
+	if (command != NULL)
+		appendPQExpBuffer(&buf, " in command \"%s\"", command);
+
+	pg_log_error("%s", buf.data);
+
+	termPQExpBuffer(&buf);
+
+	if (line != NULL)
+	{
+		fprintf(stderr, "%s\n", line);
+		if (column >= 0)
+			fprintf(stderr, "%*c error found here\n", column + 1, '^');
+	}
+
+	exit(1);
+}
+
+/*
+ * Return a pointer to the start of the SQL command, after skipping over
+ * whitespace and "--" comments.
+ * If the end of the string is reached, return NULL.
+ */
+static char *
+skip_sql_comments(char *sql_command)
+{
+	char	   *p = sql_command;
+
+	/* Skip any leading whitespace, as well as "--" style comments */
+	for (;;)
+	{
+		if (isspace((unsigned char) *p))
+			p++;
+		else if (strncmp(p, "--", 2) == 0)
+		{
+			p = strchr(p, '\n');
+			if (p == NULL)
+				return NULL;
+			p++;
+		}
+		else
+			break;
+	}
+
+	/* NULL if there's nothing but whitespace and comments */
+	if (*p == '\0')
+		return NULL;
+
+	return p;
+}
+
+/*
+ * Parse a SQL command; return a Command struct, or NULL if it's a comment
+ *
+ * On entry, psqlscan.l has collected the command into "buf", so we don't
+ * really need to do much here except check for comments and set up a Command
+ * struct.
+ */
+static Command *
+create_sql_command(PQExpBuffer buf)
+{
+	Command    *my_command;
+	char	   *p = skip_sql_comments(buf->data);
+
+	if (p == NULL)
+		return NULL;
+
+	/* Allocate and initialize Command structure */
+	my_command = pg_malloc0_object(Command);
+	initPQExpBuffer(&my_command->lines);
+	appendPQExpBufferStr(&my_command->lines, p);
+	my_command->first_line = NULL;	/* this is set later */
+	my_command->type = SQL_COMMAND;
+	my_command->meta = META_NONE;
+	my_command->argc = 0;
+	my_command->retries = 0;
+	my_command->failures = 0;
+	memset(my_command->argv, 0, sizeof(my_command->argv));
+	my_command->varprefix = NULL;	/* allocated later, if needed */
+	my_command->expr = NULL;
+	initSimpleStats(&my_command->stats);
+	my_command->prepname = NULL;	/* set later, if needed */
+
+	return my_command;
+}
+
+/* Free a Command structure and associated data */
+static void
+free_command(Command *command)
+{
+	termPQExpBuffer(&command->lines);
+	pg_free(command->first_line);
+	for (int i = 0; i < command->argc; i++)
+		pg_free(command->argv[i]);
+	pg_free(command->varprefix);
+
+	/*
+	 * It should also free expr recursively, but this is currently not needed
+	 * as only gset commands (which do not have an expression) are freed.
+	 */
+	pg_free(command);
+}
+
+/*
+ * Once an SQL command is fully parsed, possibly by accumulating several
+ * parts, complete other fields of the Command structure.
+ */
+void
+postprocess_sql_command(Command *my_command)
+{
+	char		buffer[128];
+	static int	prepnum = 0;
+
+	Assert(my_command->type == SQL_COMMAND);
+
+	/* Save the first line for error display. */
+	strlcpy(buffer, my_command->lines.data, sizeof(buffer));
+	buffer[strcspn(buffer, "\n\r")] = '\0';
+	my_command->first_line = pg_strdup(buffer);
+
+	/* Parse query and generate prepared statement name, if necessary */
+	switch (querymode)
+	{
+		case QUERY_SIMPLE:
+			my_command->argv[0] = my_command->lines.data;
+			my_command->argc++;
+			break;
+		case QUERY_PREPARED:
+			my_command->prepname = psprintf("P_%d", prepnum++);
+			pg_fallthrough;
+		case QUERY_EXTENDED:
+			if (!parseQuery(my_command))
+				exit(1);
+			break;
+		default:
+			exit(1);
+	}
+}
+
+/*
+ * Parse a backslash command; return a Command struct, or NULL if comment
+ *
+ * At call, we have scanned only the initial backslash.
+ */
+static Command *
+process_backslash_command(PsqlScanState sstate, const char *source,
+						  int lineno, int start_offset)
+{
+	Command    *my_command;
+	PQExpBufferData word_buf;
+	int			word_offset;
+	int			offsets[MAX_ARGS];	/* offsets of argument words */
+	int			j;
+
+	initPQExpBuffer(&word_buf);
+
+	/* Collect first word of command */
+	if (!expr_lex_one_word(sstate, &word_buf, &word_offset))
+	{
+		termPQExpBuffer(&word_buf);
+		return NULL;
+	}
+
+	/* Allocate and initialize Command structure */
+	my_command = pg_malloc0_object(Command);
+	my_command->type = META_COMMAND;
+	my_command->argc = 0;
+	initSimpleStats(&my_command->stats);
+
+	/* Save first word (command name) */
+	j = 0;
+	offsets[j] = word_offset;
+	my_command->argv[j++] = pg_strdup(word_buf.data);
+	my_command->argc++;
+
+	/* ... and convert it to enum form */
+	my_command->meta = getMetaCommand(my_command->argv[0]);
+
+	if (my_command->meta == META_SET ||
+		my_command->meta == META_IF ||
+		my_command->meta == META_ELIF)
+	{
+		yyscan_t	yyscanner;
+
+		/* For \set, collect var name */
+		if (my_command->meta == META_SET)
+		{
+			if (!expr_lex_one_word(sstate, &word_buf, &word_offset))
+				syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+							 "missing argument", NULL, -1);
+
+			offsets[j] = word_offset;
+			my_command->argv[j++] = pg_strdup(word_buf.data);
+			my_command->argc++;
+		}
+
+		/* then for all parse the expression */
+		yyscanner = expr_scanner_init(sstate, source, lineno, start_offset,
+									  my_command->argv[0]);
+
+		if (expr_yyparse(&my_command->expr, yyscanner) != 0)
+		{
+			/* dead code: exit done from syntax_error called by yyerror */
+			exit(1);
+		}
+
+		/* Save line, trimming any trailing newline */
+		my_command->first_line =
+			expr_scanner_get_substring(sstate,
+									   start_offset,
+									   true);
+
+		expr_scanner_finish(yyscanner);
+
+		termPQExpBuffer(&word_buf);
+
+		return my_command;
+	}
+
+	/* For all other commands, collect remaining words. */
+	while (expr_lex_one_word(sstate, &word_buf, &word_offset))
+	{
+		/*
+		 * my_command->argv[0] is the command itself, so the max number of
+		 * arguments is one less than MAX_ARGS
+		 */
+		if (j >= MAX_ARGS)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "too many arguments", NULL, -1);
+
+		offsets[j] = word_offset;
+		my_command->argv[j++] = pg_strdup(word_buf.data);
+		my_command->argc++;
+	}
+
+	/* Save line, trimming any trailing newline */
+	my_command->first_line =
+		expr_scanner_get_substring(sstate,
+								   start_offset,
+								   true);
+
+	if (my_command->meta == META_SLEEP)
+	{
+		if (my_command->argc < 2)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "missing argument", NULL, -1);
+
+		if (my_command->argc > 3)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "too many arguments", NULL,
+						 offsets[3] - start_offset);
+
+		/*
+		 * Split argument into number and unit to allow "sleep 1ms" etc. We
+		 * don't have to terminate the number argument with null because it
+		 * will be parsed with atoi, which ignores trailing non-digit
+		 * characters.
+		 */
+		if (my_command->argv[1][0] != ':')
+		{
+			char	   *c = my_command->argv[1];
+			bool		have_digit = false;
+
+			/* Skip sign */
+			if (*c == '+' || *c == '-')
+				c++;
+
+			/* Require at least one digit */
+			if (*c && isdigit((unsigned char) *c))
+				have_digit = true;
+
+			/* Eat all digits */
+			while (*c && isdigit((unsigned char) *c))
+				c++;
+
+			if (*c)
+			{
+				if (my_command->argc == 2 && have_digit)
+				{
+					my_command->argv[2] = c;
+					offsets[2] = offsets[1] + (c - my_command->argv[1]);
+					my_command->argc = 3;
+				}
+				else
+				{
+					/*
+					 * Raise an error if argument starts with non-digit
+					 * character (after sign).
+					 */
+					syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+								 "invalid sleep time, must be an integer",
+								 my_command->argv[1], offsets[1] - start_offset);
+				}
+			}
+		}
+
+		if (my_command->argc == 3)
+		{
+			if (pg_strcasecmp(my_command->argv[2], "us") != 0 &&
+				pg_strcasecmp(my_command->argv[2], "ms") != 0 &&
+				pg_strcasecmp(my_command->argv[2], "s") != 0)
+				syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+							 "unrecognized time unit, must be us, ms or s",
+							 my_command->argv[2], offsets[2] - start_offset);
+		}
+	}
+	else if (my_command->meta == META_SETSHELL)
+	{
+		if (my_command->argc < 3)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "missing argument", NULL, -1);
+	}
+	else if (my_command->meta == META_SHELL)
+	{
+		if (my_command->argc < 2)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "missing command", NULL, -1);
+	}
+	else if (my_command->meta == META_ELSE || my_command->meta == META_ENDIF ||
+			 my_command->meta == META_STARTPIPELINE ||
+			 my_command->meta == META_ENDPIPELINE ||
+			 my_command->meta == META_SYNCPIPELINE)
+	{
+		if (my_command->argc != 1)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "unexpected argument", NULL, -1);
+	}
+	else if (my_command->meta == META_GSET || my_command->meta == META_ASET)
+	{
+		if (my_command->argc > 2)
+			syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+						 "too many arguments", NULL, -1);
+	}
+	else
+	{
+		/* my_command->meta == META_NONE */
+		syntax_error(source, lineno, my_command->first_line, my_command->argv[0],
+					 "invalid command", NULL, -1);
+	}
+
+	termPQExpBuffer(&word_buf);
+
+	return my_command;
+}
+
+static void
+ConditionError(const char *desc, int cmdn, const char *msg)
+{
+	pg_fatal("condition error in script \"%s\" command %d: %s",
+			 desc, cmdn, msg);
+}
+
+/*
+ * Partial evaluation of conditionals before recording and running the script.
+ */
+static void
+CheckConditional(const ParsedScript *ps)
+{
+	/* statically check conditional structure */
+	ConditionalStack cs = conditional_stack_create();
+	int			i;
+
+	for (i = 0; ps->commands[i] != NULL; i++)
+	{
+		Command    *cmd = ps->commands[i];
+
+		if (cmd->type == META_COMMAND)
+		{
+			switch (cmd->meta)
+			{
+				case META_IF:
+					conditional_stack_push(cs, IFSTATE_FALSE);
+					break;
+				case META_ELIF:
+					if (conditional_stack_empty(cs))
+						ConditionError(ps->desc, i + 1, "\\elif without matching \\if");
+					if (conditional_stack_peek(cs) == IFSTATE_ELSE_FALSE)
+						ConditionError(ps->desc, i + 1, "\\elif after \\else");
+					break;
+				case META_ELSE:
+					if (conditional_stack_empty(cs))
+						ConditionError(ps->desc, i + 1, "\\else without matching \\if");
+					if (conditional_stack_peek(cs) == IFSTATE_ELSE_FALSE)
+						ConditionError(ps->desc, i + 1, "\\else after \\else");
+					conditional_stack_poke(cs, IFSTATE_ELSE_FALSE);
+					break;
+				case META_ENDIF:
+					if (!conditional_stack_pop(cs))
+						ConditionError(ps->desc, i + 1, "\\endif without matching \\if");
+					break;
+				default:
+					/* ignore anything else... */
+					break;
+			}
+		}
+	}
+	if (!conditional_stack_empty(cs))
+		ConditionError(ps->desc, i + 1, "\\if without matching \\endif");
+	conditional_stack_destroy(cs);
+}
+
+/*
+ * Parse a script (either the contents of a file, or a built-in script)
+ * and add it to the list of scripts.
+ */
+static void
+ParseScript(const char *script, const char *desc, int weight)
+{
+	ParsedScript ps;
+	PsqlScanState sstate;
+	PQExpBufferData line_buf;
+	int			alloc_num;
+	int			index;
+
+#define COMMANDS_ALLOC_NUM 128
+	alloc_num = COMMANDS_ALLOC_NUM;
+
+	/* Initialize all fields of ps */
+	ps.desc = desc;
+	ps.weight = weight;
+	ps.commands = pg_malloc_array(Command *, alloc_num);
+	initStats(&ps.stats, 0);
+
+	/* Prepare to parse script */
+	sstate = psql_scan_create(&pgbench_callbacks);
+
+	/*
+	 * Ideally, we'd scan scripts using the encoding and stdstrings settings
+	 * we get from a DB connection.  However, without major rearrangement of
+	 * pgbench's argument parsing, we can't have a DB connection at the time
+	 * we parse scripts.  Using SQL_ASCII (encoding 0) should work well enough
+	 * with any backend-safe encoding, though conceivably we could be fooled
+	 * if a script file uses a client-only encoding.  We also assume that
+	 * stdstrings should be true, which is a bit riskier.
+	 */
+	psql_scan_setup(sstate, script, strlen(script), 0, true);
+
+	initPQExpBuffer(&line_buf);
+
+	index = 0;
+
+	for (;;)
+	{
+		PsqlScanResult sr;
+		promptStatus_t prompt;
+		Command    *command = NULL;
+
+		resetPQExpBuffer(&line_buf);
+
+		sr = psql_scan(sstate, &line_buf, &prompt);
+
+		/* If we collected a new SQL command, process that */
+		command = create_sql_command(&line_buf);
+
+		/* store new command */
+		if (command)
+			ps.commands[index++] = command;
+
+		/* If we reached a backslash, process that */
+		if (sr == PSCAN_BACKSLASH)
+		{
+			int			lineno;
+			int			start_offset;
+
+			/* Capture location of the backslash */
+			psql_scan_get_location(sstate, &lineno, &start_offset);
+			start_offset--;
+
+			command = process_backslash_command(sstate, desc,
+												lineno, start_offset);
+
+			if (command)
+			{
+				/*
+				 * If this is gset or aset, merge into the preceding command.
+				 * (We don't use a command slot in this case).
+				 */
+				if (command->meta == META_GSET || command->meta == META_ASET)
+				{
+					Command    *cmd;
+
+					if (index == 0)
+						syntax_error(desc, lineno, NULL, NULL,
+									 "\\gset must follow an SQL command",
+									 NULL, -1);
+
+					cmd = ps.commands[index - 1];
+
+					if (cmd->type != SQL_COMMAND ||
+						cmd->varprefix != NULL)
+						syntax_error(desc, lineno, NULL, NULL,
+									 "\\gset must follow an SQL command",
+									 cmd->first_line, -1);
+
+					/* get variable prefix */
+					if (command->argc <= 1 || command->argv[1][0] == '\0')
+						cmd->varprefix = pg_strdup("");
+					else
+						cmd->varprefix = pg_strdup(command->argv[1]);
+
+					/* update the sql command meta */
+					cmd->meta = command->meta;
+
+					/* cleanup unused command */
+					free_command(command);
+
+					continue;
+				}
+
+				/* Attach any other backslash command as a new command */
+				ps.commands[index++] = command;
+			}
+		}
+
+		/*
+		 * Since we used a command slot, allocate more if needed.  Note we
+		 * always allocate one more in order to accommodate the NULL
+		 * terminator below.
+		 */
+		if (index >= alloc_num)
+		{
+			alloc_num += COMMANDS_ALLOC_NUM;
+			ps.commands = (Command **)
+				pg_realloc_array(ps.commands, Command *, alloc_num);
+		}
+
+		/* Done if we reached EOF */
+		if (sr == PSCAN_INCOMPLETE || sr == PSCAN_EOL)
+			break;
+	}
+
+	ps.commands[index] = NULL;
+
+	addScript(&ps);
+
+	termPQExpBuffer(&line_buf);
+	psql_scan_finish(sstate);
+	psql_scan_destroy(sstate);
+}
+
+/*
+ * Read the entire contents of file fd, and return it in a malloc'd buffer.
+ *
+ * The buffer will typically be larger than necessary, but we don't care
+ * in this program, because we'll free it as soon as we've parsed the script.
+ */
+static char *
+read_file_contents(FILE *fd)
+{
+	char	   *buf;
+	size_t		buflen = BUFSIZ;
+	size_t		used = 0;
+
+	buf = (char *) pg_malloc(buflen);
+
+	for (;;)
+	{
+		size_t		nread;
+
+		nread = fread(buf + used, 1, BUFSIZ, fd);
+		used += nread;
+		/* If fread() read less than requested, must be EOF or error */
+		if (nread < BUFSIZ)
+			break;
+		/* Enlarge buf so we can read some more */
+		buflen += BUFSIZ;
+		buf = (char *) pg_realloc(buf, buflen);
+	}
+	/* There is surely room for a terminator */
+	buf[used] = '\0';
+
+	return buf;
+}
+
+/*
+ * Given a file name, read it and add its script to the list.
+ * "-" means to read stdin.
+ * NB: filename must be storage that won't disappear.
+ */
+void
+process_file(const char *filename, int weight)
+{
+	FILE	   *fd;
+	char	   *buf;
+
+	/* Slurp the file contents into "buf" */
+	if (strcmp(filename, "-") == 0)
+		fd = stdin;
+	else if ((fd = fopen(filename, "r")) == NULL)
+		pg_fatal("could not open file \"%s\": %m", filename);
+
+	buf = read_file_contents(fd);
+
+	if (ferror(fd))
+		pg_fatal("could not read file \"%s\": %m", filename);
+
+	if (fd != stdin)
+		fclose(fd);
+
+	ParseScript(buf, filename, weight);
+
+	free(buf);
+}
+
+/* Parse the given builtin script and add it to the list. */
+void
+process_builtin(const BuiltinScript *bi, int weight)
+{
+	ParseScript(bi->script, bi->desc, weight);
+}
+
+/* show available builtin scripts */
+void
+listAvailableScripts(void)
+{
+	fprintf(stderr, "Available builtin scripts:\n");
+	for (size_t i = 0; i < lengthof(builtin_script); i++)
+		fprintf(stderr, "  %13s: %s\n", builtin_script[i].name, builtin_script[i].desc);
+	fprintf(stderr, "\n");
+}
+
+/* return builtin script "name" if unambiguous, fails if not found */
+const BuiltinScript *
+findBuiltin(const char *name)
+{
+	int			found = 0,
+				len = strlen(name);
+	const BuiltinScript *result = NULL;
+
+	for (size_t i = 0; i < lengthof(builtin_script); i++)
+	{
+		if (strncmp(builtin_script[i].name, name, len) == 0)
+		{
+			result = &builtin_script[i];
+			found++;
+		}
+	}
+
+	/* ok, unambiguous result */
+	if (found == 1)
+		return result;
+
+	/* error cases */
+	if (found == 0)
+		pg_log_error("no builtin script found for name \"%s\"", name);
+	else						/* found > 1 */
+		pg_log_error("ambiguous builtin name: %d builtin scripts found for prefix \"%s\"", found, name);
+
+	listAvailableScripts();
+	exit(1);
+}
+
+/*
+ * Determine the weight specification from a script option (-b, -f), if any,
+ * and return it as an integer (1 is returned if there's no weight).  The
+ * script name is returned in *script as a malloc'd string.
+ */
+int
+parseScriptWeight(const char *option, char **script)
+{
+	const char *sep;
+	int			weight;
+
+	if ((sep = strrchr(option, WSEP)))
+	{
+		int			namelen = sep - option;
+		long		wtmp;
+		char	   *badp;
+
+		/* generate the script name */
+		*script = pg_malloc(namelen + 1);
+		strncpy(*script, option, namelen);
+		(*script)[namelen] = '\0';
+
+		/* process digits of the weight spec */
+		errno = 0;
+		wtmp = strtol(sep + 1, &badp, 10);
+		if (errno != 0 || badp == sep + 1 || *badp != '\0')
+			pg_fatal("invalid weight specification: %s", sep);
+		if (wtmp > INT_MAX || wtmp < 0)
+			pg_fatal("weight specification out of range (0 .. %d): %ld",
+					 INT_MAX, wtmp);
+		weight = wtmp;
+	}
+	else
+	{
+		*script = pg_strdup(option);
+		weight = 1;
+	}
+
+	return weight;
+}
+
+/* append a script to the list of scripts to process */
+static void
+addScript(const ParsedScript *script)
+{
+	if (script->commands == NULL || script->commands[0] == NULL)
+		pg_fatal("empty command list for script \"%s\"", script->desc);
+
+	if (num_scripts >= MAX_SCRIPTS)
+		pg_fatal("at most %d SQL scripts are allowed", MAX_SCRIPTS);
+
+	CheckConditional(script);
+
+	sql_script[num_scripts] = *script;
+	num_scripts++;
+}
