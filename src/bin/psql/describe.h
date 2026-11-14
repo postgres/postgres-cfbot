@@ -126,7 +126,10 @@ bool		listPublications(const char *pattern);
 bool		describePublications(const char *pattern);
 
 /* \dRs */
-bool		describeSubscriptions(const char *pattern, bool verbose);
+bool		listSubscriptions(const char *pattern);
+
+/* \dRs+ */
+bool		describeSubscriptions(const char *pattern);
 
 /* \dAc */
 extern bool listOperatorClasses(const char *access_method_pattern,
