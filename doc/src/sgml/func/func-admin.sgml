@@ -166,6 +166,42 @@
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>pg_request_disconnect_backend</primary>
+        </indexterm>
+        <function>pg_request_disconnect_backend</function> ( <parameter>pid</parameter> <type>integer</type>, <parameter>timeout</parameter> <type>bigint</type> <literal>DEFAULT</literal> <literal>0</literal> )
+        <returnvalue>boolean</returnvalue>
+       </para>
+       <para>
+        Requests the backend process with the specified process ID to politely
+        ask its client to disconnect when convenient. The request is made by
+        turning on the backend's read-only
+        <xref linkend="guc-disconnect-requested"/> parameter, whose new value is
+        reported to the client with a <literal>ParameterStatus</literal> message
+        (see <xref linkend="protocol-async"/>). The connection remains fully
+        functional; honoring the request is up to the client. The same
+        permission rules as <function>pg_cancel_backend</function> apply.
+       </para>
+       <para>
+        If <parameter>timeout</parameter> is not specified or zero, this
+        function returns <literal>true</literal> whether the client actually
+        disconnects or not, indicating only that the request was successfully
+        sent to the backend.  If the <parameter>timeout</parameter> is
+        specified (in milliseconds) and greater than zero, the function waits
+        until the backend has exited. If it exits within the timeout, the
+        function returns <literal>true</literal>.  On timeout, a warning is
+        emitted and <literal>false</literal> is returned.
+       </para>
+       <para>
+        This is useful for gracefully draining connections from a server, for
+        example during a switchover. Clients that do not check
+        <literal>disconnect_requested</literal> will simply keep the connection
+        open as before.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>pg_log_backend_memory_contexts</primary>
         </indexterm>
         <function>pg_log_backend_memory_contexts</function> ( <parameter>pid</parameter> <type>integer</type> )
