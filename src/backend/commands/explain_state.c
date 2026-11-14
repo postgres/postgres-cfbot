@@ -85,7 +85,7 @@ ParseExplainOptionList(ExplainState *es, List *options, ParseState *pstate)
 	bool		summary_set = false;
 
 	/* Parse options list. */
-	foreach(lc, options)
+	foreach(lc, deduplicateDefElemList(options))
 	{
 		DefElem    *opt = (DefElem *) lfirst(lc);
 
