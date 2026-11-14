@@ -388,6 +388,8 @@ typedef struct HashJoinTableData
 	bool		defer_inserts;	/* use deferred insertion? */
 	int			ndeferred;		/* number of queued tuples */
 	HashJoinTuple deferred_tuples[HJ_DEFER_GROUP_SIZE];
+	/* DSA pointers of the queued tuples, for Parallel Hash only */
+	dsa_pointer deferred_shared[HJ_DEFER_GROUP_SIZE];
 	int			deferred_bucketnos[HJ_DEFER_GROUP_SIZE];
 } HashJoinTableData;
 

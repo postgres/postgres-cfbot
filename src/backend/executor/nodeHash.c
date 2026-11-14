@@ -46,6 +46,11 @@
 static void ExecHashIncreaseNumBatches(HashJoinTable hashtable);
 static void ExecHashIncreaseNumBuckets(HashJoinTable hashtable);
 static void ExecHashSetDeferInserts(HashJoinTable hashtable);
+static inline void ExecParallelHashDeferInsert(HashJoinTable hashtable,
+											   HashJoinTuple hashTuple,
+											   dsa_pointer shared,
+											   int bucketno);
+static void ExecParallelHashDiscardDeferredInserts(HashJoinTable hashtable);
 static inline void ExecHashDeferInsert(HashJoinTable hashtable,
 									   HashJoinTuple hashTuple, int bucketno);
 static void ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable);
@@ -332,6 +337,9 @@ MultiExecParallelHash(HashState *node)
 				}
 				/* else we can discard the tuple immediately */
 			}
+
+			/* link any tuples still queued by ExecParallelHashTableInsert */
+			ExecHashFlushDeferredInserts(hashtable);
 
 			/*
 			 * Make sure that any tuples we wrote to disk are visible to
@@ -1247,6 +1255,8 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 
 	Assert(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASH_INNER);
 
+	ExecParallelHashDiscardDeferredInserts(hashtable);
+
 	/*
 	 * It's unlikely, but we need to be prepared for new participants to show
 	 * up while we're in the middle of this operation so we need to switch on
@@ -1507,8 +1517,12 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 											   &shared);
 				copyTuple->hashvalue = hashTuple->hashvalue;
 				memcpy(HJTUPLE_MINTUPLE(copyTuple), tuple, tuple->t_len);
-				ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
-										  copyTuple, shared);
+				if (hashtable->defer_inserts)
+					ExecParallelHashDeferInsert(hashtable, copyTuple, shared,
+												bucketno);
+				else
+					ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
+											  copyTuple, shared);
 			}
 			else
 			{
@@ -1534,6 +1548,8 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 
 		CHECK_FOR_INTERRUPTS();
 	}
+
+	ExecHashFlushDeferredInserts(hashtable);
 }
 
 /*
@@ -1714,6 +1730,8 @@ ExecParallelHashIncreaseNumBuckets(HashJoinTable hashtable)
 
 	Assert(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASH_INNER);
 
+	ExecParallelHashDiscardDeferredInserts(hashtable);
+
 	/*
 	 * It's unlikely, but we need to be prepared for new participants to show
 	 * up while we're in the middle of this operation so we need to switch on
@@ -1776,8 +1794,12 @@ ExecParallelHashIncreaseNumBuckets(HashJoinTable hashtable)
 					Assert(batchno == 0);
 
 					/* add the tuple to the proper bucket */
-					ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
-											  hashTuple, shared);
+					if (hashtable->defer_inserts)
+						ExecParallelHashDeferInsert(hashtable, hashTuple,
+													shared, bucketno);
+					else
+						ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
+												  hashTuple, shared);
 
 					/* advance index past the tuple */
 					idx += MAXALIGN(HJTUPLE_OVERHEAD +
@@ -1787,6 +1809,7 @@ ExecParallelHashIncreaseNumBuckets(HashJoinTable hashtable)
 				/* allow this loop to be cancellable */
 				CHECK_FOR_INTERRUPTS();
 			}
+			ExecHashFlushDeferredInserts(hashtable);
 			BarrierArriveAndWait(&pstate->grow_buckets_barrier,
 								 WAIT_EVENT_HASH_GROW_BUCKETS_REINSERT);
 	}
@@ -1794,16 +1817,14 @@ ExecParallelHashIncreaseNumBuckets(HashJoinTable hashtable)
 
 /*
  * ExecHashSetDeferInserts
- *		decide whether tuples should be linked into the private bucket array
- *		via ExecHashDeferInsert
+ *		decide whether tuples should be linked into the bucket array via
+ *		ExecHashDeferInsert or ExecParallelHashDeferInsert
  */
 static void
 ExecHashSetDeferInserts(HashJoinTable hashtable)
 {
 	Assert(hashtable->ndeferred == 0);
-	hashtable->defer_inserts =
-		(hashtable->parallel_state == NULL &&
-		 hashtable->nbuckets >= HJ_DEFER_MIN_NBUCKETS);
+	hashtable->defer_inserts = (hashtable->nbuckets >= HJ_DEFER_MIN_NBUCKETS);
 }
 
 /*
@@ -1831,22 +1852,69 @@ ExecHashDeferInsert(HashJoinTable hashtable, HashJoinTuple hashTuple,
 
 /*
  * ExecHashFlushDeferredInserts
- *		push all tuples queued by ExecHashDeferInsert onto their buckets
+ *		push all tuples queued by ExecHashDeferInsert or
+ *		ExecParallelHashDeferInsert onto their buckets
  */
 void
 ExecHashFlushDeferredInserts(HashJoinTable hashtable)
 {
-	HashJoinTuple *buckets = hashtable->buckets.unshared;
 	int			n = hashtable->ndeferred;
 
-	for (int i = 0; i < n; i++)
+	if (hashtable->parallel_state != NULL)
 	{
-		HashJoinTuple hashTuple = hashtable->deferred_tuples[i];
-		int			bucketno = hashtable->deferred_bucketnos[i];
+		dsa_pointer_atomic *buckets = hashtable->buckets.shared;
 
-		hashTuple->next.unshared = buckets[bucketno];
-		buckets[bucketno] = hashTuple;
+		for (int i = 0; i < n; i++)
+			ExecParallelHashPushTuple(&buckets[hashtable->deferred_bucketnos[i]],
+									  hashtable->deferred_tuples[i],
+									  hashtable->deferred_shared[i]);
 	}
+	else
+	{
+		HashJoinTuple *buckets = hashtable->buckets.unshared;
+
+		for (int i = 0; i < n; i++)
+		{
+			HashJoinTuple hashTuple = hashtable->deferred_tuples[i];
+			int			bucketno = hashtable->deferred_bucketnos[i];
+
+			hashTuple->next.unshared = buckets[bucketno];
+			buckets[bucketno] = hashTuple;
+		}
+	}
+	hashtable->ndeferred = 0;
+}
+
+/*
+ * ExecParallelHashDeferInsert
+ *		like ExecHashDeferInsert, for a shared bucket array
+ */
+static pg_always_inline void
+ExecParallelHashDeferInsert(HashJoinTable hashtable, HashJoinTuple hashTuple,
+							dsa_pointer shared, int bucketno)
+{
+	int			n = hashtable->ndeferred;
+
+	pg_prefetch_mem(&hashtable->buckets.shared[bucketno]);
+
+	hashtable->deferred_tuples[n] = hashTuple;
+	hashtable->deferred_shared[n] = shared;
+	hashtable->deferred_bucketnos[n] = bucketno;
+	hashtable->ndeferred = ++n;
+
+	if (n == HJ_DEFER_GROUP_SIZE)
+		ExecHashFlushDeferredInserts(hashtable);
+}
+
+/*
+ * ExecParallelHashDiscardDeferredInserts
+ *		forget the tuples queued by ExecParallelHashDeferInsert
+ *
+ * They are linked again from their chunks when the hash table grows.
+ */
+static void
+ExecParallelHashDiscardDeferredInserts(HashJoinTable hashtable)
+{
 	hashtable->ndeferred = 0;
 }
 
@@ -1990,8 +2058,11 @@ retry:
 		HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
 
 		/* Push it onto the front of the bucket's list */
-		ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
-								  hashTuple, shared);
+		if (hashtable->defer_inserts)
+			ExecParallelHashDeferInsert(hashtable, hashTuple, shared, bucketno);
+		else
+			ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
+									  hashTuple, shared);
 	}
 	else
 	{
@@ -2043,8 +2114,11 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 	hashTuple->hashvalue = hashvalue;
 	memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
 	HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
-	ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
-							  hashTuple, shared);
+	if (hashtable->defer_inserts)
+		ExecParallelHashDeferInsert(hashtable, hashTuple, shared, bucketno);
+	else
+		ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
+								  hashTuple, shared);
 
 	if (shouldFree)
 		heap_free_minimal_tuple(tuple);
@@ -3662,6 +3736,7 @@ ExecParallelHashTableSetCurrentBatch(HashJoinTable hashtable, int batchno)
 						hashtable->batches[batchno].shared->buckets);
 	hashtable->nbuckets = hashtable->parallel_state->nbuckets;
 	hashtable->log2_nbuckets = pg_ceil_log2_32(hashtable->nbuckets);
+	ExecHashSetDeferInserts(hashtable);
 	hashtable->current_chunk = NULL;
 	hashtable->current_chunk_shared = InvalidDsaPointer;
 	hashtable->batches[batchno].at_least_one_chunk = false;
