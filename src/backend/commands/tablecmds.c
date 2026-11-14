@@ -25,6 +25,7 @@
 #include "access/sysattr.h"
 #include "access/tableam.h"
 #include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
 #include "access/tupconvert.h"
 #include "access/xact.h"
 #include "access/xlog.h"
@@ -2292,6 +2293,12 @@ ExecuteTruncateGuts(List *explicit_rels,
 			reindex_relation(NULL, heap_relid, REINDEX_REL_PROCESS_TOAST,
 							 &reindex_params);
 		}
+
+		/*
+		 * No value references a compression dictionary of this relation's
+		 * columns any more, so retire the ones a rewrite would.
+		 */
+		toast_dictionary_retire(RelationGetRelid(rel), true);
 
 		pgstat_count_truncate(rel);
 	}

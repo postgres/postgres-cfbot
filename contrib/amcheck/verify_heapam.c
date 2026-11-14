@@ -76,8 +76,8 @@ typedef enum SkipPages
 typedef struct ToastedAttribute
 {
 	Oid8		va_valueid;		/* value ID (works for both Oid and Oid8) */
-	uint32		va_extinfo;		/* external size and compression method */
-	vartag_external tag;		/* VARTAG_ONDISK_OID or VARTAG_ONDISK_OID8 */
+	int32		extsize;		/* external saved size */
+	vartag_external tag;		/* one of the VARTAG_ONDISK_* tags */
 	BlockNumber blkno;			/* block in main table */
 	OffsetNumber offnum;		/* offset in main table */
 	AttrNumber	attnum;			/* attribute in main table */
@@ -1697,7 +1697,6 @@ check_tuple_attribute(HeapCheckContext *ctx)
 	uint16		infomask;
 	Oid8		toast_pointer_valueid;
 	int32		va_rawsize;
-	uint32		va_extinfo;
 	CompactAttribute *thisatt;
 	vartag_external va_tag_value;
 	toast_external_data toast_ext_data;
@@ -1759,7 +1758,7 @@ check_tuple_attribute(HeapCheckContext *ctx)
 	{
 		uint8		va_tag = VARTAG_EXTERNAL(tp + ctx->offset);
 
-		if (va_tag != VARTAG_ONDISK_OID && va_tag != VARTAG_ONDISK_OID8)
+		if (!VARATT_IS_EXTERNAL_ONDISK(tp + ctx->offset))
 		{
 			report_corruption(ctx,
 							  psprintf("toasted attribute has unexpected TOAST tag %u",
@@ -1808,7 +1807,6 @@ check_tuple_attribute(HeapCheckContext *ctx)
 	va_tag_value = toast_ext_data.tag;
 	toast_pointer_valueid = toast_ext_data.valueid;
 	va_rawsize = toast_ext_data.rawsize;
-	va_extinfo = toast_ext_data.extinfo;
 
 	/* Toasted attributes too large to be untoasted should never be stored */
 	if (va_rawsize > VARLENA_SIZE_LIMIT)
@@ -1818,31 +1816,42 @@ check_tuple_attribute(HeapCheckContext *ctx)
 								   va_rawsize,
 								   VARLENA_SIZE_LIMIT));
 
-	if (VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize))
+	if (toast_ext_data.is_compressed)
 	{
-		ToastCompressionId cmid;
-		bool		valid = false;
-
-		/* Compressed attributes should have a valid compression method */
-		cmid = VARATT_EXTINFO_GET_COMPRESS_METHOD(toast_ext_data.extinfo);
-		switch (cmid)
+		/*
+		 * Compressed attributes should have a valid compression method, and
+		 * it must be stored in the TOAST pointer form appropriate for it: the
+		 * methods that fit in the two method bits of va_extinfo use the plain
+		 * pointer, all others the long form, which flags itself in those bits
+		 * and carries the method in a byte of its own.  Report what is stored
+		 * rather than the decoded method, which is just "invalid" for every
+		 * kind of mismatch.
+		 */
+		if (toast_ext_data.compress_method == TOAST_INVALID_COMPRESSION_ID)
 		{
-				/* List of all valid compression method IDs */
-			case TOAST_PGLZ_COMPRESSION_ID:
-			case TOAST_LZ4_COMPRESSION_ID:
-				valid = true;
-				break;
-
-				/* Recognized but invalid compression method ID */
-			case TOAST_INVALID_COMPRESSION_ID:
-				break;
-
-				/* Intentionally no default here */
+			if (toast_ext_data.method_byte < 0)
+				report_corruption(ctx,
+								  psprintf("toast value %" PRIu64 " has invalid compression method id %d",
+										   toast_pointer_valueid,
+										   toast_ext_data.method_bits));
+			else if (toast_ext_data.method_bits != VARLENA_COMPRESS_METHOD_LONG)
+				report_corruption(ctx,
+								  psprintf("toast value %" PRIu64 " has a long TOAST pointer but compression method bits %d",
+										   toast_pointer_valueid,
+										   toast_ext_data.method_bits));
+			else
+				report_corruption(ctx,
+								  psprintf("toast value %" PRIu64 " has a long TOAST pointer with invalid compression method id %d",
+										   toast_pointer_valueid,
+										   toast_ext_data.method_byte));
 		}
-		if (!valid)
-			report_corruption(ctx,
-							  psprintf("toast value %" PRIu64 " has invalid compression method id %d",
-									   toast_pointer_valueid, cmid));
+	}
+	else if (VARTAG_IS_ONDISK_LONG(va_tag_value))
+	{
+		/* Only compressed values get the long form of the pointer */
+		report_corruption(ctx,
+						  psprintf("toast value %" PRIu64 " is not compressed but has a long TOAST pointer",
+								   toast_pointer_valueid));
 	}
 
 	/* The tuple header better claim to contain toasted values */
@@ -1881,7 +1890,7 @@ check_tuple_attribute(HeapCheckContext *ctx)
 		/* The pointer has already been decoded above, just reuse it */
 		ta->tag = va_tag_value;
 		ta->va_valueid = toast_pointer_valueid;
-		ta->va_extinfo = va_extinfo;
+		ta->extsize = toast_ext_data.extsize;
 		ta->blkno = ctx->blkno;
 		ta->offnum = ctx->offnum;
 		ta->attnum = ctx->attnum;
@@ -1910,22 +1919,18 @@ check_toasted_attribute(HeapCheckContext *ctx, ToastedAttribute *ta)
 	int32		max_chunk_size;
 	Oid8		toast_valueid;
 	Oid			toast_typid;
-	vartag_external expected_tag;
 
 	toast_valueid = ta->va_valueid;
-	extsize = VARATT_EXTINFO_GET_EXTSIZE(ta->va_extinfo);
+	extsize = ta->extsize;
 
 	/*
 	 * Take the chunk_id type from the TOAST table's own definition, not from
 	 * the vartag in the main table as that pointer is the very thing under
-	 * scrutiny here.  The two must agree.
+	 * scrutiny here.  The two must agree, whether the pointer is of the plain
+	 * or of the long form.
 	 */
 	toast_typid = TupleDescAttr(ctx->toast_rel->rd_att, 0)->atttypid;
-	if (toast_typid == OID8OID)
-		expected_tag = VARTAG_ONDISK_OID8;
-	else if (toast_typid == OIDOID)
-		expected_tag = VARTAG_ONDISK_OID;
-	else
+	if (toast_typid != OIDOID && toast_typid != OID8OID)
 	{
 		report_toast_corruption(ctx, ta,
 								psprintf("toast value %" PRIu64 " stored in toast table whose chunk_id has unexpected type %u",
@@ -1933,7 +1938,8 @@ check_toasted_attribute(HeapCheckContext *ctx, ToastedAttribute *ta)
 		return;
 	}
 
-	if (ta->tag != expected_tag)
+	if ((ta->tag == VARTAG_ONDISK_OID8 || ta->tag == VARTAG_ONDISK_OID8_LONG) !=
+		(toast_typid == OID8OID))
 	{
 		report_toast_corruption(ctx, ta,
 								psprintf("toast value %" PRIu64 " has TOAST tag %u, but chunk_id of toast table has type %u",

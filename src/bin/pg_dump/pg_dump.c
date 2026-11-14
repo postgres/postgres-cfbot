@@ -212,6 +212,10 @@ static int	nseclabels = 0;
 static BinaryUpgradeClassOidItem *binaryUpgradeClassOids = NULL;
 static int	nbinaryUpgradeClassOids = 0;
 
+/* sorted OIDs of the tables owning compression dictionaries, for binary upgrade */
+static Oid *binaryUpgradeDictRelids = NULL;
+static int	nbinaryUpgradeDictRelids = 0;
+
 /* sorted table of sequences */
 static SequenceItem *sequences = NULL;
 static int	nsequences = 0;
@@ -391,6 +395,10 @@ static void binary_upgrade_set_type_oids_by_type_oid(Archive *fout,
 													 Oid pg_type_oid,
 													 bool force_array_type,
 													 bool include_multirange_type);
+static void binary_upgrade_dump_toast_dictionaries(Archive *fout,
+												   PQExpBuffer q,
+												   const TableInfo *tbinfo,
+												   const char *qualrelname);
 static void binary_upgrade_set_type_oids_by_rel(Archive *fout,
 												PQExpBuffer upgrade_buffer,
 												const TableInfo *tbinfo);
@@ -5838,6 +5846,68 @@ binary_upgrade_set_type_oids_by_type_oid(Archive *fout,
 	destroyPQExpBuffer(upgrade_query);
 }
 
+/*
+ * bsearch() comparator for binaryUpgradeDictRelids
+ */
+static int
+DictRelidCmp(const void *p1, const void *p2)
+{
+	return pg_cmp_u32(*(const Oid *) p1, *(const Oid *) p2);
+}
+
+/*
+ * Emit calls restoring the compression dictionaries of a table, with their
+ * OIDs, for pg_upgrade.  Dictionaries are identified by physical column
+ * number, which binary upgrade preserves, so that those of dropped columns
+ * whose values are still on disk are carried over too.
+ *
+ * Few tables have dictionaries, so collectBinaryUpgradeClassOids() collects
+ * the OIDs of those that do, and only they are queried here.
+ */
+static void
+binary_upgrade_dump_toast_dictionaries(Archive *fout, PQExpBuffer q,
+									   const TableInfo *tbinfo,
+									   const char *qualrelname)
+{
+	PQExpBuffer query;
+	PGresult   *res;
+	Oid			relid = tbinfo->dobj.catId.oid;
+
+	if (nbinaryUpgradeDictRelids == 0 ||
+		bsearch(&relid, binaryUpgradeDictRelids, nbinaryUpgradeDictRelids,
+				sizeof(Oid), DictRelidCmp) == NULL)
+		return;
+
+	query = createPQExpBuffer();
+	appendPQExpBuffer(query,
+					  "SELECT d.oid, d.tdattnum, d.tdcurrent, d.tdtrainrows, "
+					  "d.tdtraintime, d.tddict "
+					  "FROM pg_catalog.pg_toast_dictionary d "
+					  "WHERE d.tdrelid = '%u'::pg_catalog.oid "
+					  "ORDER BY d.oid",
+					  tbinfo->dobj.catId.oid);
+	res = ExecuteSqlQuery(fout, query->data, PGRES_TUPLES_OK);
+
+	for (int i = 0; i < PQntuples(res); i++)
+	{
+		appendPQExpBufferStr(q, "\n-- For binary upgrade, restore compression dictionary.\n");
+		appendPQExpBufferStr(q, "SELECT pg_catalog.binary_upgrade_add_toast_dictionary(");
+		appendStringLiteralAH(q, qualrelname, fout);
+		appendPQExpBuffer(q, "::pg_catalog.regclass, %s::pg_catalog.int2, '%s'::pg_catalog.oid, %s, ",
+						  PQgetvalue(res, i, 1),
+						  PQgetvalue(res, i, 0),
+						  PQgetvalue(res, i, 2)[0] == 't' ? "true" : "false");
+		appendPQExpBuffer(q, "%s::pg_catalog.int8, %s::pg_catalog.int8, ",
+						  PQgetvalue(res, i, 3),
+						  PQgetvalue(res, i, 4));
+		appendStringLiteralAH(q, PQgetvalue(res, i, 5), fout);
+		appendPQExpBufferStr(q, "::pg_catalog.bytea);\n");
+	}
+
+	PQclear(res);
+	destroyPQExpBuffer(query);
+}
+
 static void
 binary_upgrade_set_type_oids_by_rel(Archive *fout,
 									PQExpBuffer upgrade_buffer,
@@ -5905,6 +5975,21 @@ collectBinaryUpgradeClassOids(Archive *fout)
 	}
 
 	PQclear(res);
+
+	/* tables owning compression dictionaries */
+	if (fout->remoteVersion >= 200000)
+	{
+		res = ExecuteSqlQuery(fout,
+							  "SELECT DISTINCT tdrelid "
+							  "FROM pg_catalog.pg_toast_dictionary "
+							  "ORDER BY tdrelid",
+							  PGRES_TUPLES_OK);
+		nbinaryUpgradeDictRelids = PQntuples(res);
+		binaryUpgradeDictRelids = pg_malloc_array(Oid, nbinaryUpgradeDictRelids);
+		for (int i = 0; i < nbinaryUpgradeDictRelids; i++)
+			binaryUpgradeDictRelids[i] = atooid(PQgetvalue(res, i, 0));
+		PQclear(res);
+	}
 }
 
 static void
@@ -17955,6 +18040,15 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 					case 'l':
 						cmname = "lz4";
 						break;
+					case 'z':
+						cmname = "zstd";
+						break;
+					case 'd':
+						cmname = "zstd_dict";
+						break;
+					case 'e':
+						cmname = "lz4_dict";
+						break;
 					default:
 						cmname = NULL;
 						break;
@@ -18022,6 +18116,19 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 	if (tbinfo->forcerowsec)
 		appendPQExpBuffer(q, "\nALTER TABLE ONLY %s FORCE ROW LEVEL SECURITY;\n",
 						  qualrelname);
+
+	/*
+	 * pg_upgrade keeps the heap files, whose values embed the OIDs of the
+	 * dictionaries they were compressed with, so carry the dictionaries over
+	 * with their OIDs.  This must not depend on the columns' current
+	 * compression method: after SET COMPRESSION, existing values keep using
+	 * the old dictionaries until the table is rewritten.  A plain dump has no
+	 * compressed values and needs no dictionaries.
+	 */
+	if (dopt->binary_upgrade &&
+		(tbinfo->relkind == RELKIND_RELATION ||
+		 tbinfo->relkind == RELKIND_MATVIEW))
+		binary_upgrade_dump_toast_dictionaries(fout, q, tbinfo, qualrelname);
 
 	if (dopt->binary_upgrade)
 		binary_upgrade_extension_member(q, &tbinfo->dobj,

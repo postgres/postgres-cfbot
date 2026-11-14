@@ -28,6 +28,7 @@
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/heaptoast.h"
+#include "access/toast_compression.h"
 #include "access/toast_helper.h"
 #include "access/toast_internals.h"
 #include "utils/fmgroids.h"
@@ -341,20 +342,17 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 }
 
 
-/* ----------
- * toast_flatten_tuple -
- *
- *	"Flatten" a tuple to contain no out-of-line toasted fields.
- *	(This does not eliminate compressed or short-header datums.)
- *
- *	Note: we expect the caller already checked HeapTupleHasExternal(tup),
- *	so there is no need for a short-circuit path.
- * ----------
+/*
+ * Workhorse for toast_flatten_tuple() and toast_flatten_tuple_for_wal().
+ * With keep_dict, values compressed in-line with a dictionary are left as
+ * they are, and NULL is returned if no field needed fetching.
  */
-HeapTuple
-toast_flatten_tuple(HeapTuple tup, TupleDesc tupleDesc)
+static HeapTuple
+toast_flatten_tuple_internal(HeapTuple tup, TupleDesc tupleDesc,
+							 bool keep_dict)
 {
 	HeapTuple	new_tuple;
+	bool		changed = false;
 	int			numAttrs = tupleDesc->natts;
 	int			i;
 	Datum		toast_values[MaxTupleAttributeNumber];
@@ -379,14 +377,19 @@ toast_flatten_tuple(HeapTuple tup, TupleDesc tupleDesc)
 			varlena    *new_value;
 
 			new_value = (varlena *) DatumGetPointer(toast_values[i]);
-			if (VARATT_IS_EXTERNAL(new_value))
+			if (VARATT_IS_EXTERNAL(new_value) ||
+				(!keep_dict && VARATT_IS_COMPRESSED_DICT(new_value)))
 			{
 				new_value = detoast_external_attr(new_value);
 				toast_values[i] = PointerGetDatum(new_value);
 				toast_free[i] = true;
+				changed = true;
 			}
 		}
 	}
+
+	if (keep_dict && !changed)
+		return NULL;
 
 	/*
 	 * Form the reconfigured tuple.
@@ -429,6 +432,42 @@ toast_flatten_tuple(HeapTuple tup, TupleDesc tupleDesc)
 			pfree(DatumGetPointer(toast_values[i]));
 
 	return new_tuple;
+}
+
+/* ----------
+ * toast_flatten_tuple -
+ *
+ *	"Flatten" a tuple to contain no out-of-line toasted fields, nor fields
+ *	compressed with a dictionary, which depend on catalog state of the column
+ *	they belong to.  (This does not eliminate other compressed or
+ *	short-header datums.)
+ *
+ *	Note: we expect the caller already checked HeapTupleHasExternal(tup),
+ *	so there is no need for a short-circuit path.
+ * ----------
+ */
+HeapTuple
+toast_flatten_tuple(HeapTuple tup, TupleDesc tupleDesc)
+{
+	return toast_flatten_tuple_internal(tup, tupleDesc, false);
+}
+
+/* ----------
+ * toast_flatten_tuple_for_wal -
+ *
+ *	Like toast_flatten_tuple(), for a tuple to be WAL-logged for logical
+ *	decoding (the old tuple of an UPDATE or DELETE), but leaving fields
+ *	compressed in-line with a dictionary as they are, since logical decoding
+ *	reads those with the catalog as of the change, which still has their
+ *	dictionary; it cannot read the TOAST table of a user table, which is why
+ *	out-of-line fields must be fetched.  Returns NULL if the tuple needs no
+ *	change.
+ * ----------
+ */
+HeapTuple
+toast_flatten_tuple_for_wal(HeapTuple tup, TupleDesc tupleDesc)
+{
+	return toast_flatten_tuple_internal(tup, tupleDesc, true);
 }
 
 
@@ -604,7 +643,8 @@ toast_build_flattened_tuple(TupleDesc tupleDesc,
 			varlena    *new_value;
 
 			new_value = (varlena *) DatumGetPointer(new_values[i]);
-			if (VARATT_IS_EXTERNAL(new_value))
+			if (VARATT_IS_EXTERNAL(new_value) ||
+				VARATT_IS_COMPRESSED_DICT(new_value))
 			{
 				new_value = detoast_external_attr(new_value);
 				new_values[i] = PointerGetDatum(new_value);

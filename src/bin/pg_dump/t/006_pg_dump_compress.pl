@@ -454,6 +454,24 @@ my %tests = (
 		like => {%full_runs},
 	},
 
+	'CREATE TABLE test_compression_zstd' => {
+		create_order => 4,
+		create_sql => 'CREATE TABLE test_compression_zstd (
+						   col1 int,
+						   col2 text COMPRESSION zstd
+					   );',
+		regexp => qr/^
+			\QCREATE TABLE public.test_compression_zstd (\E\n
+			\s+\Qcol1 integer,\E\n
+			\s+\Qcol2 text\E\n
+			\);\n
+			.*
+			\QALTER TABLE ONLY public.test_compression_zstd ALTER COLUMN col2 SET COMPRESSION zstd;\E\n
+			/xms,
+		compile_option => 'zstd',
+		like => {%full_runs},
+	},
+
 	# Create a large object so we can test compression of blobs.toc
 	'LO create (using lo_from_bytea)' => {
 		create_order => 50,

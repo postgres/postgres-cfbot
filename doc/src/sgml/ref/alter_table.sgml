@@ -382,9 +382,9 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
     <term><literal>RESET ( <replaceable class="parameter">attribute_option</replaceable> [, ... ] )</literal></term>
     <listitem>
      <para>
-      This form sets or resets per-attribute options.  Currently, the only
-      defined per-attribute options are <literal>n_distinct</literal> and
-      <literal>n_distinct_inherited</literal>, which override the
+      This form sets or resets per-attribute options.  Two of the defined
+      per-attribute options, <literal>n_distinct</literal> and
+      <literal>n_distinct_inherited</literal>, override the
       number-of-distinct-values estimates made by subsequent
       <link linkend="sql-analyze"><command>ANALYZE</command></link>
       operations. <literal>n_distinct</literal> affects the statistics for the
@@ -403,6 +403,37 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       time.  For more information on the use of statistics by the
       <productname>PostgreSQL</productname> query planner, refer to
       <xref linkend="planner-stats"/>.
+     </para>
+     <para>
+      Three further per-attribute options control automatic
+      <link linkend="storage-toast">TOAST</link> compression dictionary
+      evolution, and apply only to columns that use a dictionary compression
+      method (<literal>zstd_dict</literal> or <literal>lz4_dict</literal>).
+      <literal>dictionary_evolution</literal> (boolean, default
+      <literal>false</literal>) enables, for the column, retraining of its
+      compression dictionary from the sample gathered by a subsequent
+      <link linkend="sql-analyze"><command>ANALYZE</command></link>; a newly
+      trained dictionary is adopted only if it wins a held-out size test by
+      the margin set by <xref linkend="guc-dictionary-evolution-min-gain"/>.
+      <literal>dictionary_evolution_growth</literal> (floating point, default
+      <literal>2.0</literal>, minimum <literal>1.0</literal>) is the factor by
+      which the column's live-row count must grow since the current dictionary
+      was trained, or since a retrained candidate last failed to win, before
+      retraining is considered.
+      <literal>dictionary_evolution_min_rows</literal> (integer, default
+      <literal>10000</literal>) is a floor below which the column is never
+      retrained.  Like other per-attribute options, these are not inherited,
+      so on a partitioned table they must be set on the leaf partitions.
+     </para>
+     <para>
+      Retraining is triggered by the growth of the table, so data that
+      changes in place without the table growing does not trigger it; run
+      <function>pg_train_toast_dictionary</function> for that case.
+      <command>TRUNCATE</command> resets the baseline, so the table's
+      growth is measured again from its new contents.  Retraining also
+      happens in the <command>ANALYZE</command> that autovacuum runs, unless
+      <xref linkend="guc-dictionary-evolution-autovacuum"/> is off, and
+      never in a read-only transaction.
      </para>
      <para>
       Changing per-attribute options acquires a
@@ -464,13 +495,25 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       its existing compression method, rather than being recompressed with the
       compression method of the target column.
       The supported compression
-      methods are <literal>pglz</literal> and <literal>lz4</literal>.
-      (<literal>lz4</literal> is available only if <option>--with-lz4</option>
-      was used when building <productname>PostgreSQL</productname>.)  In
+      methods are <literal>pglz</literal>, <literal>lz4</literal>, and
+      <literal>zstd</literal>.  (<literal>lz4</literal> and
+      <literal>zstd</literal> are available only if
+      <option>--with-lz4</option> or <option>--with-zstd</option>,
+      respectively, was used when building
+      <productname>PostgreSQL</productname>.)  In
       addition, <replaceable class="parameter">compression_method</replaceable>
       can be <literal>default</literal>, which selects the default behavior of
       consulting the <xref linkend="guc-default-toast-compression"/> setting
       at the time of data insertion to determine the method to use.
+     </para>
+     <para>
+      <literal>zstd_dict</literal> is <literal>zstd</literal> with a
+      compression dictionary trained for the column by
+      <function>pg_train_toast_dictionary</function>; until one is trained it
+      behaves like <literal>zstd</literal>.  <literal>lz4_dict</literal> is
+      the same arrangement for <literal>lz4</literal>.  Values compressed with
+      a dictionary are decompressed when copied to any other column or table.
+      See <link linkend="catalog-pg-toast-dictionary"><structname>pg_toast_dictionary</structname></link>.
      </para>
     </listitem>
    </varlistentry>

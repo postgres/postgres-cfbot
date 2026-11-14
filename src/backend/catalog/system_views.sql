@@ -277,6 +277,28 @@ CREATE VIEW pg_stats WITH (security_barrier) AS
 
 REVOKE ALL ON pg_statistic FROM public;
 
+-- dictionaries are built from column contents, so protect them as such
+REVOKE ALL ON pg_toast_dictionary FROM public;
+
+-- but let anyone who can read a column see its dictionaries' metadata
+CREATE VIEW pg_toast_dictionaries WITH (security_barrier) AS
+    SELECT
+        d.oid AS dictid,
+        n.nspname AS schemaname,
+        c.relname AS tablename,
+        a.attname AS attname,
+        d.tdcurrent AS is_current,
+        octet_length(d.tddict) AS dict_size,
+        d.tdtrainrows AS trained_rows,
+        CASE WHEN d.tdtraintime <> 0 THEN
+            to_timestamp(946684800 + d.tdtraintime / 1000000.0)
+        END AS trained_at
+    FROM pg_toast_dictionary d JOIN pg_class c ON (c.oid = d.tdrelid)
+         JOIN pg_attribute a ON (c.oid = a.attrelid AND a.attnum = d.tdattnum)
+         LEFT JOIN pg_namespace n ON (n.oid = c.relnamespace)
+    WHERE NOT a.attisdropped
+    AND has_column_privilege(c.oid, a.attnum, 'select');
+
 CREATE VIEW pg_stats_ext WITH (security_barrier) AS
     SELECT cn.nspname AS schemaname,
            c.relname AS tablename,

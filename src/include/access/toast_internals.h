@@ -18,6 +18,8 @@
 #include "utils/snapshot.h"
 
 extern Datum toast_compress_datum(Datum value, char cmethod);
+extern Datum toast_compress_datum_rel(Datum value, char cmethod, Relation rel,
+									  AttrNumber attnum);
 extern Oid	toast_get_valid_index(Oid toastoid, LOCKMODE lock);
 
 extern void toast_delete_datum(Relation rel, Datum value, bool is_speculative);
