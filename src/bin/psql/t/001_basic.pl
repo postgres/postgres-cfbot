@@ -133,23 +133,69 @@ NOTIFY foo, 'bar';",
 	qr/^Asynchronous notification "foo" with payload "bar" received from server process with PID \d+\.$/,
 	'notification with payload');
 
-# test behavior and output on server crash
+# Test behavior and output when the server closes the connection with a FATAL
+# error.  Because the server told us it was closing the connection, we should
+# show its message verbatim and must not append the generic "server closed the
+# connection unexpectedly" text, which would be both misleading and would hide
+# the server's own error from clients parsing it.
 my ($ret, $out, $err) = $node->psql('postgres',
 		"SELECT 'before' AS running;\n"
 	  . "SELECT pg_terminate_backend(pg_backend_pid());\n"
 	  . "SELECT 'AFTER' AS not_running;\n");
 
-is($ret, 2, 'server crash: psql exit code');
-like($out, qr/before/, 'server crash: output before crash');
-unlike($out, qr/AFTER/, 'server crash: no output after crash');
+is($ret, 2, 'FATAL termination: psql exit code');
+like($out, qr/before/, 'FATAL termination: output before termination');
+unlike($out, qr/AFTER/, 'FATAL termination: no output after termination');
 like(
 	$err,
 	qr/psql:<stdin>:2: FATAL:  terminating connection due to administrator command
-psql:<stdin>:2: server closed the connection unexpectedly
-	This probably means the server terminated abnormally
-	before or while processing the request.
 psql:<stdin>:2: error: connection to server was lost/,
-	'server crash: error message');
+	'FATAL termination: error message');
+unlike(
+	$err,
+	qr/server closed the connection unexpectedly/,
+	'FATAL termination: no bogus unexpected-closure message');
+
+# In contrast, when the backend genuinely crashes it has no chance to send a
+# message, so here psql *should* still fall back to the generic "server closed
+# the connection unexpectedly" report.  Use a dedicated node and a long-lived
+# psql session, since we need an established connection whose backend we can
+# SIGKILL out from under it.  background_psql() is unsuitable here: psql exits
+# once the connection is lost, so we drive the session with IPC::Run directly
+# and watch stderr with pump_until(), which tolerates psql exiting.
+my $crash_node = PostgreSQL::Test::Cluster->new('crash');
+$crash_node->init;
+$crash_node->start;
+
+my $crash_timeout = IPC::Run::timer($PostgreSQL::Test::Utils::timeout_default);
+my ($crash_stdin, $crash_stdout, $crash_stderr) = ('', '', '');
+my $crash_psql = IPC::Run::start(
+	[
+		'psql', '--no-psqlrc', '--quiet', '--no-align', '--tuples-only',
+		'--file' => '-',
+		'--dbname' => $crash_node->connstr('postgres')
+	],
+	'<' => \$crash_stdin,
+	'>' => \$crash_stdout,
+	'2>' => \$crash_stderr,
+	$crash_timeout);
+
+$crash_stdin .= "SELECT pg_backend_pid();\n";
+pump_until($crash_psql, $crash_timeout, \$crash_stdout, qr/[[:digit:]]+[\r\n]$/m);
+my $crash_pid = $crash_stdout;
+chomp $crash_pid;
+
+# SIGKILL leaves the backend no opportunity to tell the client anything.
+PostgreSQL::Test::Utils::system_or_bail('pg_ctl', 'kill', 'KILL', $crash_pid);
+
+# The next query notices the gone connection.
+$crash_stdin .= "SELECT 1;\n";
+ok( pump_until(
+		$crash_psql, $crash_timeout, \$crash_stderr,
+		qr/server closed the connection unexpectedly|could not send data to server|connection to server was lost/
+	),
+	'genuine crash: unexpected closure reported');
+$crash_psql->finish;
 
 # test \errverbose
 #
