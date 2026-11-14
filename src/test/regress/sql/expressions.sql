@@ -134,6 +134,138 @@ select return_text_input('a') not in ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i
 
 rollback;
 
+--
+-- Hashed ScalarArrayOpExpr with a non-Const array fixed for one execution
+--
+begin;
+
+create table saop_stab (i int);
+insert into saop_stab select g from generate_series(1, 20) g;
+
+-- a stable plpgsql function is never inlined, so the array stays non-Const
+create function saop_intarr(int[]) returns int[] as
+  $$ begin return $1; end $$ language plpgsql stable;
+
+-- 8 and 9 elements: below and at the threshold
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{1,2,3,4,5,6,7,8}'));
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{1,2,3,4,5,6,7,8,9}'));
+-- an operator inside the array
+select array_agg(i order by i) from saop_stab where i = any (saop_intarr('{1,2,3,4}') || saop_intarr('{5,6,7,8,9}'));
+
+-- empty array and NULL scalar: false for IN, true for NOT IN
+select x, x = any (saop_intarr('{}')) as "in",
+       x <> all (saop_intarr('{}')) as not_in
+from (values (1), (null)) v(x);
+
+-- NOT IN, with a NULL element, and on a short array (searched linearly)
+select count(*) from saop_stab where i <> all (saop_intarr('{1,2,3,4,5,6,7,8,9,null}'));
+select count(*) from saop_stab where i <> all (saop_intarr('{1,2,3}'));
+
+-- generic plan: $1 stays a Param; long, short, NULL and empty arrays
+set plan_cache_mode = force_generic_plan;
+prepare saop_p(int[]) as
+  select array_agg(i order by i) from saop_stab where i = any ($1);
+execute saop_p('{1,2,3,4,5,6,7,8,9,10}');
+execute saop_p('{11,12,13}');
+execute saop_p(null);
+execute saop_p('{}');
+deallocate saop_p;
+
+-- IN ($1, ..., $N) is an ArrayExpr of Params
+prepare saop_in(int,int,int,int,int,int,int,int,int,int) as
+  select array_agg(i order by i) from saop_stab
+  where i in ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10);
+execute saop_in(1,2,3,4,5,6,7,8,9,10);
+deallocate saop_in;
+
+-- $1::int[] cast
+prepare saop_cast(text) as
+  select array_agg(i order by i) from saop_stab where i = any ($1::int[]);
+execute saop_cast('{2,4,6,8,10,12,14,16,18,20}');
+deallocate saop_cast;
+-- soft error reporting (JSON DEFAULT ... ON ERROR): not hashed
+prepare saop_json(text) as
+  select json_value(jsonb '"x"', '$' returning int
+                    default textcat((5 = any ($1::int[]))::text, '1')::int on error);
+savepoint saop_json_error;
+execute saop_json('not an array');
+rollback to savepoint saop_json_error;
+deallocate saop_json;
+
+-- rescans of the inner side reuse the hash table
+set plan_cache_mode = force_generic_plan;
+prepare saop_rs(int[]) as
+  select d.x, s.c
+  from (values (1),(2),(3)) d(x)
+  cross join lateral
+    (select count(*) as c from saop_stab where i = any ($1) and i > d.x) s
+  order by d.x;
+explain (costs off) execute saop_rs('{1,2,3,4,5,6,7,8,9,10}');
+execute saop_rs('{1,2,3,4,5,6,7,8,9,10}');
+deallocate saop_rs;
+reset plan_cache_mode;
+
+-- two hashable ScalarArrayOpExprs in one qual
+prepare saop_two(int[], int[]) as
+  select array_agg(i order by i) from saop_stab where i = any ($1) or i = any ($2);
+execute saop_two('{1,2,3,4,5,6,7,8,9,10}', '{15,16,17,18,19,20,1,2,3,4}');
+deallocate saop_two;
+
+-- not hashed: an array that varies per row (a Var)
+select count(*) from saop_stab
+where i = any (array[i, -1, -2, -3, -4, -5, -6, -7, -8]);
+
+-- ... nor per group (an aggregate in HAVING)
+select i % 3 as g, count(*) from saop_stab
+group by i % 3
+having min(i) = any (array_agg(i))
+order by g;
+
+-- ... nor per rescan (an outer reference in a sub-select); compare with the
+-- 8-element array, which is never hashed
+select d.k,
+       (select count(*) from saop_stab
+        where i = any (array[d.k,d.k+1,d.k+2,d.k+3,d.k+4,d.k+5,d.k+6,d.k+7,d.k+8])) as ge9,
+       (select count(*) from saop_stab
+        where i = any (array[d.k,d.k+1,d.k+2,d.k+3,d.k+4,d.k+5,d.k+6,d.k+7])) as lt9
+from (values (1),(8),(15)) d(k)
+order by d.k;
+
+-- PL/pgSQL simple expressions are not hashed; NOT IN must still use "<>"
+create function saop_ne_all(x int, a int[]) returns bool language plpgsql
+  as $$ begin return x <> all (a); end $$;
+select saop_ne_all(11, '{1,2,3,4,5,6,7,8,9,10}'),
+       saop_ne_all(5, '{1,2,3,4,5,6,7,8,9,10}'),
+       saop_ne_all(5, '{11,12,13,14,15,16,17,18,19,20}');
+
+-- ... nor an array with merge_action()
+create table saop_merge (id int);
+insert into saop_merge values (1);
+with m as (
+  merge into saop_merge t using (values (1), (2)) s(id) on t.id = s.id
+    when matched then update set id = s.id
+    when not matched then insert values (s.id)
+    returning merge_action() as action,
+              'INSERT' = any (array[merge_action(), 'a', 'b', 'c', 'd', 'e',
+                                    'f', 'g', 'h', 'i']) as is_insert)
+select action, is_insert from m order by action;
+
+-- ... nor one with a set-returning function
+select 'b' = any (regexp_matches('abcdefghijklmnopqrstuvwxyz',
+                                 '(.)(.)(.)(.)(.)(.)(.)(.)(.)', 'g')) as has_b;
+
+-- ... nor one with OLD/NEW of a view's expression column
+create view saop_merge_v as
+  select id, saop_intarr('{1,2,3,4,5,6,7,8,9,10}') as arr from saop_merge;
+with m as (
+  merge into saop_merge_v t using (values (1), (3)) s(id) on t.id = s.id
+    when matched then update set id = s.id
+    when not matched then insert values (s.id)
+    returning merge_action() as action, 5 = any (old.arr) as old_has_5)
+select action, old_has_5 from m order by action;
+
+rollback;
+
 -- Test with non-strict equality function.
 -- We need to create our own type for this.
 
