@@ -12,22 +12,17 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres_fe.h"
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "compress_gzip.h"
+#include "fe_utils/gzip.h"
 #include "pg_backup_utils.h"
 
 #ifdef HAVE_LIBZ
 #include <zlib.h>
 
-/*
- * We don't use the gzgetc() macro, because zlib's configuration logic is not
- * robust enough to guarantee that the macro will have the same ideas about
- * struct field layout as the library itself does; see for example
- * https://gnats.netbsd.org/cgi-bin/query-pr-single.pl?number=59711
- * Instead, #undef the macro and fall back to the underlying function.
- */
-#undef gzgetc
+#define GZIP_BUFFER_SIZE 8192
 
 /*----------------------
  * Compressor API
@@ -261,45 +256,103 @@ InitCompressorGzip(CompressorState *cs,
  * Compress File API
  *----------------------
  */
+typedef struct GzipFileState
+{
+	bool		reading;
+	union
+	{
+		gzFile		gzfp;
+		struct
+		{
+			int			fd;
+			GzipDecompressor decoder;
+			char	   *input;
+			size_t		input_len;
+			size_t		input_pos;
+			char	   *output;
+			size_t		output_len;
+			size_t		output_pos;
+			bool		eof;
+			bool		done;
+		}			read;
+	};
+} GzipFileState;
 
+/*
+ * Use strict gzip parsing: empty physical files, plain input, and trailing
+ * non-member bytes are errors.  Valid empty and concatenated members work.
+ */
 static size_t
 Gzip_read(void *ptr, size_t size, CompressFileHandle *CFH)
 {
-	gzFile		gzfp = (gzFile) CFH->private_data;
-	int			gzret;
+	GzipFileState *state = (GzipFileState *) CFH->private_data;
+	size_t		copied = 0;
 
-	/* Reading zero bytes must be a no-op */
-	if (size == 0)
-		return 0;
-
-	gzret = gzread(gzfp, ptr, size);
-
-	/*
-	 * gzread returns zero on EOF as well as some error conditions, and less
-	 * than zero on other error conditions, so we need to inspect for EOF on
-	 * zero.
-	 */
-	if (gzret <= 0)
+	while (copied < size)
 	{
-		int			errnum;
-		const char *errmsg;
+		size_t		bytes;
 
-		if (gzret == 0 && gzeof(gzfp))
-			return 0;
+		if (state->read.output_pos == state->read.output_len)
+		{
+			/*
+			 * No buffered output remains; refill it unless decoding is
+			 * complete.
+			 */
+			size_t		consumed;
+			GzipDecompressResult result;
 
-		errmsg = gzerror(gzfp, &errnum);
+			if (state->read.done)
+				break;
 
-		pg_fatal("could not read from input file: %s",
-				 errnum == Z_ERRNO ? strerror(errno) : errmsg);
+			if (state->read.input_pos == state->read.input_len && !state->read.eof)
+			{
+				/* The input buffer is empty and EOF has not been reached */
+				ssize_t		readlen;
+
+				do
+				{
+					readlen = read(state->read.fd, state->read.input, GZIP_BUFFER_SIZE);
+					/* retry if a signal interrupts the read */
+				} while (readlen < 0 && errno == EINTR);
+
+				if (readlen < 0)
+					pg_fatal("could not read from input file: %m");
+				state->read.input_pos = 0;
+				state->read.input_len = readlen;
+				state->read.eof = readlen == 0;
+			}
+
+			/* Produce more decompressed output */
+			state->read.output_pos = 0;
+			result = gzip_decompressor_read(&state->read.decoder,
+											state->read.input + state->read.input_pos,
+											state->read.input_len - state->read.input_pos,
+											state->read.output, DEFAULT_IO_BUFFER_SIZE,
+											state->read.eof, &consumed,
+											&state->read.output_len);
+			state->read.input_pos += consumed;
+			if (result == GZIP_DECOMPRESS_ERROR)
+				pg_fatal("could not decompress data: %s", state->read.decoder.error);
+			state->read.done = result == GZIP_DECOMPRESS_DONE;
+
+			/* Headers and empty members may produce no output. */
+			if (state->read.output_len == 0)
+				continue;
+		}
+
+		bytes = Min(size - copied, state->read.output_len - state->read.output_pos);
+		memcpy((char *) ptr + copied, state->read.output + state->read.output_pos, bytes);
+		state->read.output_pos += bytes;
+		copied += bytes;
 	}
-
-	return (size_t) gzret;
+	return copied;
 }
 
 static void
 Gzip_write(const void *ptr, size_t size, CompressFileHandle *CFH)
 {
-	gzFile		gzfp = (gzFile) CFH->private_data;
+	GzipFileState *state = (GzipFileState *) CFH->private_data;
+	gzFile		gzfp = state->gzfp;
 	int			errnum;
 	const char *errmsg;
 
@@ -314,18 +367,10 @@ Gzip_write(const void *ptr, size_t size, CompressFileHandle *CFH)
 static int
 Gzip_getc(CompressFileHandle *CFH)
 {
-	gzFile		gzfp = (gzFile) CFH->private_data;
-	int			ret;
+	unsigned char ret;
 
-	errno = 0;
-	ret = gzgetc(gzfp);
-	if (ret == EOF)
-	{
-		if (!gzeof(gzfp))
-			pg_fatal("could not read from input file: %m");
-		else
-			pg_fatal("could not read from input file: end of file");
-	}
+	if (Gzip_read(&ret, 1, CFH) != 1)
+		pg_fatal("could not read from input file: end of file");
 
 	return ret;
 }
@@ -333,37 +378,71 @@ Gzip_getc(CompressFileHandle *CFH)
 static char *
 Gzip_gets(char *ptr, int size, CompressFileHandle *CFH)
 {
-	gzFile		gzfp = (gzFile) CFH->private_data;
+	int			i;
 
-	return gzgets(gzfp, ptr, size);
+	Assert(size > 0);
+	for (i = 0; i < size - 1; i++)
+	{
+		if (Gzip_read(&ptr[i], 1, CFH) != 1)
+			break;
+		if (ptr[i] == '\n')
+		{
+			i++;
+			break;
+		}
+	}
+	ptr[i] = '\0';
+	return i > 0 ? ptr : NULL;
 }
 
 static bool
 Gzip_close(CompressFileHandle *CFH)
 {
-	gzFile		gzfp = (gzFile) CFH->private_data;
+	GzipFileState *state = (GzipFileState *) CFH->private_data;
+	bool		ok = true;
 
+	if (state->reading)
+	{
+		char		buf[GZIP_BUFFER_SIZE];
+
+		/* Consume and validate any input the caller did not read. */
+		while (Gzip_read(buf, sizeof(buf), CFH) > 0)
+			;
+		if (!gzip_decompressor_end(&state->read.decoder))
+			pg_fatal("could not decompress data: %s", state->read.decoder.error);
+		pg_free(state->read.input);
+		pg_free(state->read.output);
+		if (close(state->read.fd) != 0)
+			ok = false;
+	}
+	else if (gzclose(state->gzfp) != Z_OK)
+		ok = false;
 	CFH->private_data = NULL;
-
-	return gzclose(gzfp) == Z_OK;
+	pg_free(state);
+	return ok;
 }
 
 static bool
 Gzip_eof(CompressFileHandle *CFH)
 {
-	gzFile		gzfp = (gzFile) CFH->private_data;
+	GzipFileState *state = (GzipFileState *) CFH->private_data;
 
-	return gzeof(gzfp) == 1;
+	return state->reading ?
+		(state->read.done && state->read.output_pos == state->read.output_len) :
+		gzeof(state->gzfp) == 1;
 }
 
 static const char *
 Gzip_get_error(CompressFileHandle *CFH)
 {
-	gzFile		gzfp = (gzFile) CFH->private_data;
+	GzipFileState *state = (GzipFileState *) CFH->private_data;
 	const char *errmsg;
 	int			errnum;
 
-	errmsg = gzerror(gzfp, &errnum);
+	if (state->reading)
+		return state->read.decoder.error ? state->read.decoder.error : "";
+
+	errmsg = gzerror(state->gzfp, &errnum);
 	if (errnum == Z_ERRNO)
 		errmsg = strerror(errno);
 
@@ -373,7 +452,8 @@ Gzip_get_error(CompressFileHandle *CFH)
 static bool
 Gzip_open(const char *path, int fd, const char *mode, CompressFileHandle *CFH)
 {
-	gzFile		gzfp;
+	GzipFileState *state;
+	gzFile		gzfp = NULL;
 	char		mode_compression[32];
 
 	if (CFH->compression_spec.level != Z_DEFAULT_COMPRESSION)
@@ -387,16 +467,36 @@ Gzip_open(const char *path, int fd, const char *mode, CompressFileHandle *CFH)
 	else
 		strcpy(mode_compression, mode);
 
-	if (fd >= 0)
+	state = pg_malloc0_object(GzipFileState);
+	state->reading = mode[0] == 'r';
+	if (state->reading)
+	{
+		state->read.fd = fd >= 0 ? dup(fd) : open(path, O_RDONLY | PG_BINARY, 0);
+		if (state->read.fd < 0)
+		{
+			pg_free(state);
+			return false;
+		}
+		if (!gzip_decompressor_init(&state->read.decoder))
+			pg_fatal("could not initialize compression library: %s",
+					 state->read.decoder.error);
+		state->read.input = pg_malloc(GZIP_BUFFER_SIZE);
+		state->read.output = pg_malloc(DEFAULT_IO_BUFFER_SIZE);
+	}
+	else if (fd >= 0)
 	{
 		int			dup_fd = dup(fd);
 
 		if (dup_fd < 0)
+		{
+			pg_free(state);
 			return false;
+		}
 		gzfp = gzdopen(dup_fd, mode_compression);
 		if (gzfp == NULL)
 		{
 			close(dup_fd);
+			pg_free(state);
 			return false;
 		}
 	}
@@ -404,10 +504,16 @@ Gzip_open(const char *path, int fd, const char *mode, CompressFileHandle *CFH)
 	{
 		gzfp = gzopen(path, mode_compression);
 		if (gzfp == NULL)
+		{
+			pg_free(state);
 			return false;
+		}
 	}
 
-	CFH->private_data = gzfp;
+	if (!state->reading)
+		state->gzfp = gzfp;
+
+	CFH->private_data = state;
 
 	return true;
 }

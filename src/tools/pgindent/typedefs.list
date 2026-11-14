@@ -1186,6 +1186,10 @@ GucStackState
 GucStringAssignHook
 GucStringCheckHook
 GzipCompressorState
+GzipDecompressResult
+GzipDecompressState
+GzipDecompressor
+GzipFileState
 HANDLE
 HASHACTION
 HASHBUCKET
