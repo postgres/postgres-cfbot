@@ -213,11 +213,23 @@
    First, <application>vacuumlo</application> builds a temporary table which contains all
    of the OIDs of the large objects in the selected database.  It then scans
    through all columns in the database that are of type
-   <type>oid</type> or <type>lo</type>, and removes matching entries from the temporary
-   table.  (Note: Only types with these names are considered; in particular,
-   domains over them are not considered.)  The remaining entries in the
-   temporary table identify orphaned LOs.  These are removed.
+   <type>oid</type> or <type>lo</type>, including domains, composite types, and arrays
+   containing these types. Matching entries are removed from the temporary table.
+   The remaining entries in the temporary table identify orphaned LOs.  These are removed.
   </para>
+
+  <caution>
+   <para>
+    Large object references stored in columns of other types, such as
+    <type>text</type> or <type>bigint</type>, are not recognized by
+    <application>vacuumlo</application> and will be treated as orphans,
+    resulting in data loss.  Using the <type>lo</type> type
+    from the <xref linkend="lo"/> extension is recommended for columns that
+    hold large object references, as it allows
+    <application>vacuumlo</application> to find them and the
+    <function>lo_manage</function> trigger to manage them.
+   </para>
+  </caution>
  </refsect1>
 
  <refsect1>
