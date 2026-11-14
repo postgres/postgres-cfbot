@@ -52,8 +52,8 @@ bool		ssl_loaded_verify_locations = false;
 char	   *SSLCipherSuites = NULL;
 char	   *SSLCipherList = NULL;
 
-/* GUC variable for default ECDH curve. */
-char	   *SSLECDHCurve;
+/* GUC variable for the named groups to use for TLS key exchange. */
+char	   *SSLNamedGroups;
 
 /* GUC variable: if false, prefer client ciphers */
 bool		SSLPreferServerCiphers;
