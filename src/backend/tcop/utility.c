@@ -1106,7 +1106,7 @@ ProcessUtilitySlow(ParseState *pstate,
 	ObjectAddress secondaryObject = InvalidObjectAddress;
 
 	/* All event trigger calls are done only when isCompleteQuery is true */
-	needCleanup = isCompleteQuery && EventTriggerBeginCompleteQuery();
+	needCleanup = isCompleteQuery && EventTriggerBeginCompleteQuery(parsetree);
 
 	/* PG_TRY block is to ensure we call EventTriggerEndCompleteQuery */
 	PG_TRY();
