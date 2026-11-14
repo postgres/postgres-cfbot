@@ -163,6 +163,8 @@ main(int argc, char *argv[])
 	pset.cur_cmd_source = stdin;
 	pset.cur_cmd_interactive = false;
 
+	pset.popt.n_decimals = -1;
+
 	/* We rely on unmentioned fields of pset.popt to start out 0/false/NULL */
 	pset.popt.topt.format = PRINT_ALIGNED;
 	pset.popt.topt.border = 1;
