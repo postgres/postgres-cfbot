@@ -24,6 +24,8 @@ typedef struct SharedExecutorInstrumentation SharedExecutorInstrumentation;
 typedef struct ParallelExecutorInfo
 {
 	PlanState  *planstate;		/* plan subtree we're running in parallel */
+	List	   *planstate_nodes;	/* all distinct nodes of that subtree,
+									 * from planstate_tree_collect */
 	ParallelContext *pcxt;		/* parallel context we're using */
 	BufferUsage *buffer_usage;	/* points to bufusage area in DSM */
 	WalUsage   *wal_usage;		/* walusage area in DSM */

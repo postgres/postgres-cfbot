@@ -334,6 +334,72 @@ explain (costs off)
      ->  Seq Scan on tenk2
 (4 rows)
 
+-- test instrumentation of a subplan shared by several expressions (here a
+-- hash clause and the hash keys derived from it), which the parallel-query
+-- walks must process only once
+set enable_nestloop = off;
+set enable_mergejoin = off;
+set enable_indexscan = off;
+set enable_indexonlyscan = off;
+set parallel_leader_participation = off;
+create function explain_parallel_shared_subplan() returns setof text
+language plpgsql as
+$$
+declare ln text;
+declare prev text;
+begin
+    for ln in
+        explain (analyze, timing off, summary off, costs off, buffers off)
+          select count(*) from tenk1 t1 join tenk1 t2
+            on t2.unique1 = case when t1.hundred not in
+               (select thousand from tenk2 order by twothousand limit 50)
+               then 1 else 2 end
+    loop
+        ln := regexp_replace(ln, 'actual rows=[0-9.]+ loops=[0-9]+',
+                             'actual rows=N loops=N');
+        ln := regexp_replace(ln, 'Memory: \S*', 'Memory: xxx');
+        ln := regexp_replace(ln, 'Memory Usage: \S*', 'Memory Usage: xxx');
+        -- the launched worker count and the number of per-worker "Sort
+        -- Method" lines vary with how many workers start and get rows;
+        -- normalize both so the test only confirms that per-worker sort
+        -- statistics are reported at all (they vanish without the fix)
+        ln := regexp_replace(ln, 'Workers Launched: \d+', 'Workers Launched: N');
+        ln := regexp_replace(ln, 'Worker \d+:', 'Worker N:');
+        if ln is distinct from prev then
+            return next ln;
+        end if;
+        prev := ln;
+    end loop;
+end;
+$$;
+select * from explain_parallel_shared_subplan();
+                                                 explain_parallel_shared_subplan                                                  
+----------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual rows=N loops=N)
+   ->  Gather (actual rows=N loops=N)
+         Workers Planned: 4
+         Workers Launched: N
+         ->  Partial Aggregate (actual rows=N loops=N)
+               ->  Parallel Hash Join (actual rows=N loops=N)
+                     Hash Cond: (CASE WHEN (NOT (ANY (t1.hundred = (hashed SubPlan any_1).col1))) THEN 1 ELSE 2 END = t2.unique1)
+                     ->  Parallel Seq Scan on tenk1 t1 (actual rows=N loops=N)
+                     ->  Parallel Hash (actual rows=N loops=N)
+                           Buckets: 16384  Batches: 1  Memory Usage: xxx
+                           ->  Parallel Seq Scan on tenk1 t2 (actual rows=N loops=N)
+                     SubPlan any_1
+                       ->  Limit (actual rows=N loops=N)
+                             ->  Sort (actual rows=N loops=N)
+                                   Sort Key: tenk2.twothousand
+                                   Worker N:  Sort Method: top-N heapsort  Memory: xxx
+                                   ->  Seq Scan on tenk2 (actual rows=N loops=N)
+(17 rows)
+
+drop function explain_parallel_shared_subplan();
+reset parallel_leader_participation;
+reset enable_indexscan;
+reset enable_indexonlyscan;
+reset enable_nestloop;
+reset enable_mergejoin;
 alter table tenk2 reset (parallel_workers);
 -- test parallel plan for a query containing initplan.
 set enable_indexscan = off;
