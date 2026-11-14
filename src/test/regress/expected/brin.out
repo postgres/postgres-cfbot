@@ -589,3 +589,76 @@ CREATE INDEX brin_insert_optimization_idx ON brin_insert_optimization USING brin
 UPDATE brin_insert_optimization SET a = a;
 REINDEX INDEX CONCURRENTLY brin_insert_optimization_idx;
 DROP TABLE brin_insert_optimization;
+-- a box with a NaN coordinate must not hide the other rows of its page
+-- range (bug #19705)
+CREATE TABLE brin_box_nan (v box);
+INSERT INTO brin_box_nan SELECT box '(0,0),(1,1)' FROM generate_series(1, 100);
+INSERT INTO brin_box_nan VALUES (box '(NaN,NaN),(0,0)');
+CREATE INDEX brin_box_nan_idx ON brin_box_nan USING brin (v);
+SET enable_seqscan = off;
+SELECT count(*) FROM brin_box_nan WHERE v && box '(-2,-2),(2,2)';
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM brin_box_nan WHERE v @> point '(0.5,0.5)';
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM brin_box_nan WHERE v ~= box '(0,0),(1,1)';
+ count 
+-------
+   100
+(1 row)
+
+-- the NaN row is found too: unmergeable ranges are always scanned
+SELECT count(*) FROM brin_box_nan WHERE v ~= box '(NaN,NaN),(0,0)';
+ count 
+-------
+     1
+(1 row)
+
+-- also when it is the only value in its range
+TRUNCATE brin_box_nan;
+INSERT INTO brin_box_nan VALUES (box '(NaN,NaN),(0,0)');
+REINDEX INDEX brin_box_nan_idx;
+SELECT count(*) FROM brin_box_nan WHERE v ~= box '(NaN,NaN),(0,0)';
+ count 
+-------
+     1
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE brin_box_nan;
+-- An index built before box_inclusion_ops had a mergeable function can
+-- hold a NaN union.  Mimic one with an opclass that gets the function
+-- only after the build.
+CREATE OPERATOR FAMILY brin_box_nan_ops USING brin;
+CREATE OPERATOR CLASS brin_box_nan_ops FOR TYPE box USING brin
+  FAMILY brin_box_nan_ops AS
+    OPERATOR 3 &&,
+    FUNCTION 1 brin_inclusion_opcinfo(internal),
+    FUNCTION 2 brin_inclusion_add_value(internal, internal, internal, internal),
+    FUNCTION 3 brin_inclusion_consistent(internal, internal, internal),
+    FUNCTION 4 brin_inclusion_union(internal, internal, internal),
+    FUNCTION 11 bound_box(box, box);
+CREATE TABLE brin_box_nan (v box);
+INSERT INTO brin_box_nan SELECT box '(0,0),(1,1)' FROM generate_series(1, 100);
+INSERT INTO brin_box_nan VALUES (box '(NaN,NaN),(0,0)');
+CREATE INDEX brin_box_nan_idx ON brin_box_nan USING brin (v brin_box_nan_ops);
+ALTER OPERATOR FAMILY brin_box_nan_ops USING brin
+  ADD FUNCTION 12 (box, box) box_mergeable(box, box);
+\c -
+SET enable_seqscan = off;
+SELECT count(*) FROM brin_box_nan WHERE v && box '(-2,-2),(2,2)';
+ count 
+-------
+   100
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE brin_box_nan;
+DROP OPERATOR FAMILY brin_box_nan_ops USING brin;
