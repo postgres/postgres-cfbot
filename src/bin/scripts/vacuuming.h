@@ -54,6 +54,8 @@ typedef struct vacuumingOptions
 	bool		echo;
 	bool		quiet;
 	bool		dry_run;
+	bool		conn_fail_ok;	/* --continue: skip databases that cannot be
+								 * connected to (only valid with --all) */
 } vacuumingOptions;
 
 /* Valid values for vacuumingOptions->objfilter */
