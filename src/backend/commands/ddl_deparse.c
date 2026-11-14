@@ -50,6 +50,7 @@
 #include "catalog/pg_inherits.h"
 #include "commands/ddl_deparse.h"
 #include "commands/defrem.h"
+#include "commands/extension.h"
 #include "commands/sequence.h"
 #include "tcop/deparse_utility.h"
 #include "tcop/utility.h"
@@ -3382,22 +3383,79 @@ ddl_deparse_command_supported(const Node *parsetree)
 			return ((const AlterObjectSchemaStmt *) parsetree)->objectType ==
 				OBJECT_TABLE;
 
+		case T_DropStmt:
+			return ((const DropStmt *) parsetree)->removeType == OBJECT_TABLE;
+
 		default:
 			return false;
 	}
 }
 
 /*
+ * Return the tables a DROP TABLE named and dropped, from the dropped objects.
+ */
+static List *
+get_dropped_tables(List *dropped)
+{
+	List	   *result = NIL;
+
+	foreach_ptr(SQLDropObject, obj, dropped)
+	{
+		if (obj->original &&
+			obj->address.classId == RelationRelationId &&
+			obj->address.objectSubId == 0)
+			result = lappend(result, obj);
+	}
+
+	return result;
+}
+
+/*
+ * Deparse DROP TABLE.  The tables are gone, so the names come from the dropped
+ * objects; one that IF EXISTS didn't find is not among them.  CASCADE is
+ * emitted as written.
+ */
+static void
+deparse_DropStmt(JsonbInState *state, const DropStmt *stmt, List *tables)
+{
+	begin_jsonb_object(state);
+	append_jsonb_pair1(state, "fmt",
+					   jbv_str("DROP TABLE%{if_exists}s %{objects:, }D%{cascade}s"));
+
+	if (stmt->missing_ok)
+		new_jsonb_clause(state, "if_exists", " IF EXISTS");
+	else
+		new_jsonb_null(state, "if_exists");
+
+	insert_jsonb_key(state, "objects");
+	begin_jsonb_array(state);
+	foreach_ptr(SQLDropObject, obj, tables)
+	{
+		begin_jsonb_object(state);
+		append_jsonb_pair2(state,
+						   "schemaname", jbv_str(obj->schemaname),
+						   "objname", jbv_str(obj->objname));
+		end_jsonb_object(state);
+	}
+	end_jsonb_array(state);
+
+	if (stmt->behavior == DROP_CASCADE)
+		new_jsonb_clause(state, "cascade", " CASCADE");
+	else
+		new_jsonb_null(state, "cascade");
+
+	end_jsonb_object(state);
+}
+
+/*
  * Deparse a DDL command into a JSON blob.
  *
- * original_parsetree is the raw (untransformed) parse tree of the command.
- * cmds is the list of CollectedCommand its execution produced, which supplies
- * the OID of the created object.  The two must come from the same complete
- * query, as they do when both are taken from the event trigger state by the
- * same event trigger.  The result
- * is a JSON envelope of the form
- *
- *		{ "tag": <command tag>, "command": { <fmt object> } }
+ * original_parsetree is the raw parse tree of the command, cmds the
+ * CollectedCommands its execution produced, and dropped the SQLDropObjects for
+ * the objects it dropped.  All must come from the same complete query, as they
+ * do when taken with EventTriggerGetParsetree(),
+ * EventTriggerGetCollectedCommands() and EventTriggerGetDroppedObjects() in
+ * the same event trigger.
  *
  * The result is a JSON object with the command tag under "tag" and the
  * command under "command", which deparse_ddl_json_to_string() expands back
@@ -3405,19 +3463,18 @@ ddl_deparse_command_supported(const Node *parsetree)
  * pg_catalog, so it must be executed with pg_catalog first in the search_path,
  * as search_path = '' does.
  *
- * Returns NULL if the command did nothing: IF [NOT] EXISTS found nothing to
- * do for the table or for every subcommand of an ALTER TABLE.  Also returns
- * NULL for a command run by an extension script.  It is an error to pass a
- * command for which ddl_deparse_command_supported() returns false.
- *
- * The result is allocated in the caller's memory context.
+ * Returns NULL if the command did nothing, because IF [NOT] EXISTS found
+ * nothing to do, or was run by an extension script.  It is an error to pass a
+ * command for which ddl_deparse_command_supported() returns false.  The result
+ * is allocated in the caller's memory context.
  */
 char *
-deparse_ddl_command(const Node *original_parsetree, List *cmds)
+deparse_ddl_command(const Node *original_parsetree, List *cmds, List *dropped)
 {
 	MemoryContext oldcxt;
 	MemoryContext tmpcxt;
 	CollectedCommand *thiscmd = NULL;
+	List	   *dropped_tables = NIL;
 	char	   *command = NULL;
 	StringInfoData str;
 	Jsonb	   *jsonb;
@@ -3430,48 +3487,54 @@ deparse_ddl_command(const Node *original_parsetree, List *cmds)
 		elog(ERROR, "cannot deparse unsupported command of node type %d",
 			 (int) nodeTag(original_parsetree));
 
-	/*
-	 * Find the collected command that corresponds to the raw statement.  The
-	 * transformed parse trees in the collected commands are used only for
-	 * this.  All deparsing works on the raw tree and the catalogs.
-	 */
-	foreach(lc, cmds)
+	/* A DROP collects no command, only the objects it dropped */
+	if (IsA(original_parsetree, DropStmt))
 	{
-		CollectedCommand *cmd = (CollectedCommand *) lfirst(lc);
+		/* Commands run by extension scripts are not to be reproduced */
+		if (creating_extension)
+			return NULL;
 
-		if (nodeTag(original_parsetree) == T_AlterTableStmt)
+		/* IF EXISTS found none of the tables */
+		dropped_tables = get_dropped_tables(dropped);
+		if (dropped_tables == NIL)
+			return NULL;
+	}
+	else
+	{
+		/* Find the collected command for the statement */
+		foreach(lc, cmds)
 		{
-			if (cmd->type == SCT_AlterTable)
+			CollectedCommand *cmd = (CollectedCommand *) lfirst(lc);
+
+			if (nodeTag(original_parsetree) == T_AlterTableStmt)
 			{
+				if (cmd->type == SCT_AlterTable)
+				{
+					thiscmd = cmd;
+					break;
+				}
+			}
+			else if (cmd->type == SCT_Simple && cmd->parsetree != NULL &&
+					 nodeTag(cmd->parsetree) == nodeTag(original_parsetree))
+			{
+				/* CREATE TABLE, RENAME, and SET SCHEMA are SCT_Simple */
 				thiscmd = cmd;
 				break;
 			}
 		}
-		else if (cmd->type == SCT_Simple && cmd->parsetree != NULL &&
-				 nodeTag(cmd->parsetree) == nodeTag(original_parsetree))
-		{
-			/* CREATE TABLE, RENAME, and SET SCHEMA are SCT_Simple */
-			thiscmd = cmd;
-			break;
-		}
+
+		/* Nothing was collected or created, e.g. because of IF [NOT] EXISTS */
+		if (thiscmd == NULL)
+			return NULL;
+
+		if (thiscmd->type == SCT_Simple &&
+			!OidIsValid(thiscmd->d.simple.address.objectId))
+			return NULL;
+
+		/* Commands run by extension scripts are not to be reproduced */
+		if (thiscmd->in_extension)
+			return NULL;
 	}
-
-	/*
-	 * Nothing was collected.  For CREATE, the object was not created, for
-	 * example IF NOT EXISTS on an existing table, whose SCT_Simple carries an
-	 * invalid OID.  For ALTER, there is no SCT_AlterTable, for example IF
-	 * EXISTS on a missing table.  Either way there is nothing to reproduce.
-	 */
-	if (thiscmd == NULL)
-		return NULL;
-
-	if (thiscmd->type == SCT_Simple &&
-		!OidIsValid(thiscmd->d.simple.address.objectId))
-		return NULL;
-
-	/* Commands run by extension scripts are not to be reproduced */
-	if (thiscmd->in_extension)
-		return NULL;
 
 	/* Do the work in a temporary context, except for the output string. */
 	initStringInfo(&str);
@@ -3513,6 +3576,10 @@ deparse_ddl_command(const Node *original_parsetree, List *cmds)
 			break;
 		case T_AlterObjectSchemaStmt:
 			deparse_AlterObjectSchemaStmt(&state, thiscmd);
+			break;
+		case T_DropStmt:
+			deparse_DropStmt(&state, (const DropStmt *) original_parsetree,
+							 dropped_tables);
 			break;
 		default:
 			elog(ERROR, "unexpected node type %d in deparse",

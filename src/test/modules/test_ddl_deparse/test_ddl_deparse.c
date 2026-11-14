@@ -164,7 +164,8 @@ capture_deparsed_ddl(PG_FUNCTION_ARGS)
 		elog(ERROR, "multiple DDL deparse captures for a single statement");
 
 	json = deparse_ddl_command(EventTriggerGetParsetree(),
-							   EventTriggerGetCollectedCommands());
+							   EventTriggerGetCollectedCommands(),
+							   EventTriggerGetDroppedObjects());
 	if (json == NULL)
 		PG_RETURN_NULL();
 
@@ -315,6 +316,8 @@ noop_allowed(Node *stmt)
 			return ((RenameStmt *) stmt)->missing_ok;
 		case T_AlterObjectSchemaStmt:
 			return ((AlterObjectSchemaStmt *) stmt)->missing_ok;
+		case T_DropStmt:
+			return ((DropStmt *) stmt)->missing_ok;
 		default:
 			return false;
 	}
@@ -491,6 +494,7 @@ report_declined_command(Node *stmt, const char *queryString)
 		case T_AlterTableStmt:
 		case T_RenameStmt:
 		case T_AlterObjectSchemaStmt:
+		case T_DropStmt:
 			break;
 		default:
 			return;

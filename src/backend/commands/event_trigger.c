@@ -109,22 +109,6 @@ static EventTriggerQueryState *currentEventTriggerState = NULL;
 /* GUC parameter */
 bool		event_triggers = true;
 
-/* Support for dropped objects */
-typedef struct SQLDropObject
-{
-	ObjectAddress address;
-	const char *schemaname;
-	const char *objname;
-	const char *objidentity;
-	const char *objecttype;
-	List	   *addrnames;
-	List	   *addrargs;
-	bool		original;
-	bool		normal;
-	bool		istemp;
-	slist_node	next;
-} SQLDropObject;
-
 static void AlterEventTriggerOwner_internal(Relation rel,
 											HeapTuple tup,
 											Oid newOwnerId);
@@ -1785,6 +1769,29 @@ EventTriggerGetCollectedCommands(void)
 		return NIL;
 
 	return currentEventTriggerState->commandList;
+}
+
+/*
+ * Return the objects dropped by the current complete query so far, as a list
+ * of SQLDropObject in the order they were recorded.  Unlike
+ * pg_event_trigger_dropped_objects(), this can be called from any event
+ * trigger.  The list is allocated in the caller's memory context; its elements
+ * are valid only until the complete query ends.
+ */
+List *
+EventTriggerGetDroppedObjects(void)
+{
+	List	   *result = NIL;
+	slist_iter	iter;
+
+	if (!currentEventTriggerState)
+		return NIL;
+
+	/* The list is kept newest first */
+	slist_foreach(iter, &currentEventTriggerState->SQLDropList)
+		result = lcons(slist_container(SQLDropObject, next, iter.cur), result);
+
+	return result;
 }
 
 /*
