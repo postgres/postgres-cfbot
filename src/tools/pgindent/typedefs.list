@@ -1685,6 +1685,8 @@ LogicalRepBeginData
 LogicalRepCommitData
 LogicalRepCommitPreparedTxnData
 LogicalRepCtxStruct
+LogicalRepMessageData
+LogicalRepMessageHandle_hook_type
 LogicalRepMsgType
 LogicalRepPartMapEntry
 LogicalRepPreparedTxnData
