@@ -5092,8 +5092,11 @@ match_previous_words(int pattern_id,
 			 Matches("REINDEX", "(*)", "SCHEMA"))
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_schemas,
 								 "CONCURRENTLY");
-	else if (Matches("REINDEX", "SYSTEM|DATABASE") ||
-			 Matches("REINDEX", "(*)", "SYSTEM|DATABASE"))
+	else if (Matches("REINDEX", "SYSTEM") ||
+			 Matches("REINDEX", "(*)", "SYSTEM"))
+		COMPLETE_WITH_QUERY(Query_for_list_of_databases);
+	else if (Matches("REINDEX", "DATABASE") ||
+			 Matches("REINDEX", "(*)", "DATABASE"))
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_databases,
 								 "CONCURRENTLY");
 	else if (Matches("REINDEX", "TABLE", "CONCURRENTLY") ||
@@ -5105,8 +5108,8 @@ match_previous_words(int pattern_id,
 	else if (Matches("REINDEX", "SCHEMA", "CONCURRENTLY") ||
 			 Matches("REINDEX", "(*)", "SCHEMA", "CONCURRENTLY"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_schemas);
-	else if (Matches("REINDEX", "SYSTEM|DATABASE", "CONCURRENTLY") ||
-			 Matches("REINDEX", "(*)", "SYSTEM|DATABASE", "CONCURRENTLY"))
+	else if (Matches("REINDEX", "DATABASE", "CONCURRENTLY") ||
+			 Matches("REINDEX", "(*)", "DATABASE", "CONCURRENTLY"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_databases);
 	else if (HeadMatches("REINDEX", "(*") &&
 			 !HeadMatches("REINDEX", "(*)"))
