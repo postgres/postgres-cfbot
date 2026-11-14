@@ -132,6 +132,19 @@ SELECT pg_current_xact_id() \gset
 SELECT pg_current_xact_id_if_assigned() IS NOT DISTINCT FROM xid8 :'pg_current_xact_id';
 COMMIT;
 
+-- test pg_current_vxact_id
+BEGIN;
+SELECT pg_current_vxact_id() IS NOT NULL AS vxid_assigned;
+SELECT pg_current_vxact_id() ~ '^\d+/\d+$' AS vxid_format_ok;
+SELECT pg_current_vxact_id() AS vxid1 \gset
+SELECT pg_current_vxact_id() = :'vxid1' AS vxid_stable;
+COMMIT;
+-- start new transaction, vxid should change
+BEGIN;
+SELECT pg_current_vxact_id() AS vxid2 \gset
+SELECT :'vxid2' <> :'vxid1' AS vxid_changed;
+COMMIT;
+
 -- test xid status functions
 BEGIN;
 SELECT pg_current_xact_id() AS committed \gset
