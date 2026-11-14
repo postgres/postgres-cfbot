@@ -2855,6 +2855,18 @@ match_previous_words(int pattern_id,
 		set_completion_reference(prev7_wd);
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_unique_index_of_table);
 	}
+	/* ALTER TABLE xxx ADD [CONSTRAINT yyy] CHECK (...) constraint options */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "CHECK", "(*)") ||
+			 Matches("ALTER", "TABLE", MatchAny, "ADD", "CONSTRAINT", MatchAny, "CHECK", "(*)"))
+		COMPLETE_WITH("NOT ENFORCED", "NOT VALID", "NO INHERIT");
+	/* ALTER TABLE xxx ADD [CONSTRAINT yyy] CHECK (...) NOT */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "CHECK", "(*)", "NOT") ||
+			 Matches("ALTER", "TABLE", MatchAny, "ADD", "CONSTRAINT", MatchAny, "CHECK", "(*)", "NOT"))
+		COMPLETE_WITH("ENFORCED", "VALID");
+	/* ALTER TABLE xxx ADD [CONSTRAINT yyy] CHECK (...) NO */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ADD", "CHECK", "(*)", "NO") ||
+			 Matches("ALTER", "TABLE", MatchAny, "ADD", "CONSTRAINT", MatchAny, "CHECK", "(*)", "NO"))
+		COMPLETE_WITH("INHERIT");
 	/* ALTER TABLE xxx ENABLE */
 	else if (Matches("ALTER", "TABLE", MatchAny, "ENABLE"))
 		COMPLETE_WITH("ALWAYS", "REPLICA", "ROW LEVEL SECURITY", "RULE",
@@ -2934,6 +2946,32 @@ match_previous_words(int pattern_id,
 		set_completion_reference(prev3_wd);
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_constraint_of_table);
 	}
+	/* ALTER TABLE <sth> ALTER CONSTRAINT <constraint> options */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "CONSTRAINT", MatchAny))
+		COMPLETE_WITH("DEFERRABLE", "NOT DEFERRABLE", "ENFORCED", "NOT ENFORCED",
+					  "INITIALLY DEFERRED", "INITIALLY IMMEDIATE",
+					  "INHERIT", "NO INHERIT");
+	/* ALTER TABLE <sth> ALTER CONSTRAINT <constraint> NOT */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "CONSTRAINT", MatchAny, "NOT"))
+		COMPLETE_WITH("DEFERRABLE", "ENFORCED");
+	/* ALTER TABLE <sth> ALTER CONSTRAINT <constraint> DEFERRABLE */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "CONSTRAINT", MatchAny, "DEFERRABLE"))
+		COMPLETE_WITH("INITIALLY DEFERRED", "INITIALLY IMMEDIATE");
+	/*
+	 * ALTER TABLE <sth> ALTER CONSTRAINT <constraint> NOT DEFERRABLE
+	 *
+	 * Only INITIALLY IMMEDIATE is valid here: a constraint declared NOT
+	 * DEFERRABLE cannot also be INITIALLY DEFERRED.
+	 */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "CONSTRAINT", MatchAny, "NOT", "DEFERRABLE"))
+		COMPLETE_WITH("INITIALLY IMMEDIATE");
+	/* ALTER TABLE <sth> ALTER CONSTRAINT <constraint> NO */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "CONSTRAINT", MatchAny, "NO"))
+		COMPLETE_WITH("INHERIT");
+	/* ALTER TABLE <sth> ALTER CONSTRAINT <constraint> [DEFERRABLE] INITIALLY */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "CONSTRAINT", MatchAny, "INITIALLY") ||
+			 Matches("ALTER", "TABLE", MatchAny, "ALTER", "CONSTRAINT", MatchAny, "DEFERRABLE", "INITIALLY"))
+		COMPLETE_WITH("DEFERRED", "IMMEDIATE");
 	/* ALTER TABLE <sth> VALIDATE CONSTRAINT <non-validated constraint> */
 	else if (Matches("ALTER", "TABLE", MatchAny, "VALIDATE", "CONSTRAINT"))
 	{
