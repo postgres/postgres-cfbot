@@ -710,3 +710,205 @@ select null::int[] union all select null::int[] union all select null::bigint[];
 explain (costs off)
 select * from tenk1 t
 join (select ten from tenk1 union select ten from onek) s on s.ten = t.unique1;
+
+--
+-- UNION DISTINCT ON
+--
+
+CREATE TABLE union_distinct_u1 (a int, b int);
+CREATE TABLE union_distinct_u2 (a int, b int);
+INSERT INTO union_distinct_u1 VALUES (1, 10), (2, 20);
+INSERT INTO union_distinct_u2 VALUES (1, 100), (3, 30);
+
+-- UNION DISTINCT ON without ORDER BY
+SELECT a, b FROM union_distinct_u1 UNION DISTINCT ON (a) SELECT a, b FROM union_distinct_u2 ORDER BY a;
+
+-- UNION DISTINCT ON with ORDER BY (DESC)
+SELECT a, b FROM union_distinct_u1 UNION DISTINCT ON (a ORDER BY b DESC) SELECT a, b FROM union_distinct_u2 ORDER BY a;
+
+-- UNION DISTINCT ON with ORDER BY (ASC)
+SELECT a, b FROM union_distinct_u1 UNION DISTINCT ON (a ORDER BY b ASC) SELECT a, b FROM union_distinct_u2 ORDER BY a;
+
+-- Outer ORDER BY is decoupled from UNION DISTINCT ON tie-breaking
+SELECT a, b FROM union_distinct_u1
+UNION DISTINCT ON (a ORDER BY b DESC)
+SELECT a, b FROM union_distinct_u2
+ORDER BY b ASC;
+
+-- Duplicate keys in UNION DISTINCT ON and inline ORDER BY repeating DISTINCT ON key
+SELECT a, b FROM union_distinct_u1
+UNION DISTINCT ON (a, a ORDER BY a DESC, b DESC, b ASC)
+SELECT a, b FROM union_distinct_u2
+ORDER BY a;
+
+-- Test subquery pushdown safety with UNION DISTINCT ON:
+-- Qual on non-DISTINCT ON column (b < 50) must NOT be pushed down below UNION DISTINCT ON
+SELECT * FROM (
+    SELECT a, b FROM union_distinct_u1
+    UNION DISTINCT ON (a ORDER BY b DESC)
+    SELECT a, b FROM union_distinct_u2
+) s WHERE b > 15 ORDER BY a;
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM (
+    SELECT a, b FROM union_distinct_u1
+    UNION DISTINCT ON (a ORDER BY b DESC)
+    SELECT a, b FROM union_distinct_u2
+) s WHERE b < 50 ORDER BY a;
+
+SELECT * FROM (
+    SELECT a, b FROM union_distinct_u1
+    UNION DISTINCT ON (a ORDER BY b DESC)
+    SELECT a, b FROM union_distinct_u2
+) s WHERE b < 50 ORDER BY a;
+
+-- Qual on DISTINCT ON key column (a = 1) IS safe to push down into UNION branches
+EXPLAIN (COSTS OFF)
+SELECT * FROM (
+    SELECT a, b FROM union_distinct_u1
+    UNION DISTINCT ON (a ORDER BY b DESC)
+    SELECT a, b FROM union_distinct_u2
+) s WHERE a = 1;
+
+SELECT * FROM (
+    SELECT a, b FROM union_distinct_u1
+    UNION DISTINCT ON (a ORDER BY b DESC)
+    SELECT a, b FROM union_distinct_u2
+) s WHERE a = 1;
+
+-- Nested 3-way set-operation must not flatten incompatible DISTINCT ON clauses
+(SELECT a, b FROM union_distinct_u1
+ UNION DISTINCT ON (a ORDER BY b DESC)
+ SELECT a, b FROM union_distinct_u2)
+UNION
+SELECT 1, 50
+ORDER BY a, b;
+
+-- View deparsing for UNION DISTINCT ON (including non-root setop parenthesization)
+CREATE VIEW union_distinct_view AS
+SELECT a, b FROM union_distinct_u1
+UNION DISTINCT ON (a ORDER BY b DESC)
+SELECT a, b FROM union_distinct_u2;
+
+SELECT pg_get_viewdef('union_distinct_view', true);
+SELECT * FROM union_distinct_view ORDER BY a;
+DROP VIEW union_distinct_view;
+
+CREATE VIEW union_distinct_nested_view AS
+(SELECT a, b FROM union_distinct_u1
+ UNION DISTINCT ON (a ORDER BY b DESC)
+ SELECT a, b FROM union_distinct_u2)
+UNION ALL
+SELECT 4, 40;
+
+SELECT pg_get_viewdef('union_distinct_nested_view', true);
+SELECT * FROM union_distinct_nested_view ORDER BY a, b;
+DROP VIEW union_distinct_nested_view;
+
+-- Positional and non-initial key order in UNION DISTINCT ON under Sort->Unique and HashAgg
+SET enable_hashagg TO OFF;
+SELECT a, b FROM union_distinct_u1
+UNION DISTINCT ON (1 ORDER BY a DESC, b DESC)
+SELECT a, b FROM union_distinct_u2;
+
+SELECT a, b, 100 AS c FROM union_distinct_u1
+UNION DISTINCT ON (a, b ORDER BY b, c, a)
+SELECT a, b, 200 AS c FROM union_distinct_u1
+ORDER BY a, b;
+RESET enable_hashagg;
+
+-- Error cases: expressions not in targetlist are disallowed in UNION DISTINCT ON
+SELECT a, b FROM union_distinct_u1
+UNION DISTINCT ON (a + 1)
+SELECT a, b FROM union_distinct_u2;
+
+SELECT a, b FROM union_distinct_u1
+UNION DISTINCT ON (a ORDER BY b + 1)
+SELECT a, b FROM union_distinct_u2;
+
+DROP TABLE union_distinct_u1, union_distinct_u2;
+
+-- MergeAppend -> Unique path when children provide pre-sorted paths
+CREATE TABLE union_idx_u1 (a int, b int, c text);
+CREATE TABLE union_idx_u2 (a int, b int, c text);
+INSERT INTO union_idx_u1 SELECT i % 10, i, 'u1_' || i FROM generate_series(1, 100) i;
+INSERT INTO union_idx_u2 SELECT i % 10, i * 2, 'u2_' || i FROM generate_series(1, 100) i;
+CREATE INDEX union_idx_u1_ab ON union_idx_u1 (a ASC, b DESC);
+CREATE INDEX union_idx_u2_ab ON union_idx_u2 (a ASC, b DESC);
+ANALYZE union_idx_u1, union_idx_u2;
+
+SET enable_hashagg TO OFF;
+SET enable_seqscan TO OFF;
+EXPLAIN (COSTS OFF)
+SELECT a, b, c FROM union_idx_u1
+UNION DISTINCT ON (a ORDER BY b DESC)
+SELECT a, b, c FROM union_idx_u2
+ORDER BY a;
+
+SELECT a, b, c FROM union_idx_u1
+UNION DISTINCT ON (a ORDER BY b DESC)
+SELECT a, b, c FROM union_idx_u2
+ORDER BY a;
+RESET enable_seqscan;
+RESET enable_hashagg;
+
+DROP TABLE union_idx_u1, union_idx_u2;
+
+-- Recursive CTE Shortest Path (Pruning)
+CREATE TABLE union_distinct_edges (src int, dst int, cost int);
+INSERT INTO union_distinct_edges VALUES (1, 2, 10), (1, 3, 20), (1, 3, 2), (3, 2, 3), (2, 4, 1);
+
+EXPLAIN (COSTS OFF)
+WITH RECURSIVE search(node, cost, path) AS (
+    SELECT 1 AS node, 0 AS cost, ARRAY[1] AS path
+  UNION DISTINCT ON (node ORDER BY cost ASC)
+    SELECT e.dst, s.cost + e.cost, s.path || e.dst
+    FROM search s JOIN union_distinct_edges e ON s.node = e.src
+)
+SELECT * FROM search ORDER BY node;
+
+WITH RECURSIVE search(node, cost, path) AS (
+    SELECT 1 AS node, 0 AS cost, ARRAY[1] AS path
+  UNION DISTINCT ON (node ORDER BY cost ASC)
+    SELECT e.dst, s.cost + e.cost, s.path || e.dst
+    FROM search s JOIN union_distinct_edges e ON s.node = e.src
+)
+SELECT * FROM search ORDER BY node;
+
+-- Recursive CTE with duplicate keys in non-recursive seed term (BUG-1)
+WITH RECURSIVE search_seed(node, cost, path) AS (
+    VALUES (1, 100, ARRAY[1, 999]), (1, 0, ARRAY[1]), (1, 50, ARRAY[1, 555])
+  UNION DISTINCT ON (1 ORDER BY 2 ASC)
+    SELECT e.dst, s.cost + e.cost, s.path || e.dst
+    FROM search_seed s JOIN union_distinct_edges e ON s.node = e.src
+)
+SELECT * FROM search_seed ORDER BY node;
+
+-- Recursive CTE with SEARCH and CYCLE clauses and UNION DISTINCT ON
+WITH RECURSIVE search_sc(node, cost) AS (
+    SELECT 1 AS node, 0 AS cost
+  UNION DISTINCT ON (node ORDER BY cost ASC)
+    SELECT e.dst, s.cost + e.cost
+    FROM search_sc s JOIN union_distinct_edges e ON s.node = e.src
+) SEARCH DEPTH FIRST BY node SET seq
+SELECT node, cost FROM search_sc ORDER BY node;
+
+WITH RECURSIVE cycle_sc(node, cost) AS (
+    SELECT 1 AS node, 0 AS cost
+  UNION DISTINCT ON (node ORDER BY cost ASC)
+    SELECT e.dst, s.cost + e.cost
+    FROM cycle_sc s JOIN union_distinct_edges e ON s.node = e.src
+) CYCLE node SET is_cycle USING path
+SELECT node, cost, is_cycle FROM cycle_sc ORDER BY node;
+
+-- Error case: recursive self-reference in UNION DISTINCT ON clause
+WITH RECURSIVE bad_rec(a) AS (
+    SELECT 1 AS a
+  UNION DISTINCT ON ((SELECT a FROM bad_rec))
+    SELECT 2 AS a
+)
+SELECT * FROM bad_rec;
+
+DROP TABLE union_distinct_edges;
+
+

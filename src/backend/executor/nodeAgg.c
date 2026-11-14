@@ -277,6 +277,7 @@
 #include "utils/memutils_memorychunk.h"
 #include "utils/syscache.h"
 #include "utils/tuplesort.h"
+#include "utils/sortsupport.h"
 
 /*
  * Control how many partitions are created when spilling HashAgg to
@@ -1420,10 +1421,13 @@ find_cols(AggState *aggstate, Bitmapset **aggregated, Bitmapset **unaggregated)
 	(void) find_cols_walker((Node *) agg->plan.targetlist, &context);
 	(void) find_cols_walker((Node *) agg->plan.qual, &context);
 
-	/* In some cases, grouping columns will not appear in the tlist */
+	/* In some cases, grouping or sort columns will not appear in the tlist */
 	for (int i = 0; i < agg->numCols; i++)
 		context.unaggregated = bms_add_member(context.unaggregated,
 											  agg->grpColIdx[i]);
+	for (int i = 0; i < agg->numSortCols; i++)
+		context.unaggregated = bms_add_member(context.unaggregated,
+											  agg->sortColIdx[i]);
 
 	*aggregated = context.aggregated;
 	*unaggregated = context.unaggregated;
@@ -1644,14 +1648,16 @@ find_hash_columns(AggState *aggstate)
 		 * cases where HashAggregate was generated as part of a semijoin or a
 		 * DISTINCT.
 		 */
-		maxCols = bms_num_members(colnos) + perhash->numCols;
+		maxCols = bms_num_members(colnos) + perhash->numCols + perhash->aggnode->numSortCols;
 
 		perhash->hashGrpColIdxInput = palloc_array(AttrNumber, maxCols);
 		perhash->hashGrpColIdxHash = palloc_array(AttrNumber, perhash->numCols);
 
-		/* Add all the grouping columns to colnos */
+		/* Add all the grouping and sort columns to colnos */
 		for (i = 0; i < perhash->numCols; i++)
 			colnos = bms_add_member(colnos, grpColIdx[i]);
+		for (i = 0; i < perhash->aggnode->numSortCols; i++)
+			colnos = bms_add_member(colnos, perhash->aggnode->sortColIdx[i]);
 
 		/*
 		 * First build mapping for columns directly hashed. These are the
@@ -1696,6 +1702,50 @@ find_hash_columns(AggState *aggstate)
 		perhash->hashslot =
 			ExecAllocTableSlot(&estate->es_tupleTable, hashDesc,
 							   &TTSOpsMinimalTuple, 0);
+
+		if (perhash->aggnode->numSortCols > 0)
+		{
+			AttrNumber *mappedSortColIdx;
+
+			perhash->hash_firstTupleSlot =
+				ExecAllocTableSlot(&estate->es_tupleTable, hashDesc,
+								   &TTSOpsMinimalTuple, 0);
+
+			/*
+			 * Map sortColIdx from the outer plan's targetlist attribute
+			 * numbers to the 1-based attribute numbers in hashDesc.
+			 */
+			mappedSortColIdx = palloc_array(AttrNumber, perhash->aggnode->numSortCols);
+			for (i = 0; i < perhash->aggnode->numSortCols; i++)
+			{
+				AttrNumber	orig_attno = perhash->aggnode->sortColIdx[i];
+				AttrNumber	hash_attno = InvalidAttrNumber;
+
+				for (int k = 0; k < perhash->numhashGrpCols; k++)
+				{
+					if (perhash->hashGrpColIdxInput[k] == orig_attno)
+					{
+						hash_attno = k + 1;
+						break;
+					}
+				}
+				Assert(hash_attno != InvalidAttrNumber);
+				mappedSortColIdx[i] = hash_attno;
+			}
+
+			perhash->sortKeys =
+				ExecPrepareTupleSortSupport(perhash->aggnode->numSortCols,
+											mappedSortColIdx,
+											perhash->aggnode->sortOperators,
+											perhash->aggnode->sortCollations,
+											perhash->aggnode->sortNullsFirst);
+			pfree(mappedSortColIdx);
+		}
+		else
+		{
+			perhash->hash_firstTupleSlot = NULL;
+			perhash->sortKeys = NULL;
+		}
 
 		list_free(hashTlist);
 		bms_free(colnos);
@@ -2009,7 +2059,25 @@ hash_agg_update_metrics(AggState *aggstate, bool from_tape, int npartitions)
 static void
 hash_create_memory(AggState *aggstate)
 {
+	Agg		   *node = (Agg *) aggstate->ss.ps.plan;
 	Size		maxBlockSize = ALLOCSET_DEFAULT_MAXSIZE;
+	bool		use_allocset = false;
+	ListCell   *lc;
+
+	if (node->numSortCols > 0)
+		use_allocset = true;
+	else
+	{
+		foreach(lc, node->chain)
+		{
+			Agg *chained_node = lfirst_node(Agg, lc);
+			if (chained_node->numSortCols > 0)
+			{
+				use_allocset = true;
+				break;
+			}
+		}
+	}
 
 	/*
 	 * The hashcontext's per-tuple memory will be used for byref transition
@@ -2033,15 +2101,9 @@ hash_create_memory(AggState *aggstate)
 	 * The hash entries themselves, which include the grouping key
 	 * (firstTuple) and pergroup data, are stored in the table context. The
 	 * bump allocator can be used because the entries are not freed until the
-	 * entire hash table is reset. The bump allocator is faster for
-	 * allocations and avoids wasting space on the chunk header or
-	 * power-of-two allocations.
+	 * entire hash table is reset, unless tie-breaking sort comparisons
+	 * (numSortCols > 0) may replace tuples of varying lengths.
 	 *
-	 * Like CreateWorkExprContext(), use smaller sizings for smaller work_mem,
-	 * to avoid large jumps in memory usage.
-	 */
-
-	/*
 	 * Like CreateWorkExprContext(), use smaller sizings for smaller work_mem,
 	 * to avoid large jumps in memory usage.
 	 */
@@ -2053,12 +2115,22 @@ hash_create_memory(AggState *aggstate)
 	/* and no smaller than ALLOCSET_DEFAULT_INITSIZE */
 	maxBlockSize = Max(maxBlockSize, ALLOCSET_DEFAULT_INITSIZE);
 
-	aggstate->hash_tuplescxt = BumpContextCreate(aggstate->ss.ps.state->es_query_cxt,
-												 "HashAgg hashed tuples",
-												 ALLOCSET_DEFAULT_MINSIZE,
-												 ALLOCSET_DEFAULT_INITSIZE,
-												 maxBlockSize);
-
+	if (use_allocset)
+	{
+		aggstate->hash_tuplescxt = AllocSetContextCreate(aggstate->ss.ps.state->es_query_cxt,
+														 "HashAgg hashed tuples",
+														 ALLOCSET_DEFAULT_MINSIZE,
+														 ALLOCSET_DEFAULT_INITSIZE,
+														 maxBlockSize);
+	}
+	else
+	{
+		aggstate->hash_tuplescxt = BumpContextCreate(aggstate->ss.ps.state->es_query_cxt,
+													 "HashAgg hashed tuples",
+													 ALLOCSET_DEFAULT_MINSIZE,
+													 ALLOCSET_DEFAULT_INITSIZE,
+													 maxBlockSize);
+	}
 }
 
 /*
@@ -2177,20 +2249,26 @@ initialize_hash_entry(AggState *aggstate, TupleHashTable hashtable,
 }
 
 /*
- * Look up hash entries for the current tuple in all hashed grouping sets.
- *
- * Some entries may be left NULL if we are in "spill mode". The same tuple
- * will belong to different groups for each grouping set, so may match a group
- * already in memory for one set and match a group not in memory for another
- * set. When in "spill mode", the tuple will be spilled for each grouping set
- * where it doesn't match a group in memory.
- *
- * NB: It's possible to spill the same tuple for several different grouping
- * sets. This may seem wasteful, but it's actually a trade-off: if we spill
- * the tuple multiple times for multiple grouping sets, it can be partitioned
- * for each grouping set, making the refilling of the hash table very
- * efficient.
+ * Replace the stored representative tuple in an existing hash entry if the new
+ * tuple comes earlier according to the tie-breaking sort keys.
  */
+static void
+replace_hash_entry_if_better(AggState *aggstate, AggStatePerHash perhash,
+							 TupleHashEntry entry, TupleTableSlot *newslot)
+{
+	uint32		old_len = entry->firstTuple->t_len;
+
+	if (ReplaceTupleHashEntryIfBetter(perhash->hashtable,
+									  entry,
+									  newslot,
+									  perhash->hash_firstTupleSlot,
+									  perhash->sortKeys,
+									  perhash->aggnode->numSortCols) &&
+		!aggstate->hash_spill_mode &&
+		entry->firstTuple->t_len > old_len)
+		hash_agg_check_limits(aggstate);
+}
+
 static void
 lookup_hash_entries(AggState *aggstate)
 {
@@ -2223,6 +2301,8 @@ lookup_hash_entries(AggState *aggstate)
 		{
 			if (isnew)
 				initialize_hash_entry(aggstate, hashtable, entry);
+			else if (perhash->aggnode->numSortCols > 0)
+				replace_hash_entry_if_better(aggstate, perhash, entry, hashslot);
 			pergroup[setno] = TupleHashEntryGetAdditional(hashtable, entry);
 		}
 		else
@@ -2783,6 +2863,8 @@ agg_refill_hash_table(AggState *aggstate)
 		{
 			if (isnew)
 				initialize_hash_entry(aggstate, hashtable, entry);
+			else if (perhash->aggnode->numSortCols > 0)
+				replace_hash_entry_if_better(aggstate, perhash, entry, hashslot);
 			aggstate->hash_pergroup[batch->setno] = TupleHashEntryGetAdditional(hashtable, entry);
 			advance_aggregates(aggstate);
 		}
@@ -3709,6 +3791,15 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 		aggstate->hashentrysize = hash_agg_entry_size(aggstate->numtrans,
 													  outerplan->plan_width,
 													  node->transitionSpace);
+		if (node->numSortCols > 0)
+		{
+			Size		tupleSize = (MAXALIGN(SizeofMinimalTupleHeader) +
+									 outerplan->plan_width);
+
+			aggstate->hashentrysize +=
+				(CHUNKHDRSZ + pg_nextpower2_size_t(tupleSize)) -
+				MAXALIGN(tupleSize);
+		}
 
 		/*
 		 * Consider all of the grouping sets together when setting the limits

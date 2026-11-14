@@ -82,3 +82,131 @@ SELECT DISTINCT ON (y, x) x, y FROM (select * from distinct_on_tbl order by x, z
 RESET enable_hashagg;
 
 DROP TABLE distinct_on_tbl;
+
+--
+-- Test SELECT DISTINCT ON with inline ORDER BY
+--
+CREATE TABLE distinct_inline_tbl (a int, b int);
+INSERT INTO distinct_inline_tbl VALUES (1, 10), (1, 20), (2, 5), (2, 15);
+
+SET enable_hashagg TO OFF;
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a ORDER BY b DESC) a, b FROM distinct_inline_tbl ORDER BY a;
+SELECT DISTINCT ON (a ORDER BY b DESC) a, b FROM distinct_inline_tbl ORDER BY a;
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a ORDER BY b ASC) a, b FROM distinct_inline_tbl ORDER BY a;
+SELECT DISTINCT ON (a ORDER BY b ASC) a, b FROM distinct_inline_tbl ORDER BY a;
+
+-- Test with HashAgg
+RESET enable_hashagg;
+SET enable_sort TO OFF;
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a ORDER BY b DESC) a, b FROM distinct_inline_tbl;
+SELECT * FROM (SELECT DISTINCT ON (a ORDER BY b DESC) a, b FROM distinct_inline_tbl) s ORDER BY a;
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a ORDER BY b ASC) a, b FROM distinct_inline_tbl;
+SELECT * FROM (SELECT DISTINCT ON (a ORDER BY b ASC) a, b FROM distinct_inline_tbl) s ORDER BY a;
+RESET enable_sort;
+
+DROP TABLE distinct_inline_tbl;
+
+-- Test HashAgg with unreferenced columns, resjunk tie-breaker expressions,
+-- pass-by-reference text values, NULLS FIRST/LAST, duplicate keys, and views
+CREATE TABLE distinct_hash_edge_tbl (
+    unused1 int,
+    grp text,
+    unused2 text,
+    tie1 int,
+    tie2 text,
+    payload text
+);
+INSERT INTO distinct_hash_edge_tbl VALUES
+    (100, 'g1', 'u', 10, 'B', 'p1_10_b'),
+    (101, 'g1', 'u', 20, 'c', 'p1_20_c_short'),
+    (102, 'g1', 'u', 20, 'a', 'p1_20_a_much_longer_payload_string'),
+    (103, 'g1', 'u', NULL, 'z', 'p1_null_z'),
+    (104, 'g2', 'u', 5, 'x', 'p2_5_x_long_initial_string'),
+    (105, 'g2', 'u', 15, 'y', 'p2_15_y');
+
+SET enable_sort TO OFF;
+SELECT * FROM (
+    SELECT DISTINCT ON (grp ORDER BY tie1 DESC NULLS LAST, lower(tie2) ASC)
+        grp, payload
+    FROM distinct_hash_edge_tbl
+) s ORDER BY grp;
+
+SELECT * FROM (
+    SELECT DISTINCT ON (grp ORDER BY tie1 DESC NULLS FIRST, lower(tie2) ASC)
+        grp, payload
+    FROM distinct_hash_edge_tbl
+) s ORDER BY grp;
+RESET enable_sort;
+
+-- Outer ORDER BY different from inline ORDER BY
+SELECT DISTINCT ON (grp ORDER BY tie1 DESC NULLS LAST, lower(tie2) ASC)
+    grp, tie1, tie2, payload
+FROM distinct_hash_edge_tbl
+ORDER BY payload ASC;
+
+-- Duplicate keys in DISTINCT ON and inline ORDER BY
+SELECT DISTINCT ON (grp, grp ORDER BY tie1 DESC NULLS LAST, tie1 ASC, lower(tie2) ASC)
+    grp, tie1, tie2, payload
+FROM distinct_hash_edge_tbl
+ORDER BY grp;
+
+-- Redundant DISTINCT ON key with inline ORDER BY should use Limit 1
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (grp ORDER BY tie1 DESC NULLS LAST, lower(tie2) ASC)
+    grp, tie1, tie2, payload
+FROM distinct_hash_edge_tbl
+WHERE grp = 'g1';
+
+SELECT DISTINCT ON (grp ORDER BY tie1 DESC NULLS LAST, lower(tie2) ASC)
+    grp, tie1, tie2, payload
+FROM distinct_hash_edge_tbl
+WHERE grp = 'g1';
+
+-- View deparsing for SELECT DISTINCT ON (... ORDER BY ...)
+CREATE VIEW distinct_inline_view AS
+SELECT DISTINCT ON (grp ORDER BY tie1 DESC NULLS LAST, tie2 ASC)
+    grp, tie1, tie2, payload
+FROM distinct_hash_edge_tbl;
+
+SELECT pg_get_viewdef('distinct_inline_view', true);
+SELECT * FROM distinct_inline_view ORDER BY grp;
+
+DROP VIEW distinct_inline_view;
+
+-- Positional and table-qualified DISTINCT ON with inline ORDER BY, and
+-- inline ORDER BY where DISTINCT ON key is not the first sort expression
+SET enable_hashagg TO OFF;
+SELECT DISTINCT ON (1 ORDER BY grp DESC, tie1 DESC NULLS LAST)
+    grp, tie1, payload
+FROM distinct_hash_edge_tbl;
+
+SELECT DISTINCT ON (distinct_hash_edge_tbl.grp ORDER BY grp DESC, tie1 DESC NULLS LAST)
+    grp, tie1, payload
+FROM distinct_hash_edge_tbl;
+
+SELECT DISTINCT ON (grp ORDER BY tie1 DESC NULLS LAST, grp ASC)
+    grp, tie1, payload
+FROM distinct_hash_edge_tbl
+ORDER BY grp;
+RESET enable_hashagg;
+
+-- HashAggregate disk spill mode with DISTINCT ON (... ORDER BY ...) and
+-- growing varlena replacements
+CREATE TEMP TABLE distinct_spill_tbl (grp int, tie int, payload text);
+INSERT INTO distinct_spill_tbl
+SELECT i % 500, j, repeat('x', j * 20)
+FROM generate_series(1, 2000) i, generate_series(1, 3) j;
+
+SET enable_sort TO OFF;
+SET work_mem = '64kB';
+SELECT count(*), min(tie), max(tie), min(length(payload)), max(length(payload))
+FROM (
+    SELECT DISTINCT ON (grp ORDER BY tie DESC) grp, tie, payload
+    FROM distinct_spill_tbl
+) s;
+RESET work_mem;
+RESET enable_sort;
+DROP TABLE distinct_spill_tbl;
+
+DROP TABLE distinct_hash_edge_tbl;
+

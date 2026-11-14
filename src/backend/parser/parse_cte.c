@@ -961,6 +961,26 @@ checkWellFormedRecursion(CteState *cstate)
 										   cstate);
 			Assert(cstate->innerwiths == NIL);
 		}
+		if (stmt->distinctClause)
+		{
+			cstate->curitem = i;
+			cstate->innerwiths = NIL;
+			cstate->selfrefcount = 0;
+			cstate->context = RECURSION_NONRECURSIVETERM;
+			checkWellFormedRecursionWalker((Node *) stmt->distinctClause,
+										   cstate);
+			Assert(cstate->innerwiths == NIL);
+		}
+		if (stmt->distinctSortClause)
+		{
+			cstate->curitem = i;
+			cstate->innerwiths = NIL;
+			cstate->selfrefcount = 0;
+			cstate->context = RECURSION_NONRECURSIVETERM;
+			checkWellFormedRecursionWalker((Node *) stmt->distinctSortClause,
+										   cstate);
+			Assert(cstate->innerwiths == NIL);
+		}
 
 		/*
 		 * Disallow ORDER BY and similar decoration atop the UNION. These
@@ -1233,6 +1253,10 @@ checkWellFormedSelectStmt(SelectStmt *stmt, CteState *cstate)
 				checkWellFormedRecursionWalker((Node *) stmt->rarg,
 											   cstate);
 				cstate->context = save_context;
+				checkWellFormedRecursionWalker((Node *) stmt->distinctClause,
+											   cstate);
+				checkWellFormedRecursionWalker((Node *) stmt->distinctSortClause,
+											   cstate);
 				checkWellFormedRecursionWalker((Node *) stmt->sortClause,
 											   cstate);
 				checkWellFormedRecursionWalker((Node *) stmt->limitOffset,
@@ -1252,6 +1276,10 @@ checkWellFormedSelectStmt(SelectStmt *stmt, CteState *cstate)
 				checkWellFormedRecursionWalker((Node *) stmt->rarg,
 											   cstate);
 				cstate->context = save_context;
+				checkWellFormedRecursionWalker((Node *) stmt->distinctClause,
+											   cstate);
+				checkWellFormedRecursionWalker((Node *) stmt->distinctSortClause,
+											   cstate);
 				checkWellFormedRecursionWalker((Node *) stmt->sortClause,
 											   cstate);
 				checkWellFormedRecursionWalker((Node *) stmt->limitOffset,

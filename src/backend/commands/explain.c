@@ -2271,8 +2271,22 @@ ExplainNode(PlanState *planstate, List *ancestors,
 							  es);
 			break;
 		case T_RecursiveUnion:
-			show_recursive_union_info(castNode(RecursiveUnionState,
-											   planstate), es);
+			{
+				RecursiveUnion *ruplan = castNode(RecursiveUnion, plan);
+
+				if (ruplan->numSortCols > 0)
+				{
+					ancestors = lcons(plan, ancestors);
+					show_sort_group_keys(outerPlanState(planstate), "Sort Key",
+										 ruplan->numSortCols, 0, ruplan->sortColIdx,
+										 ruplan->sortOperators, ruplan->sortCollations,
+										 ruplan->sortNullsFirst,
+										 ancestors, es);
+					ancestors = list_delete_first(ancestors);
+				}
+				show_recursive_union_info(castNode(RecursiveUnionState,
+												   planstate), es);
+			}
 			break;
 		default:
 			break;
@@ -2646,6 +2660,13 @@ show_agg_keys(AggState *astate, List *ancestors,
 			show_sort_group_keys(outerPlanState(astate), "Group Key",
 								 plan->numCols, 0, plan->grpColIdx,
 								 NULL, NULL, NULL,
+								 ancestors, es);
+
+		if (plan->numSortCols > 0)
+			show_sort_group_keys(outerPlanState(astate), "Sort Key",
+								 plan->numSortCols, 0, plan->sortColIdx,
+								 plan->sortOperators, plan->sortCollations,
+								 plan->sortNullsFirst,
 								 ancestors, es);
 
 		ancestors = list_delete_first(ancestors);
