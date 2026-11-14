@@ -524,6 +524,16 @@ typedef struct ResultRelInfo
 	int			ri_UpdateCount;
 
 	/*
+	 * For UPDATE, per index (NULL until first needed), what
+	 * ExecUpdateModifiedIdxAttrs() learned of the new row while deciding the
+	 * row's update: whether it satisfies the index's predicate, and its index
+	 * datums.  Inserting the new row's index entries uses these instead of
+	 * evaluating the index's expressions and predicate again.  The datums are
+	 * in the per-tuple memory context, so they are valid until the next row.
+	 */
+	struct NewIndexDatums *ri_NewIndexDatums;
+
+	/*
 	 * For UPDATE/DELETE/MERGE result relations, the attribute number of the
 	 * row identity junk attribute in the source plan's output tuples
 	 */

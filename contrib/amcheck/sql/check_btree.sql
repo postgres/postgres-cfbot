@@ -287,6 +287,34 @@ DROP TABLE hot_bt_image;
 DROP FUNCTION hot_bt_image_count;
 DROP FUNCTION hot_bt_image_plan;
 
+-- An UPDATE that evaluates an index for the old and new rows, to find out
+-- whether its entry changes, inserts the new row's entry with the values
+-- already computed, when it inserts one.  Here hot_ev_part's predicate uses
+-- x, so a change to x evaluates it, and hot_ev_x's change forces new
+-- entries; and the second update also takes rows out of hot_ev_part.  The
+-- indexes must be right either way.  (Builds with assertions check each
+-- reused value against a fresh evaluation.)
+CREATE FUNCTION hot_ev(t text) RETURNS text LANGUAGE sql IMMUTABLE
+  RETURN upper(t);
+CREATE TABLE hot_ev_tab (id int PRIMARY KEY, t text, x int) WITH (fillfactor = 50);
+CREATE INDEX hot_ev_t ON hot_ev_tab (hot_ev(t));
+CREATE INDEX hot_ev_part ON hot_ev_tab (hot_ev(t)) WHERE x >= 0;
+CREATE INDEX hot_ev_x ON hot_ev_tab (x);
+INSERT INTO hot_ev_tab SELECT g, 'a' || g, 0 FROM generate_series(1, 10) g;
+UPDATE hot_ev_tab SET x = x + 1;
+UPDATE hot_ev_tab SET t = t || 'y', x = -1 WHERE id <= 5;
+SELECT bt_index_check('hot_ev_t', heapallindexed => true);
+SELECT bt_index_check('hot_ev_part', heapallindexed => true);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT id FROM hot_ev_tab WHERE hot_ev(t) = 'A1Y';
+SELECT id FROM hot_ev_tab WHERE hot_ev(t) = 'A9' AND x >= 0;
+SELECT count(*) FROM hot_ev_tab WHERE hot_ev(t) LIKE 'A%' AND x >= 0;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE hot_ev_tab;
+DROP FUNCTION hot_ev;
+
 -- cleanup
 DROP TABLE bttest_a;
 DROP TABLE bttest_b;
