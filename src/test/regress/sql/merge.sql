@@ -1555,6 +1555,34 @@ WHEN NOT MATCHED THEN
 WHEN MATCHED THEN
 	DELETE;
 
+-- NOT MATCHED BY SOURCE must not see either input of a source join
+EXPLAIN (COSTS OFF)
+MERGE INTO cj_target t
+USING cj_source1 s1 CROSS JOIN cj_source2 s2
+ON t.tid = s1.sid1
+WHEN NOT MATCHED BY SOURCE THEN
+  UPDATE SET balance = s1.delta;
+
+EXPLAIN (COSTS OFF)
+MERGE INTO cj_target t
+USING cj_source1 s1 CROSS JOIN cj_source2 s2
+ON t.tid = s1.sid1
+WHEN NOT MATCHED BY SOURCE AND s2.sval IS NULL THEN
+  DELETE;
+
+-- A later action must still be able to see the source join inputs
+BEGIN;
+MERGE INTO cj_target t
+USING cj_source1 s1 JOIN cj_source2 s2 ON s1.sid1 = s2.sid2
+ON t.tid = s1.sid1
+WHEN NOT MATCHED BY SOURCE THEN
+  UPDATE SET balance = 0
+WHEN MATCHED AND s1.scat = 10 THEN
+  UPDATE SET val = s2.sval
+WHEN NOT MATCHED THEN
+  INSERT VALUES (s1.sid1, s1.delta, s2.sval);
+ROLLBACK;
+
 -- some simple expressions in INSERT targetlist
 MERGE INTO cj_target t
 USING cj_source2 s2
