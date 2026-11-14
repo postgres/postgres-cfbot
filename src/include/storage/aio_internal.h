@@ -129,6 +129,9 @@ struct PgAioHandle
 	 */
 	uint8		handle_data_len;
 
+	/* wait event to report while the IO is executed */
+	uint32		wait_event_info;
+
 	/* XXX: could be optimized out with some pointer math */
 	int32		owner_procno;
 
