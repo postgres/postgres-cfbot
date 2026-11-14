@@ -10,8 +10,13 @@ use PostgreSQL::Test::Utils;
 use Test::More;
 
 my $node = PostgreSQL::Test::Cluster->new('node');
-$node->init;
+$node->init(allows_streaming => 1);
 $node->start;
+
+$node->backup('backup');
+my $standby = PostgreSQL::Test::Cluster->new('standby');
+$standby->init_from_backup($node, 'backup', has_streaming => 1);
+$standby->start;
 
 # This checks that any DDLs run on the template database that modify pg_class
 # are persisted after creating a database from it using the WAL_LOG strategy,
@@ -19,10 +24,20 @@ $node->start;
 my $db_template = "template1";
 my $db_new = "test_db_1";
 
-# Create table.  It should persist on the template database.
+# Create a table with a populated visibility map in the template database.
+$node->safe_psql($db_template, q{
+	CREATE TABLE tab_db_before_create_1 AS
+		SELECT generate_series(1, 10000) AS a;
+	VACUUM (FREEZE) tab_db_before_create_1;
+});
+
+# Copy the template database.
 $node->safe_psql("postgres",
 	"CREATE DATABASE $db_new STRATEGY WAL_LOG TEMPLATE $db_template;");
+$node->safe_psql($db_new, "CREATE EXTENSION pg_visibility;");
 
+# This table should persist in the template database but not be present in the
+# copy made above.
 $node->safe_psql($db_template, "CREATE TABLE tab_db_after_create_1 (a INT);");
 
 # Flush the changes affecting the template database, then replay them.
@@ -31,15 +46,31 @@ $node->safe_psql("postgres", "CHECKPOINT;");
 $node->stop('immediate');
 $node->start;
 my $result = $node->safe_psql($db_template,
-	"SELECT count(*) FROM pg_class WHERE relname LIKE 'tab_db_%';");
+	"SELECT count(*) FROM pg_class WHERE relname = 'tab_db_after_create_1';");
 is($result, "1",
 	"check that table exists on template after crash, with checkpoint");
 
-# The new database should have no tables.
+# The new database should not have the table created after it was copied.
 $result = $node->safe_psql($db_new,
-	"SELECT count(*) FROM pg_class WHERE relname LIKE 'tab_db_%';");
+	"SELECT count(*) FROM pg_class WHERE relname = 'tab_db_after_create_1';");
 is($result, "0",
-	"check that there are no tables from template on new database after crash"
+	"check that table created after database copy is absent after crash"
 );
+
+$node->wait_for_replay_catchup($standby);
+
+my $visibility_map_query = q{
+	SELECT blkno, all_visible, all_frozen
+	FROM pg_visibility_map('tab_db_before_create_1')
+	ORDER BY blkno;
+};
+my $primary_visibility_map =
+  $node->safe_psql($db_new, $visibility_map_query);
+my $standby_visibility_map =
+  $standby->safe_psql($db_new, $visibility_map_query);
+
+isnt($primary_visibility_map, '', 'copied table has visibility map entries');
+is($standby_visibility_map, $primary_visibility_map,
+	"copied table visibility map matches standby");
 
 done_testing();
