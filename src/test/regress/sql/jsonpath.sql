@@ -157,6 +157,27 @@ select '($)'::jsonpath;
 select '(($))'::jsonpath;
 select '((($ + 1)).a + ((2)).b ? ((((@ > 1)) || (exists(@.c)))))'::jsonpath;
 
+-- an operation followed by an accessor keeps its parentheses when printed
+select '(-$.a).abs() + 1'::jsonpath;
+select '($.a + 1).abs() == 2'::jsonpath;
+select '($.a + $.b).c == 1'::jsonpath;
+select '(1 + 2)[0] == 3'::jsonpath;
+select '$[(1 + 2).floor() to last]'::jsonpath;
+select '$ ? (!((-@.a).abs() == 2))'::jsonpath;
+select '($ like_regex "a").type() == "boolean"'::jsonpath;
+select '(!($ == 1)).type()'::jsonpath;
+select '(($ == 1) is unknown).type()'::jsonpath;
+select '(exists ($.a)).type()'::jsonpath;
+
+-- and the printed form gives the same results as the original
+select p, jsonb_path_query_array(j, p::jsonpath) as result,
+       jsonb_path_query_array(j, p::jsonpath::text::jsonpath) as after_reparse
+from (values ('(-$.a).abs() + 1'),
+             ('($.a + $.b).abs() == 3'),
+             ('(-$.a) ? (@ > 0) == 2'),
+             ('$ ? (!((-$.a).abs() == 2))')) v(p),
+     (values ('{"a": -2, "b": -1}'::jsonb)) d(j);
+
 select '$ ? (@.a < 1)'::jsonpath;
 select '$ ? (@.a < -1)'::jsonpath;
 select '$ ? (@.a < +1)'::jsonpath;
