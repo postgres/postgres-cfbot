@@ -307,6 +307,10 @@ typedef struct ParallelHashJoinState
 #define PHJ_GROW_BUCKETS_REINSERT		2
 #define PHJ_GROW_BUCKETS_PHASE(n)		((n) % 3)	/* circular phases */
 
+/* Deferred insertion into the bucket array; see ExecHashDeferInsert() */
+#define HJ_DEFER_GROUP_SIZE		32
+#define HJ_DEFER_MIN_NBUCKETS	65536	/* 512kB of bucket headers */
+
 typedef struct HashJoinTableData
 {
 	int			nbuckets;		/* # buckets in the in-memory hash table */
@@ -379,6 +383,12 @@ typedef struct HashJoinTableData
 	ParallelHashJoinState *parallel_state;
 	ParallelHashJoinBatchAccessor *batches;
 	dsa_pointer current_chunk_shared;
+
+	/* tuples waiting to be linked into buckets; see ExecHashDeferInsert() */
+	bool		defer_inserts;	/* use deferred insertion? */
+	int			ndeferred;		/* number of queued tuples */
+	HashJoinTuple deferred_tuples[HJ_DEFER_GROUP_SIZE];
+	int			deferred_bucketnos[HJ_DEFER_GROUP_SIZE];
 } HashJoinTableData;
 
 #endif							/* HASHJOIN_H */
