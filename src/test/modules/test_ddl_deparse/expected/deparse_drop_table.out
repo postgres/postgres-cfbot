@@ -1,0 +1,76 @@
+--
+-- Corner cases for DDL deparsing of DROP TABLE.
+--
+-- See deparse_create_table.sql.
+--
+LOAD 'test_ddl_deparse';
+SET test_ddl_deparse.execute_deparsed_ddl = on;
+SET test_ddl_deparse.print_deparsed_ddl = text;
+CREATE SCHEMA deparse_dt;
+NOTICE:  DDL test: type simple, tag CREATE SCHEMA
+SET search_path = deparse_dt, public;
+-- The dropped tables are emitted with their schema
+CREATE TABLE d1 (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_dt.d1 (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE d2 (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_dt.d2 (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+DROP TABLE d1, deparse_dt.d2;
+NOTICE:  deparsed DDL: DROP TABLE deparse_dt.d1, deparse_dt.d2
+-- A table that IF EXISTS didn't find is not emitted, and if it found none,
+-- there is nothing to deparse
+CREATE TABLE d3 (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_dt.d3 (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+DROP TABLE IF EXISTS d3, nonesuch;
+NOTICE:  table "nonesuch" does not exist, skipping
+NOTICE:  deparsed DDL: DROP TABLE IF EXISTS deparse_dt.d3
+DROP TABLE IF EXISTS nonesuch;
+NOTICE:  table "nonesuch" does not exist, skipping
+-- CASCADE is emitted as written, and the objects it dropped are not
+CREATE TABLE d4 (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_dt.d4 (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE VIEW v4 AS SELECT * FROM d4;
+NOTICE:  DDL test: type simple, tag CREATE VIEW
+DROP TABLE d4 CASCADE;
+NOTICE:  drop cascades to view v4
+NOTICE:  deparsed DDL: DROP TABLE deparse_dt.d4 CASCADE
+-- Nor are the partitions dropped with their parent
+CREATE TABLE p (a int) PARTITION BY LIST (a);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_dt.p (a pg_catalog.int4) PARTITION BY LIST (a)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE p1 PARTITION OF p FOR VALUES IN (1);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_dt.p1 PARTITION OF deparse_dt.p FOR VALUES IN (1)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+DROP TABLE p;
+NOTICE:  deparsed DDL: DROP TABLE deparse_dt.p
+-- A temporary table is emitted in pg_temp, and names are quoted as needed
+CREATE TEMP TABLE tt (a int);
+NOTICE:  deparsed DDL: CREATE TEMPORARY TABLE pg_temp.tt (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE TABLE "D 5" (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_dt."D 5" (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+DROP TABLE tt, "D 5";
+NOTICE:  deparsed DDL: DROP TABLE pg_temp.tt, deparse_dt."D 5"
+-- DROP of other relation kinds is not supported
+CREATE TABLE d6 (a int);
+NOTICE:  deparsed DDL: CREATE TABLE deparse_dt.d6 (a pg_catalog.int4)
+NOTICE:  DDL test: type simple, tag CREATE TABLE
+CREATE INDEX d6_a ON d6 (a);
+NOTICE:  DDL test: type simple, tag CREATE INDEX
+DROP INDEX d6_a;
+SELECT relname FROM pg_class
+  WHERE relnamespace = 'deparse_dt'::regnamespace ORDER BY relname;
+ relname 
+---------
+ d6
+(1 row)
+
+RESET test_ddl_deparse.print_deparsed_ddl;
+RESET test_ddl_deparse.execute_deparsed_ddl;
+RESET search_path;
+DROP SCHEMA deparse_dt CASCADE;
+NOTICE:  drop cascades to table deparse_dt.d6

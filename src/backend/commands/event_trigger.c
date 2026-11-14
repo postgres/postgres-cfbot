@@ -75,33 +75,39 @@ typedef struct EventTriggerQueryState
 	int			table_rewrite_reason;	/* AT_REWRITE reason */
 
 	/* Support for command collection */
+	Node	   *parsetree;		/* the complete query's statement, as parsed */
 	bool		commandCollectionInhibited;
 	CollectedCommand *currentCommand;
 	List	   *commandList;	/* list of CollectedCommand; see
 								 * deparse_utility.h */
+
+	/*
+	 * ALTER COLUMN TYPE USING texts waiting for their subcommand to be
+	 * collected; see EventTriggerCollectAlterColumnTypeUsing().
+	 */
+	List	   *pendingColTypeUsing;
+
+	/*
+	 * The default or generation expression stored by the subcommand being
+	 * executed; see EventTriggerCollectColumnDefault().
+	 */
+	Node	   *pendingColumnDefault;
+
 	struct EventTriggerQueryState *previous;
 } EventTriggerQueryState;
+
+/* One pending ALTER COLUMN TYPE USING text (see above). */
+typedef struct PendingColTypeUsing
+{
+	Oid			relid;
+	char	   *colname;
+	char	   *text;
+} PendingColTypeUsing;
 
 static EventTriggerQueryState *currentEventTriggerState = NULL;
 
 /* GUC parameter */
 bool		event_triggers = true;
-
-/* Support for dropped objects */
-typedef struct SQLDropObject
-{
-	ObjectAddress address;
-	const char *schemaname;
-	const char *objname;
-	const char *objidentity;
-	const char *objecttype;
-	List	   *addrnames;
-	List	   *addrargs;
-	bool		original;
-	bool		normal;
-	bool		istemp;
-	slist_node	next;
-} SQLDropObject;
 
 static void AlterEventTriggerOwner_internal(Relation rel,
 											HeapTuple tup,
@@ -1188,12 +1194,16 @@ EventTriggerSupportsObject(const ObjectAddress *object)
  * returns whether this was done.  If it was, EventTriggerEndCompleteQuery must
  * be called when the query is done, regardless of whether it succeeds or fails
  * -- so use of a PG_TRY block is mandatory.
+ *
+ * parsetree is the query's statement.  A copy is kept, since execution may
+ * modify the statement in place.
  */
 bool
-EventTriggerBeginCompleteQuery(void)
+EventTriggerBeginCompleteQuery(const Node *parsetree)
 {
 	EventTriggerQueryState *state;
 	MemoryContext cxt;
+	MemoryContext oldcxt;
 
 	/*
 	 * Currently, sql_drop, table_rewrite, ddl_command_end events are the only
@@ -1212,10 +1222,16 @@ EventTriggerBeginCompleteQuery(void)
 	state->in_sql_drop = false;
 	state->table_rewrite_oid = InvalidOid;
 
+	oldcxt = MemoryContextSwitchTo(cxt);
+	state->parsetree = copyObject(parsetree);
+	MemoryContextSwitchTo(oldcxt);
+
 	state->commandCollectionInhibited = currentEventTriggerState ?
 		currentEventTriggerState->commandCollectionInhibited : false;
 	state->currentCommand = NULL;
 	state->commandList = NIL;
+	state->pendingColTypeUsing = NIL;
+	state->pendingColumnDefault = NULL;
 	state->previous = currentEventTriggerState;
 	currentEventTriggerState = state;
 
@@ -1709,6 +1725,76 @@ EventTriggerUndoInhibitCommandCollection(void)
 }
 
 /*
+ * Is DDL command collection in effect?
+ *
+ * The EventTriggerCollect* routines check this themselves; callers can use it
+ * to skip work that is only needed for collection.
+ */
+bool
+EventTriggerCommandCollectionActive(void)
+{
+	return currentEventTriggerState != NULL &&
+		!currentEventTriggerState->commandCollectionInhibited;
+}
+
+/*
+ * Return the statement of the current complete query, as it was before
+ * execution, or NULL if no event trigger state is set up.  This is the
+ * statement that the commands reported by pg_event_trigger_ddl_commands()
+ * were collected for.
+ *
+ * The tree belongs to the event trigger state and is valid only until the
+ * complete query ends.
+ */
+const Node *
+EventTriggerGetParsetree(void)
+{
+	if (!currentEventTriggerState)
+		return NULL;
+
+	return currentEventTriggerState->parsetree;
+}
+
+/*
+ * Return the list of CollectedCommand for the current complete query.
+ *
+ * This is the C-level counterpart of pg_event_trigger_ddl_commands().  The
+ * list belongs to the event trigger state and is valid only until the
+ * complete query ends.
+ */
+List *
+EventTriggerGetCollectedCommands(void)
+{
+	if (!currentEventTriggerState)
+		return NIL;
+
+	return currentEventTriggerState->commandList;
+}
+
+/*
+ * Return the objects dropped by the current complete query so far, as a list
+ * of SQLDropObject in the order they were recorded.  Unlike
+ * pg_event_trigger_dropped_objects(), this can be called from any event
+ * trigger.  The list is allocated in the caller's memory context; its elements
+ * are valid only until the complete query ends.
+ */
+List *
+EventTriggerGetDroppedObjects(void)
+{
+	List	   *result = NIL;
+	slist_iter	iter;
+
+	if (!currentEventTriggerState)
+		return NIL;
+
+	/* The list is kept newest first */
+	slist_foreach(iter, &currentEventTriggerState->SQLDropList)
+		result = lcons(slist_container(SQLDropObject, next, iter.cur), result);
+
+	return result;
+}
+
+/*
  * EventTriggerCollectSimpleCommand
  *		Save data about a simple DDL command that was just executed
  *
@@ -1804,6 +1890,60 @@ EventTriggerAlterTableRelid(Oid objectId)
 }
 
 /*
+ * Remember the text an ALTER COLUMN TYPE's USING clause deparses to, keyed by
+ * relation and column, until its subcommand is collected.  The caller renders
+ * it at prep time, since a sibling DROP COLUMN may remove a column it
+ * references before the command finishes.
+ */
+void
+EventTriggerCollectAlterColumnTypeUsing(Oid relid, const char *colName,
+										const char *usingText)
+{
+	MemoryContext oldcxt;
+	PendingColTypeUsing *pending;
+
+	/* ignore if event trigger context not set, or collection disabled */
+	if (!currentEventTriggerState ||
+		currentEventTriggerState->commandCollectionInhibited)
+		return;
+
+	oldcxt = MemoryContextSwitchTo(currentEventTriggerState->cxt);
+
+	pending = palloc_object(PendingColTypeUsing);
+	pending->relid = relid;
+	pending->colname = pstrdup(colName);
+	pending->text = pstrdup(usingText);
+	currentEventTriggerState->pendingColTypeUsing =
+		lappend(currentEventTriggerState->pendingColTypeUsing, pending);
+
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * Remember the default or generation expression that an ADD COLUMN, SET
+ * DEFAULT or SET EXPRESSION subcommand has just stored, until the subcommand
+ * is collected.  It can't be read back from pg_attrdef afterwards, since a
+ * later subcommand may replace it.
+ */
+void
+EventTriggerCollectColumnDefault(Node *expr)
+{
+	MemoryContext oldcxt;
+
+	/* ignore if event trigger context not set, or collection disabled */
+	if (!currentEventTriggerState ||
+		currentEventTriggerState->commandCollectionInhibited)
+		return;
+
+	/* the previous one must have been attached to its subcommand */
+	Assert(currentEventTriggerState->pendingColumnDefault == NULL);
+
+	oldcxt = MemoryContextSwitchTo(currentEventTriggerState->cxt);
+	currentEventTriggerState->pendingColumnDefault = copyObject(expr);
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
  * EventTriggerCollectAlterTableSubcmd
  *		Save data about a single part of an ALTER TABLE.
  *
@@ -1831,6 +1971,44 @@ EventTriggerCollectAlterTableSubcmd(const Node *subcmd, ObjectAddress address)
 	newsub = palloc_object(CollectedATSubcmd);
 	newsub->address = address;
 	newsub->parsetree = copyObject(subcmd);
+	newsub->using_text = NULL;
+
+	/*
+	 * Attach the default expression that the subcommand stored, if any, and
+	 * don't let it leak into a later subcommand.
+	 */
+	if (((const AlterTableCmd *) subcmd)->subtype == AT_AddColumn ||
+		((const AlterTableCmd *) subcmd)->subtype == AT_ColumnDefault ||
+		((const AlterTableCmd *) subcmd)->subtype == AT_SetExpression)
+		newsub->default_expr = currentEventTriggerState->pendingColumnDefault;
+	else
+		newsub->default_expr = NULL;
+	currentEventTriggerState->pendingColumnDefault = NULL;
+
+	/*
+	 * For ALTER COLUMN TYPE, attach the USING text saved for this column, if
+	 * any.  The subcommands recursed to children have none.
+	 */
+	if (((const AlterTableCmd *) subcmd)->subtype == AT_AlterColumnType &&
+		((const AlterTableCmd *) subcmd)->name != NULL)
+	{
+		Oid			relid = currentEventTriggerState->currentCommand->d.alterTable.objectId;
+
+		foreach_ptr(PendingColTypeUsing, pending,
+					currentEventTriggerState->pendingColTypeUsing)
+		{
+			if (pending->relid == relid &&
+				strcmp(pending->colname,
+					   ((const AlterTableCmd *) subcmd)->name) == 0)
+			{
+				newsub->using_text = pending->text;
+				currentEventTriggerState->pendingColTypeUsing =
+					foreach_delete_current(currentEventTriggerState->pendingColTypeUsing,
+										   pending);
+				break;
+			}
+		}
+	}
 
 	currentEventTriggerState->currentCommand->d.alterTable.subcmds =
 		lappend(currentEventTriggerState->currentCommand->d.alterTable.subcmds, newsub);
