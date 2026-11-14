@@ -1,0 +1,970 @@
+<!-- doc/src/sgml/binary-format.sgml -->
+
+ <chapter id="binary-format">
+  <title>Binary Format of Data Types</title>
+
+  <indexterm zone="binary-format">
+   <primary>binary format</primary>
+  </indexterm>
+  <indexterm zone="binary-format">
+   <primary>wire format</primary>
+   <see>binary format</see>
+  </indexterm>
+
+  <para>
+   In addition to the textual representation described in <xref
+   linkend="datatype"/>, every built-in data type has a
+   <firstterm>binary format</firstterm> for transmitting values between
+   server and client without converting to and from text.  It maps
+   directly to the value's internal representation, so for many types it
+   is more compact and faster to process than the text format.  It is
+   also more sensitive to representation details, so a binary client must
+   know each type's exact layout.  This chapter documents those layouts
+   for the built-in data types.
+  </para>
+
+  <para>
+   The binary format is what is transmitted when a field or parameter is
+   sent with format code <literal>1</literal> (binary) rather than
+   format code <literal>0</literal> (text); see <xref
+   linkend="protocol-message-formats"/> for how format codes are
+   negotiated at the protocol level.  When using <link
+   linkend="libpq"><application>libpq</application></link>, binary result
+   columns are requested through the <parameter>resultFormat</parameter>
+   argument of <link
+   linkend="libpq-PQexecParams"><function>PQexecParams</function></link>
+   and related functions, and binary parameters are supplied through
+   <parameter>paramFormats</parameter>.
+  </para>
+
+  <para>
+   The authoritative definition of each format is the type's
+   <function>send</function> and <function>receive</function> functions
+   in the server source code (for example,
+   <function>int4send</function> and <function>int4recv</function> in
+   <filename>src/backend/utils/adt/int.c</filename>).  These descriptions
+   should let a client author reproduce the encoding without reading the
+   source, but the source is authoritative if the two disagree.
+  </para>
+
+  <sect1 id="binary-format-general">
+   <title>General Conventions</title>
+
+   <para>
+    These conventions apply to all the type descriptions below.
+   </para>
+
+   <variablelist>
+    <varlistentry>
+     <term>Byte order</term>
+     <listitem>
+      <para>
+       All multi-byte integer quantities are transmitted in network
+       byte order, that is, most significant byte first (big-endian).
+       This applies to integer values and to integer fields within more
+       complex types, such as length words and array dimensions.  A
+       client on a little-endian machine must therefore byte-swap these
+       quantities.
+       C programs can do this with the POSIX
+       <function>ntohs()</function> and <function>ntohl()</function>
+       functions for 16-bit and 32-bit quantities; there is currently no
+       standard function for 64-bit quantities, so those need an
+       equivalent 64-bit byte swap.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term>Value length</term>
+     <listitem>
+      <para>
+       The binary format described here is the payload of a single field
+       value.  The length of that payload is carried separately by the
+       surrounding protocol message (or, for a <literal>NULL</literal>,
+       is given as <literal>-1</literal> with no payload at all), so the
+       formats below do not include a leading overall length word unless
+       one is explicitly noted.  Fixed-length types always occupy exactly
+       the number of bytes stated; variable-length types occupy whatever
+       the surrounding length indicates.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term>Embedded values</term>
+     <listitem>
+      <para>
+       Some container types (arrays, composites, ranges, and
+       multiranges) embed the binary representation of other values.  In
+       those cases each embedded value is preceded by its own four-byte
+       length, and a length of <literal>-1</literal> denotes a
+       <literal>NULL</literal> element with no following bytes.  This is
+       the same convention used by the protocol for top-level values.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term>Encoding</term>
+     <listitem>
+      <para>
+       Character data is transmitted in the client encoding in effect for
+       the connection (see <xref linkend="multibyte"/>), just as in the
+       text format.  No terminating zero byte is added unless one is
+       explicitly noted.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect1>
+
+  <sect1 id="binary-format-numeric">
+   <title>Numeric Types</title>
+
+   <para>
+    The integer and floating-point types are transmitted as fixed-width
+    quantities in network byte order.  The
+    <type>smallserial</type>, <type>serial</type>, and
+    <type>bigserial</type> types are not distinct types but notational
+    conveniences for <type>smallint</type>, <type>integer</type>, and
+    <type>bigint</type> columns with an attached sequence, so they are
+    transmitted using the corresponding integer format below.
+   </para>
+
+   <variablelist>
+    <varlistentry>
+     <term><type>smallint</type> (<type>int2</type>)</term>
+     <listitem>
+      <para>
+       A two-byte two's-complement signed integer, most significant byte
+       first.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>integer</type> (<type>int4</type>)</term>
+     <listitem>
+      <para>
+       A four-byte two's-complement signed integer, most significant byte
+       first.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>bigint</type> (<type>int8</type>)</term>
+     <listitem>
+      <para>
+       An eight-byte two's-complement signed integer, most significant
+       byte first.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>real</type> (<type>float4</type>)</term>
+     <listitem>
+      <para>
+       A four-byte IEEE 754 single-precision floating-point number (the
+       <literal>binary32</literal> interchange format).  Its four bytes
+       are transmitted in network byte order, so a client reads the four
+       bytes as a 32-bit integer, converts to local byte order (for
+       example with <function>ntohl()</function>), and then reinterprets
+       the resulting bit pattern as a <type>float</type>.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>double precision</type> (<type>float8</type>)</term>
+     <listitem>
+      <para>
+       An eight-byte IEEE 754 double-precision floating-point number (the
+       <literal>binary64</literal> interchange format), transmitted as
+       eight bytes in network byte order.  A client reads the eight bytes
+       as a 64-bit integer, converts to local byte order, and reinterprets
+       the bit pattern as a <type>double</type>.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>numeric</type></term>
+     <listitem>
+      <para>
+       A <type>numeric</type> value is a variable-length structure
+       consisting of four two-byte fields followed by a sequence of
+       two-byte digits, all in network byte order:
+      </para>
+      <itemizedlist>
+       <listitem>
+        <para>
+         <structfield>ndigits</structfield>: the number of base-10000
+         digits that follow.
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         <structfield>weight</structfield>: a signed two-byte integer
+         giving the weight of the first digit.  The first digit represents
+         units of 10000 raised to the power
+         <structfield>weight</structfield>, the second digit units of
+         10000 raised to the power
+         <structfield>weight</structfield>&nbsp;-&nbsp;1, and so on.
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         <structfield>sign</structfield>: <literal>0x0000</literal> for a
+         positive number, <literal>0x4000</literal> for a negative
+         number, <literal>0xC000</literal> for
+         <literal>NaN</literal>, <literal>0xD000</literal> for
+         <literal>+Infinity</literal>, and <literal>0xF000</literal> for
+         <literal>-Infinity</literal>.
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         <structfield>dscale</structfield>: the display scale, that is,
+         the number of decimal digits to display after the decimal point.
+        </para>
+       </listitem>
+      </itemizedlist>
+      <para>
+       Each of the <structfield>ndigits</structfield> digits is a
+       two-byte integer in the range 0 to 9999, most significant digit
+       first.  For the special values (<literal>NaN</literal>,
+       <literal>+Infinity</literal>, and <literal>-Infinity</literal>)
+       <structfield>ndigits</structfield> is zero and no digits follow.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect1>
+
+  <sect1 id="binary-format-money">
+   <title>Monetary Type</title>
+
+   <para>
+    A <type>money</type> value is transmitted as an eight-byte
+    two's-complement signed integer in network byte order.  The integer
+    holds the amount scaled by the number of fractional digits of the
+    <varname>lc_monetary</varname> locale; with the common two-digit
+    locales the value is expressed in hundredths, so
+    <literal>$1.23</literal> is transmitted as the integer
+    <literal>123</literal>.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-character">
+   <title>Character Types</title>
+
+   <para>
+    The <type>text</type>, <type>character varying</type>
+    (<type>varchar</type>), and <type>character</type>
+    (<type>bpchar</type>) types are all transmitted as the raw bytes of
+    the string in the connection's client encoding, with no leading
+    length word and no terminating zero byte.  The number of bytes is
+    determined by the length that the surrounding protocol message
+    supplies for the field.  For
+    <type>character(<replaceable>n</replaceable>)</type> the value
+    includes any trailing spaces used to pad it to its declared length.
+   </para>
+
+   <para>
+    The special types <type>name</type> and <type>"char"</type>, used
+    mainly in the system catalogs, follow the same idea.  A
+    <type>name</type> value is transmitted as the raw string bytes in the
+    client encoding with no length word or terminator (its length,
+    normally at most 63 bytes, comes from the surrounding message).  A
+    <type>"char"</type> value (note the quotes; this is the internal
+    single-byte type, distinct from <type>character</type>) is
+    transmitted as exactly one byte.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-binary">
+   <title>Binary Data (<type>bytea</type>)</title>
+
+   <para>
+    A <type>bytea</type> value is transmitted as its raw byte string, with
+    no leading length word, no terminating byte, and no escaping.  The
+    number of bytes is determined by the length supplied for the field by
+    the surrounding protocol message.  Unlike the text format for
+    <type>bytea</type> (see <xref linkend="datatype-binary"/>), the binary
+    format performs no hex or backslash encoding.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-datetime">
+   <title>Date/Time Types</title>
+
+   <para>
+    The date and time types are transmitted as fixed-width integers in
+    network byte order.  All of them count from the
+    <productname>PostgreSQL</productname> epoch,
+    <literal>2000-01-01</literal>, rather than the Unix epoch, and time
+    quantities are measured in microseconds.
+   </para>
+
+   <variablelist>
+    <varlistentry>
+     <term><type>date</type></term>
+     <listitem>
+      <para>
+       A four-byte signed integer giving the number of days since
+       <literal>2000-01-01</literal>.  Negative values are dates before
+       that day.  The special values <literal>-infinity</literal> and
+       <literal>infinity</literal> are represented by the smallest and
+       largest 32-bit signed integers, respectively.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>time</type> (without time zone)</term>
+     <listitem>
+      <para>
+       An eight-byte signed integer giving the number of microseconds
+       since midnight (<literal>00:00:00</literal>).
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>time with time zone</type> (<type>timetz</type>)</term>
+     <listitem>
+      <para>
+       An eight-byte signed integer giving the number of microseconds
+       since midnight, followed by a four-byte signed integer giving the
+       time zone offset in seconds.  The offset is counted as seconds west
+       of UTC, so it is the negation of the usual ISO-style offset; for
+       example a value at UTC+5 has a zone of <literal>-18000</literal>.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>timestamp</type> (without time zone)</term>
+     <listitem>
+      <para>
+       An eight-byte signed integer giving the number of microseconds
+       since <literal>2000-01-01 00:00:00</literal>.  The special values
+       <literal>-infinity</literal> and <literal>infinity</literal> are
+       represented by the smallest and largest 64-bit signed integers,
+       respectively.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>timestamp with time zone</type>
+      (<type>timestamptz</type>)</term>
+     <listitem>
+      <para>
+       The same eight-byte representation as <type>timestamp</type>, but
+       the count of microseconds is measured from
+       <literal>2000-01-01 00:00:00</literal> UTC.  No time zone is
+       transmitted; the value is always in UTC, and any display time zone
+       is applied only when converting to text.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>interval</type></term>
+     <listitem>
+      <para>
+       An eight-byte signed integer giving a number of microseconds,
+       followed by a four-byte signed integer giving a number of days,
+       followed by a four-byte signed integer giving a number of months,
+       all in network byte order.  The three fields are stored separately
+       (rather than normalized to a single unit) because the number of
+       days in a month and the number of microseconds in a day are not
+       fixed.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect1>
+
+  <sect1 id="binary-format-boolean">
+   <title>Boolean Type</title>
+
+   <para>
+    A <type>boolean</type> value is transmitted as a single byte whose
+    value is <literal>1</literal> for true and <literal>0</literal> for
+    false.  No other byte values are produced by the server.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-enum">
+   <title>Enumerated Types</title>
+
+   <para>
+    An enumerated (<command>CREATE TYPE ... AS ENUM</command>) value is
+    transmitted as the raw bytes of its label in the client encoding,
+    with no length word and no terminator, just like a <type>text</type>
+    value.  Enum values are stored internally as object identifiers, but
+    the binary format uses the label text so it does not depend on the
+    OIDs assigned in a particular database.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-geometric">
+   <title>Geometric Types</title>
+
+   <para>
+    The geometric types are built out of <type>double precision</type>
+    coordinates, each transmitted as an eight-byte value in network byte
+    order exactly as described for <type>double precision</type>.
+   </para>
+
+   <variablelist>
+    <varlistentry>
+     <term><type>point</type></term>
+     <listitem>
+      <para>
+       Two <type>double precision</type> values giving the coordinates
+       (<replaceable>x</replaceable>, <replaceable>y</replaceable>) (16
+       bytes total).
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>lseg</type> and <type>box</type></term>
+     <listitem>
+      <para>
+       Four <type>double precision</type> values giving two points,
+       (<replaceable>x1</replaceable>, <replaceable>y1</replaceable>) and
+       (<replaceable>x2</replaceable>, <replaceable>y2</replaceable>), in
+       that order (32 bytes total).  For a <type>box</type> the first
+       point is the upper-right corner and the second is the lower-left
+       corner.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>line</type></term>
+     <listitem>
+      <para>
+       Three <type>double precision</type> values <replaceable>A</replaceable>,
+       <replaceable>B</replaceable>, and <replaceable>C</replaceable>,
+       the coefficients of the line <literal>Ax + By + C = 0</literal>
+       (24 bytes total).
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>path</type></term>
+     <listitem>
+      <para>
+       A one-byte flag that is <literal>1</literal> for a closed path and
+       <literal>0</literal> for an open path, then a four-byte integer
+       giving the number of points, then that many points, each a pair of
+       <type>double precision</type> coordinates
+       (<replaceable>x</replaceable>, <replaceable>y</replaceable>).
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>polygon</type></term>
+     <listitem>
+      <para>
+       A four-byte integer giving the number of points, then that many
+       points, each a pair of <type>double precision</type> coordinates
+       (<replaceable>x</replaceable>, <replaceable>y</replaceable>).
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>circle</type></term>
+     <listitem>
+      <para>
+       Three <type>double precision</type> values: the center
+       (<replaceable>x</replaceable>, <replaceable>y</replaceable>)
+       followed by the radius (24 bytes total).
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect1>
+
+  <sect1 id="binary-format-network">
+   <title>Network Address Types</title>
+
+   <variablelist>
+    <varlistentry>
+     <term><type>inet</type> and <type>cidr</type></term>
+     <listitem>
+      <para>
+       These share a layout of four leading bytes followed by the address
+       bytes:
+      </para>
+      <itemizedlist>
+       <listitem>
+        <para>
+         one byte for the address family: <literal>2</literal> for an
+         IPv4 address or <literal>3</literal> for an IPv6 address.  (These
+         are the server's values of the C constants
+         <symbol>AF_INET</symbol> and <symbol>AF_INET</symbol>&nbsp;+&nbsp;1;
+         <symbol>AF_INET</symbol> is <literal>2</literal> on all supported
+         platforms.)
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         one byte for the number of bits in the netmask;
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         one byte that is <literal>1</literal> for a <type>cidr</type>
+         value and <literal>0</literal> for an <type>inet</type> value
+         (this flag is ignored on input);
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         one byte for the number of address bytes that follow
+         (<literal>4</literal> for IPv4 or <literal>16</literal> for
+         IPv6);
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         the address itself, most significant byte first.
+        </para>
+       </listitem>
+      </itemizedlist>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>macaddr</type></term>
+     <listitem>
+      <para>
+       Six bytes, the six octets of the IEEE EUI-48 (MAC-48) address in
+       order, most significant octet first.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>macaddr8</type></term>
+     <listitem>
+      <para>
+       Eight bytes, the eight octets of the IEEE EUI-64 address in order,
+       most significant octet first.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect1>
+
+  <sect1 id="binary-format-bit">
+   <title>Bit String Types</title>
+
+   <para>
+    The <type>bit</type> and <type>bit varying</type> (<type>varbit</type>)
+    types share a layout: a four-byte integer giving the length of the
+    value in bits, followed by
+    <literal>ceil(<replaceable>length</replaceable>/8)</literal> bytes
+    holding the bits.  The bits are packed most significant bit first;
+    any unused low-order bits in the final byte are zero.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-textsearch">
+   <title>Text Search Types</title>
+
+   <variablelist>
+    <varlistentry>
+     <term><type>tsvector</type></term>
+     <listitem>
+      <para>
+       A four-byte integer giving the number of lexemes, followed by that
+       many lexeme entries.  Each entry consists of the lexeme string in
+       the client encoding terminated by a single zero byte, then a
+       two-byte integer giving the number of positions, then that many
+       two-byte position values.  Each position value packs the position
+       number in its low-order bits and the weight in its two high-order
+       bits.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>tsquery</type></term>
+     <listitem>
+      <para>
+       A four-byte integer giving the number of nodes, followed by that
+       many nodes in prefix (Polish) order.  Each node begins with a
+       one-byte type code: <literal>1</literal> for an operand or
+       <literal>2</literal> for an operator.
+      </para>
+      <itemizedlist>
+       <listitem>
+        <para>
+         An operand node continues with a one-byte weight bitmask, a
+         one-byte prefix-match flag, and the operand string in the client
+         encoding terminated by a single zero byte.
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         An operator node continues with a one-byte operator code
+         (<literal>1</literal> for <literal>!</literal> (NOT),
+         <literal>2</literal> for <literal>&amp;</literal> (AND),
+         <literal>3</literal> for <literal>|</literal> (OR), and
+         <literal>4</literal> for the phrase operator
+         <literal>&lt;-&gt;</literal>).  For the phrase operator a
+         two-byte integer giving the distance follows.
+        </para>
+       </listitem>
+      </itemizedlist>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect1>
+
+  <sect1 id="binary-format-uuid">
+   <title><type>uuid</type> Type</title>
+
+   <para>
+    A <type>uuid</type> value is transmitted as exactly sixteen bytes, in
+    the order in which they appear in the textual representation (that is,
+    the most significant byte of the UUID first), matching the layout
+    defined by <ulink
+    url="https://datatracker.ietf.org/doc/html/rfc9562">RFC 9562</ulink>.
+    No byte swapping or field reordering is applied; the sixteen bytes
+    are transmitted in their textual order.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-xml">
+   <title><type>xml</type> Type</title>
+
+   <para>
+    An <type>xml</type> value is transmitted as the raw bytes of the
+    document in the client encoding, with no length word and no
+    terminator, just like a <type>text</type> value.  As with the text
+    output of <type>xml</type>, an encoding declaration in the document
+    reflects the client encoding in use.  The content itself is an
+    <ulink url="https://www.w3.org/TR/xml/">XML 1.0</ulink> document or
+    content fragment; see <xref linkend="datatype-xml"/>.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-json">
+   <title>JSON Types</title>
+
+   <variablelist>
+    <varlistentry>
+     <term><type>json</type></term>
+     <listitem>
+      <para>
+       A <type>json</type> value is transmitted as the raw bytes of the
+       JSON text in the client encoding, with no length word and no
+       terminator, just like a <type>text</type> value.  The content is
+       JSON as specified in <ulink
+       url="https://datatracker.ietf.org/doc/html/rfc7159">RFC
+       7159</ulink>; see <xref linkend="datatype-json"/>.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>jsonb</type></term>
+     <listitem>
+      <para>
+       A <type>jsonb</type> value is transmitted as a one-byte version
+       number followed by the JSON text (as specified in <ulink
+       url="https://datatracker.ietf.org/doc/html/rfc7159">RFC
+       7159</ulink>) in the client encoding.  The version number is
+       currently always <literal>1</literal>.  Note that this leading
+       version byte is what distinguishes the <type>jsonb</type> binary
+       format from the <type>json</type> binary format; a client must emit
+       it when sending and skip it when receiving.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>jsonpath</type></term>
+     <listitem>
+      <para>
+       A <type>jsonpath</type> value is transmitted as a one-byte version
+       number followed by the textual <type>jsonpath</type> expression in
+       the client encoding.  The expression follows the SQL/JSON path
+       language of the SQL:2016 standard; see <xref
+       linkend="datatype-jsonpath"/>.  The version number is currently
+       always <literal>1</literal>.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect1>
+
+  <sect1 id="binary-format-array">
+   <title>Arrays</title>
+
+   <para>
+    An array value begins with a header and is followed by its elements:
+   </para>
+   <itemizedlist>
+    <listitem>
+     <para>
+      a four-byte integer giving the number of dimensions (zero for an
+      empty array);
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      a four-byte flags word, of which currently only the least
+      significant bit is defined: it is <literal>1</literal> if the array
+      contains any <literal>NULL</literal> elements and
+      <literal>0</literal> otherwise;
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      a four-byte unsigned integer, the object identifier
+      (<acronym>OID</acronym>) of the element type; a client can look
+      this value up in the <link
+      linkend="catalog-pg-type"><structname>pg_type</structname></link>
+      system catalog to determine the type;
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      for each dimension, a four-byte integer giving the dimension's
+      length and a four-byte integer giving its lower bound;
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      the elements themselves, in row-major order.  Each element is a
+      four-byte length followed by that many bytes of the element's own
+      binary representation, or a length of <literal>-1</literal> to
+      denote a <literal>NULL</literal> element with no following bytes.
+     </para>
+    </listitem>
+   </itemizedlist>
+
+   <para>
+    The <type>oidvector</type> and <type>int2vector</type> types used in
+    the system catalogs are transmitted in this same array format, with
+    element type <type>oid</type> and <type>smallint</type> respectively.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-composite">
+   <title>Composite Types</title>
+
+   <para>
+    A composite (row or record) value begins with a four-byte integer
+    giving the number of columns, not counting any dropped columns.  Each
+    column then follows as:
+   </para>
+   <itemizedlist>
+    <listitem>
+     <para>
+      a four-byte unsigned integer, the object identifier
+      (<acronym>OID</acronym>) of the column's data type, looked up in
+      <link linkend="catalog-pg-type"><structname>pg_type</structname></link>
+      as for array elements above;
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      a four-byte length followed by that many bytes of the column
+      value's own binary representation, or a length of
+      <literal>-1</literal> for a <literal>NULL</literal> column with no
+      following bytes.
+     </para>
+    </listitem>
+   </itemizedlist>
+  </sect1>
+
+  <sect1 id="binary-format-range">
+   <title>Range and Multirange Types</title>
+
+   <variablelist>
+    <varlistentry>
+     <term>Range types</term>
+     <listitem>
+      <para>
+       A range value begins with a one-byte flags field, whose bits have
+       the following meanings:
+      </para>
+      <itemizedlist>
+       <listitem>
+        <para>
+         <literal>0x01</literal> &mdash; the range is empty;
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         <literal>0x02</literal> &mdash; the lower bound is inclusive;
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         <literal>0x04</literal> &mdash; the upper bound is inclusive;
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         <literal>0x08</literal> &mdash; the lower bound is unbounded
+         (<literal>-infinity</literal>);
+        </para>
+       </listitem>
+       <listitem>
+        <para>
+         <literal>0x10</literal> &mdash; the upper bound is unbounded
+         (<literal>+infinity</literal>).
+        </para>
+       </listitem>
+      </itemizedlist>
+      <para>
+       If the range is non-empty and has a finite lower bound, the flags
+       are followed by a four-byte length and that many bytes of the
+       lower bound value in the subtype's binary representation.  If the
+       range has a finite upper bound, the upper bound follows in the same
+       way.  An empty range consists of the flags byte alone.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term>Multirange types</term>
+     <listitem>
+      <para>
+       A multirange value begins with a four-byte integer giving the
+       number of ranges it contains.  Each range then follows as a
+       four-byte length and that many bytes of a range value in the
+       binary format just described.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect1>
+
+  <sect1 id="binary-format-domain">
+   <title>Domain Types</title>
+
+   <para>
+    A domain (see <xref linkend="domains"/>) does not have a binary
+    format of its own.  A domain value is transmitted using the binary
+    format of its underlying base type, since the domain adds only
+    constraints, not a distinct representation.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-oid">
+   <title>Object Identifier Types</title>
+
+   <para>
+    An <type>oid</type> value is transmitted as a four-byte
+    <emphasis>unsigned</emphasis> integer in network byte order.  The
+    OID alias types (see <xref linkend="datatype-oid"/>) use the same
+    representation.  Note that, unlike the text format, the binary format
+    carries the numeric OID rather than the resolved name.
+   </para>
+  </sect1>
+
+  <sect1 id="binary-format-system">
+   <title>Transaction and System Types</title>
+
+   <variablelist>
+    <varlistentry>
+     <term><type>xid</type> and <type>cid</type></term>
+     <listitem>
+      <para>
+       Each is transmitted as a four-byte unsigned integer in network
+       byte order.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>xid8</type></term>
+     <listitem>
+      <para>
+       An eight-byte unsigned integer in network byte order.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>tid</type></term>
+     <listitem>
+      <para>
+       A four-byte unsigned integer giving the block number, followed by
+       a two-byte unsigned integer giving the offset number within the
+       block.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>pg_lsn</type></term>
+     <listitem>
+      <para>
+       An eight-byte unsigned integer in network byte order, the log
+       sequence number.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>pg_snapshot</type></term>
+     <listitem>
+      <para>
+       A four-byte unsigned integer giving the number of in-progress
+       transaction IDs, followed by two eight-byte unsigned integers
+       giving <structfield>xmin</structfield> and
+       <structfield>xmax</structfield>, followed by that many eight-byte
+       unsigned integers giving the in-progress transaction IDs, all in
+       network byte order.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><type>txid_snapshot</type></term>
+     <listitem>
+      <para>
+       The deprecated predecessor of <type>pg_snapshot</type>,
+       transmitted in the same format.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </sect1>
+
+  <sect1 id="binary-format-internal">
+   <title>Internal and Pseudo-Types</title>
+
+   <para>
+    A number of types exist only to support internal operations of the
+    server and are not intended to be consumed by client applications.
+    These include the pseudo-types (such as <type>cstring</type>,
+    <type>void</type>, <type>unknown</type>, and the polymorphic
+    <type>anyarray</type>) and the types used to store optimizer and
+    extended-statistics data (<type>pg_node_tree</type>,
+    <type>pg_ndistinct</type>, and <type>pg_dependencies</type>).  Where
+    these types have binary send and receive functions at all, the format
+    is an implementation detail that is subject to change between major
+    releases, so it is deliberately not documented here.
+   </para>
+  </sect1>
+
+ </chapter>
