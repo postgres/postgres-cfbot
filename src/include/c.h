@@ -511,6 +511,16 @@ extern "C++"
 #endif
 
 /*
+ * Hint that the cache line containing addr will be read soon.  This is only a
+ * hint, and does nothing on compilers without a builtin for it.
+ */
+#if defined(__GNUC__)
+#define pg_prefetch_mem(addr) __builtin_prefetch(addr)
+#else
+#define pg_prefetch_mem(addr) ((void) (addr))
+#endif
+
+/*
  * Define a compiler-independent macro for determining if an expression is a
  * compile-time integer const.  We don't define this macro to return 0 when
  * unsupported due to the risk of users of the macro misbehaving if we return

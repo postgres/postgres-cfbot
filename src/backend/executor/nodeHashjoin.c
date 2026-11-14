@@ -1406,6 +1406,9 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 			ExecHashTableInsert(hashtable, slot, hashvalue);
 		}
 
+		/* link any tuples still queued by ExecHashTableInsert */
+		ExecHashFlushDeferredInserts(hashtable);
+
 		/*
 		 * after we build the hash table, the inner batch file is no longer
 		 * needed
