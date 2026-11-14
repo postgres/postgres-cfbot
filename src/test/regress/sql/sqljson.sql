@@ -55,6 +55,12 @@ SELECT JSON_SERIALIZE('{ "a" : 1 } ' RETURNING bytea);
 SELECT JSON_SERIALIZE('{ "a" : 1 } ' RETURNING varchar);
 SELECT pg_typeof(JSON_SERIALIZE(NULL));
 
+-- jsonb input
+SELECT JSON_SERIALIZE('{"b": [1, 2], "a": "x"}'::jsonb);
+SELECT JSON_SERIALIZE('[1, 2, 4]'::jsonb RETURNING bytea);
+SELECT JSON_SERIALIZE('[1, 2, 4]'::jsonb RETURNING varchar(3));
+SELECT JSON_SERIALIZE(NULL::jsonb);
+
 -- only string types or bytea allowed
 SELECT JSON_SERIALIZE('{ "a" : 1 } ' RETURNING jsonb);
 
