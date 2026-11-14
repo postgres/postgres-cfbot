@@ -75,6 +75,7 @@ typedef struct EventTriggerQueryState
 	int			table_rewrite_reason;	/* AT_REWRITE reason */
 
 	/* Support for command collection */
+	Node	   *parsetree;		/* the complete query's statement, as parsed */
 	bool		commandCollectionInhibited;
 	CollectedCommand *currentCommand;
 	List	   *commandList;	/* list of CollectedCommand; see
@@ -1188,12 +1189,16 @@ EventTriggerSupportsObject(const ObjectAddress *object)
  * returns whether this was done.  If it was, EventTriggerEndCompleteQuery must
  * be called when the query is done, regardless of whether it succeeds or fails
  * -- so use of a PG_TRY block is mandatory.
+ *
+ * parsetree is the query's statement.  A copy is kept, since execution may
+ * modify the statement in place.
  */
 bool
-EventTriggerBeginCompleteQuery(void)
+EventTriggerBeginCompleteQuery(const Node *parsetree)
 {
 	EventTriggerQueryState *state;
 	MemoryContext cxt;
+	MemoryContext oldcxt;
 
 	/*
 	 * Currently, sql_drop, table_rewrite, ddl_command_end events are the only
@@ -1211,6 +1216,10 @@ EventTriggerBeginCompleteQuery(void)
 	slist_init(&(state->SQLDropList));
 	state->in_sql_drop = false;
 	state->table_rewrite_oid = InvalidOid;
+
+	oldcxt = MemoryContextSwitchTo(cxt);
+	state->parsetree = copyObject(parsetree);
+	MemoryContextSwitchTo(oldcxt);
 
 	state->commandCollectionInhibited = currentEventTriggerState ?
 		currentEventTriggerState->commandCollectionInhibited : false;
@@ -1706,6 +1715,24 @@ EventTriggerUndoInhibitCommandCollection(void)
 		return;
 
 	currentEventTriggerState->commandCollectionInhibited = false;
+}
+
+/*
+ * Return the statement of the current complete query, as it was before
+ * execution, or NULL if no event trigger state is set up.  This is the
+ * statement that the commands reported by pg_event_trigger_ddl_commands()
+ * were collected for.
+ *
+ * The tree belongs to the event trigger state and is valid only until the
+ * complete query ends.
+ */
+const Node *
+EventTriggerGetParsetree(void)
+{
+	if (!currentEventTriggerState)
+		return NULL;
+
+	return currentEventTriggerState->parsetree;
 }
 
 /*
