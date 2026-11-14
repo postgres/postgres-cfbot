@@ -43,5 +43,10 @@ extern void pgstat_progress_update_multi_param(int nparam, const int *index,
 											   const int64 *val);
 extern void pgstat_progress_end_command(void);
 
+#ifdef PROGRESS_DEBUG
+extern PGDLLIMPORT bool trace_progress;
+
+extern void pgstat_progress_debug_idle(void);
+#endif
 
 #endif							/* BACKEND_PROGRESS_H */
