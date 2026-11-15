@@ -1714,6 +1714,30 @@ log_child_failure(int exitstatus)
 }
 
 /*
+ * During  the test execution the concurrency level varies
+ * this computes the average concurrency from the moment the
+ * first test starts to the moment the last test stops.
+ */
+static void
+log_group_concurrency(instr_time *test_start, instr_time *test_stop, int num_tests)
+{
+	double group_start = INSTR_TIME_GET_NANOSEC(test_start[0]);
+	double group_stop = INSTR_TIME_GET_NANOSEC(test_stop[0]);
+	double total = (group_stop - group_start);
+	for(int i = 1; i < num_tests; i++)
+	{
+		double t0 = INSTR_TIME_GET_NANOSEC(test_start[i]);
+		double tf = INSTR_TIME_GET_NANOSEC(test_stop[i]);
+		if (i == 0 || (t0 < group_start))
+			group_start = t0;
+		if (i == 0 || (tf > group_stop))
+			group_stop = tf;
+		total += tf - t0;
+	}
+	note("effective concurrency %.2f / %d", total / (group_stop - group_start), num_tests);
+}
+
+/*
  * Run all the tests specified in one schedule file
  *
  * Schedule file syntax:
@@ -1908,6 +1932,9 @@ run_group:
 			wait_for_tests(pids, statuses, stoptimes, tests, num_tests);
 			note_end();
 		}
+
+		if(num_tests > 1)
+			log_group_concurrency(starttimes, stoptimes, num_tests);
 
 		/* Check results for all tests */
 		for (i = 0; i < num_tests; i++)
