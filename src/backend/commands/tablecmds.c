@@ -6204,6 +6204,230 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 }
 
 /*
+ * ValidateCheckConstraintViaIndex
+ *
+ * Validate a "column OP constant" CHECK constraint with an index probe
+ * instead of a full table scan, when the column is NOT NULL and is the
+ * leading column of a non-partial btree index whose opfamily has a
+ * negator for OP.  For "id < N" we scan the index for "id >= N"; no
+ * match means the constraint holds.
+ *
+ * Returns true if proven valid, false if the optimization doesn't apply
+ * or a violating row was found (caller falls back to the full scan,
+ * which reports the error).
+ *
+ * Uses the same snapshot source as the full-scan path (GetLatestSnapshot),
+ * so MVCC semantics are unchanged.
+ */
+static bool
+ValidateCheckConstraintViaIndex(Relation rel, Node *qual)
+{
+	OpExpr	   *opexpr;
+	Node	   *leftarg;
+	Node	   *rightarg;
+	Var		   *var;
+	Const	   *constval;
+	Oid			negator;
+	Oid			indexoid = InvalidOid;
+	Relation	indexrel;
+	List	   *indexlist;
+	ListCell   *lc;
+	ScanKeyData scankey;
+	IndexScanDesc iscan;
+	TupleTableSlot *slot;
+	Snapshot	snapshot;
+	bool		found_violation = false;
+	AttrNumber	varattno;
+	Oid			opfamily;
+	int			strategy;
+	RegProcedure opproc;
+	CompactAttribute *att;
+
+	/* Must be a simple OpExpr with two arguments */
+	if (!IsA(qual, OpExpr))
+		return false;
+	opexpr = (OpExpr *) qual;
+	if (list_length(opexpr->args) != 2)
+		return false;
+
+	leftarg = (Node *) linitial(opexpr->args);
+	rightarg = (Node *) lsecond(opexpr->args);
+
+	/* peel RelabelType, e.g. from varchar or domain columns */
+	while (leftarg && IsA(leftarg, RelabelType))
+		leftarg = (Node *) ((RelabelType *) leftarg)->arg;
+	while (rightarg && IsA(rightarg, RelabelType))
+		rightarg = (Node *) ((RelabelType *) rightarg)->arg;
+
+	if (IsA(leftarg, Var) && IsA(rightarg, Const))
+	{
+		var = (Var *) leftarg;
+		constval = (Const *) rightarg;
+		negator = get_negator(opexpr->opno);
+	}
+	else if (IsA(leftarg, Const) && IsA(rightarg, Var))
+	{
+		/* "N OP id" form: negate the commuted operator, e.g. id > N */
+		Oid		commutator = get_commutator(opexpr->opno);
+
+		if (!OidIsValid(commutator))
+			return false;
+
+		var = (Var *) rightarg;
+		constval = (Const *) leftarg;
+		negator = get_negator(commutator);
+	}
+	else
+		return false;
+
+	/* Must have a valid negator */
+	if (!OidIsValid(negator))
+		return false;
+
+	/* Only handle simple column references (not system columns) */
+	if (var->varattno <= 0)
+		return false;
+	varattno = var->varattno;
+
+	if (constval->constisnull)
+		return false;
+
+	/*
+	 * NULL never violates a CHECK constraint, and the negated-condition
+	 * scan below wouldn't find NULLs anyway, so this is conservative, not
+	 * required for correctness -- kept simple for now.
+	 */
+	att = TupleDescCompactAttr(RelationGetDescr(rel), varattno - 1);
+	if (att->attnullability != ATTNULLABLE_VALID)
+		return false;
+
+	/* find a non-partial btree index whose leading column matches var */
+	indexlist = RelationGetIndexList(rel);
+	foreach(lc, indexlist)
+	{
+		Oid			idxoid = lfirst_oid(lc);
+		HeapTuple	idxtup;
+		Form_pg_index idxform;
+		bool		isnull;
+		Relation	tmprel;
+
+		idxtup = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(idxoid));
+		if (!HeapTupleIsValid(idxtup))
+			continue;
+		idxform = (Form_pg_index) GETSTRUCT(idxtup);
+
+		/* Must be valid and ready */
+		if (!idxform->indisvalid || !idxform->indisready)
+		{
+			ReleaseSysCache(idxtup);
+			continue;
+		}
+
+		/* Must not be a partial index (has no predicate) */
+		(void) SysCacheGetAttr(INDEXRELID, idxtup,
+							   Anum_pg_index_indpred, &isnull);
+		if (!isnull)
+		{
+			ReleaseSysCache(idxtup);
+			continue;
+		}
+
+		/* Leading column must match our Var */
+		if (idxform->indkey.values[0] != varattno)
+		{
+			ReleaseSysCache(idxtup);
+			continue;
+		}
+
+		/* Must be a btree index */
+		tmprel = index_open(idxoid, AccessShareLock);
+		if (tmprel->rd_rel->relam == BTREE_AM_OID)
+		{
+			indexoid = idxoid;
+			index_close(tmprel, AccessShareLock);
+			ReleaseSysCache(idxtup);
+			break;
+		}
+		index_close(tmprel, AccessShareLock);
+		ReleaseSysCache(idxtup);
+	}
+	list_free(indexlist);
+
+	if (!OidIsValid(indexoid))
+		return false;
+
+	indexrel = index_open(indexoid, AccessShareLock);
+
+	/*
+	 * The index's on-disk order is fixed by the collation it was built
+	 * with.  Scanning it for the negated condition under a different
+	 * collation can miss rows, silently validating a constraint that's
+	 * actually violated.
+	 */
+	if (indexrel->rd_indcollation[0] != opexpr->inputcollid)
+	{
+		index_close(indexrel, AccessShareLock);
+		return false;
+	}
+
+	opfamily = indexrel->rd_opfamily[0];
+	strategy = get_op_opfamily_strategy(negator, opfamily);
+	if (strategy == InvalidStrategy)
+	{
+		index_close(indexrel, AccessShareLock);
+		return false;
+	}
+
+	opproc = get_opcode(negator);
+	if (!RegProcedureIsValid(opproc))
+	{
+		index_close(indexrel, AccessShareLock);
+		return false;
+	}
+
+	/*
+	 * subtype must be the constant's actual type, not InvalidOid: a
+	 * constant whose type is wider than the column's (e.g. a bigint
+	 * literal against an int4 PK, as happens once the constant falls
+	 * outside int4's range) needs the cross-type comparison member of the
+	 * opfamily, which the scan key has to name explicitly.
+	 */
+	ScanKeyEntryInitialize(&scankey,
+						   0,
+						   1,
+						   strategy,
+						   constval->consttype,
+						   opexpr->inputcollid,
+						   opproc,
+						   constval->constvalue);
+
+	/* snapshot must be registered, not just a bare GetLatestSnapshot() */
+	slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+									table_slot_callbacks(rel));
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	iscan = index_beginscan(rel, indexrel, false, snapshot, NULL,
+							1, 0, SO_NONE);
+	index_rescan(iscan, &scankey, 1, NULL, 0);
+
+	if (table_index_getnext_slot(iscan, ForwardScanDirection, slot))
+		found_violation = true;
+
+	index_endscan(iscan);
+	UnregisterSnapshot(snapshot);
+	ExecDropSingleTupleTableSlot(slot);
+	index_close(indexrel, AccessShareLock);
+
+	if (found_violation)
+		return false;
+
+	ereport(DEBUG1,
+			errmsg_internal("check constraint validated via index on \"%s\"",
+							RelationGetRelationName(rel)));
+
+	return true;
+}
+
+/*
  * ATRewriteTable: scan or rewrite one table
  *
  * A rewrite is requested by passing a valid OIDNewHeap; in that case, caller
@@ -6276,6 +6500,10 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap)
 		switch (con->contype)
 		{
 			case CONSTR_CHECK:
+
+				if (!tab->rewrite && !newrel &&
+					ValidateCheckConstraintViaIndex(oldrel, con->qual))
+					break;		/* proven valid via index, skip full scan */
 				needscan = true;
 				con->qualstate = ExecPrepareExpr((Expr *) expand_generated_columns_in_expr(con->qual, oldrel, 1), estate);
 				break;
