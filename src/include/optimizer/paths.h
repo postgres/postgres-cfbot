@@ -16,11 +16,11 @@
 
 #include "nodes/pathnodes.h"
 
-
 /*
  * allpaths.c
  */
 extern PGDLLIMPORT bool enable_geqo;
+extern PGDLLIMPORT bool enable_goo_join_search;
 extern PGDLLIMPORT bool enable_eager_aggregate;
 extern PGDLLIMPORT int geqo_threshold;
 extern PGDLLIMPORT double min_eager_agg_group_size;

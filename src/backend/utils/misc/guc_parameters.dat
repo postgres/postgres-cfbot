@@ -906,6 +906,15 @@
   boot_val => 'true',
 },
 
+/* WIP: for now keep this in QUERY_TUNING_GEQO group for testing convenience */
+{ name => 'enable_goo_join_search', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
+  short_desc => 'Enables the planner\'s use of GOO join search for large join problems.',
+  long_desc => 'Greedy Operator Ordering (GOO) is a deterministic join search algorithm for queries with many relations.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_goo_join_search',
+  boot_val => 'false',
+},
+
 { name => 'enable_group_by_reordering', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables reordering of GROUP BY keys.',
   flags => 'GUC_EXPLAIN',
