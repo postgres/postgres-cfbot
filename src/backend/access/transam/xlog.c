@@ -791,7 +791,7 @@ static void CopyXLogRecordToWAL(int write_len, bool isLogSwitch,
 static void ReserveXLogInsertLocation(int size, XLogRecPtr *StartPos,
 									  XLogRecPtr *EndPos, XLogRecPtr *PrevPtr);
 static bool ReserveXLogSwitch(XLogRecPtr *StartPos, XLogRecPtr *EndPos,
-							  XLogRecPtr *PrevPtr);
+							  XLogRecPtr *PrevPtr, XLogRecPtr *ReservedEndPos);
 static XLogRecPtr WaitXLogInsertionsToFinish(XLogRecPtr upto);
 static char *GetXLogBuffer(XLogRecPtr ptr, TimeLineID tli);
 static XLogRecPtr XLogBytePosToRecPtr(uint64 bytepos);
@@ -850,6 +850,7 @@ XLogInsertRecord(XLogRecData *rdata,
 	WalInsertClass class = WALINSERT_NORMAL;
 	XLogRecPtr	StartPos;
 	XLogRecPtr	EndPos;
+	XLogRecPtr	ReservedEndPos;
 	bool		prevDoPageWrites = doPageWrites;
 	TimeLineID	insertTLI;
 
@@ -955,6 +956,7 @@ XLogInsertRecord(XLogRecData *rdata,
 		 */
 		ReserveXLogInsertLocation(rechdr->xl_tot_len, &StartPos, &EndPos,
 								  &rechdr->xl_prev);
+		ReservedEndPos = EndPos;
 
 		/* Normal records are always inserted. */
 		inserted = true;
@@ -974,7 +976,8 @@ XLogInsertRecord(XLogRecData *rdata,
 		 */
 		Assert(!XLogRecPtrIsValid(fpw_lsn));
 		WALInsertLockAcquireExclusive();
-		inserted = ReserveXLogSwitch(&StartPos, &EndPos, &rechdr->xl_prev);
+		inserted = ReserveXLogSwitch(&StartPos, &EndPos, &rechdr->xl_prev,
+									 &ReservedEndPos);
 	}
 	else
 	{
@@ -991,9 +994,12 @@ XLogInsertRecord(XLogRecData *rdata,
 		WALInsertLockAcquireExclusive();
 		ReserveXLogInsertLocation(rechdr->xl_tot_len, &StartPos, &EndPos,
 								  &rechdr->xl_prev);
+		ReservedEndPos = EndPos;
 		RedoRecPtr = Insert->RedoRecPtr = StartPos;
 		inserted = true;
 	}
+
+	Assert(EndPos <= ReservedEndPos);
 
 	if (inserted)
 	{
@@ -1012,7 +1018,7 @@ XLogInsertRecord(XLogRecData *rdata,
 		 */
 		CopyXLogRecordToWAL(rechdr->xl_tot_len,
 							class == WALINSERT_SPECIAL_SWITCH, rdata,
-							StartPos, EndPos, insertTLI);
+							StartPos, ReservedEndPos, insertTLI);
 
 		/*
 		 * Unless record is flagged as not important, update LSN of last
@@ -1054,12 +1060,12 @@ XLogInsertRecord(XLogRecData *rdata,
 	/*
 	 * Update shared LogwrtRqst.Write, if we crossed page boundary.
 	 */
-	if (StartPos / XLOG_BLCKSZ != EndPos / XLOG_BLCKSZ)
+	if (StartPos / XLOG_BLCKSZ != ReservedEndPos / XLOG_BLCKSZ)
 	{
 		SpinLockAcquire(&XLogCtl->info_lck);
 		/* advance global request to include new block(s) */
-		if (XLogCtl->LogwrtRqst.Write < EndPos)
-			XLogCtl->LogwrtRqst.Write = EndPos;
+		if (XLogCtl->LogwrtRqst.Write < ReservedEndPos)
+			XLogCtl->LogwrtRqst.Write = ReservedEndPos;
 		SpinLockRelease(&XLogCtl->info_lck);
 		RefreshXLogWriteResult(LogwrtResult);
 	}
@@ -1072,26 +1078,7 @@ XLogInsertRecord(XLogRecData *rdata,
 	if (class == WALINSERT_SPECIAL_SWITCH)
 	{
 		TRACE_POSTGRESQL_WAL_SWITCH();
-		XLogFlush(EndPos);
-
-		/*
-		 * Even though we reserved the rest of the segment for us, which is
-		 * reflected in EndPos, we return a pointer to just the end of the
-		 * xlog-switch record.
-		 */
-		if (inserted)
-		{
-			EndPos = StartPos + SizeOfXLogRecord;
-			if (StartPos / XLOG_BLCKSZ != EndPos / XLOG_BLCKSZ)
-			{
-				uint64		offset = XLogSegmentOffset(EndPos, wal_segment_size);
-
-				if (offset == EndPos % XLOG_BLCKSZ)
-					EndPos += SizeOfXLogLongPHD;
-				else
-					EndPos += SizeOfXLogShortPHD;
-			}
-		}
+		XLogFlush(ReservedEndPos);
 	}
 
 	/* Process any flush progress published while making room for the record. */
@@ -1254,12 +1241,14 @@ ReserveXLogInsertLocation(int size, XLogRecPtr *StartPos, XLogRecPtr *EndPos,
  *
  * A log-switch record is handled slightly differently. The rest of the
  * segment will be reserved for this insertion, as indicated by the returned
- * *EndPos value. However, if we are already at the beginning of the current
- * segment, *StartPos and *EndPos are set to the current location without
- * reserving any space, and the function returns false.
+ * *ReservedEndPos value. *EndPos is the end of the switch record itself.
+ * However, if we are already at the beginning of the current segment,
+ * *StartPos, *EndPos and *ReservedEndPos are set to the current location
+ * without reserving any space, and the function returns false.
  */
 static bool
-ReserveXLogSwitch(XLogRecPtr *StartPos, XLogRecPtr *EndPos, XLogRecPtr *PrevPtr)
+ReserveXLogSwitch(XLogRecPtr *StartPos, XLogRecPtr *EndPos, XLogRecPtr *PrevPtr,
+				  XLogRecPtr *ReservedEndPos)
 {
 	XLogCtlInsert *Insert = &XLogCtl->Insert;
 	uint64		startbytepos;
@@ -1283,7 +1272,7 @@ ReserveXLogSwitch(XLogRecPtr *StartPos, XLogRecPtr *EndPos, XLogRecPtr *PrevPtr)
 	if (XLogSegmentOffset(ptr, wal_segment_size) == 0)
 	{
 		SpinLockRelease(&Insert->insertpos_lck);
-		*EndPos = *StartPos = ptr;
+		*ReservedEndPos = *EndPos = *StartPos = ptr;
 		return false;
 	}
 
@@ -1292,13 +1281,14 @@ ReserveXLogSwitch(XLogRecPtr *StartPos, XLogRecPtr *EndPos, XLogRecPtr *PrevPtr)
 
 	*StartPos = XLogBytePosToRecPtr(startbytepos);
 	*EndPos = XLogBytePosToEndRecPtr(endbytepos);
+	*ReservedEndPos = *EndPos;
 
 	segleft = wal_segment_size - XLogSegmentOffset(*EndPos, wal_segment_size);
 	if (segleft != wal_segment_size)
 	{
 		/* consume the rest of the segment */
-		*EndPos += segleft;
-		endbytepos = XLogRecPtrToBytePos(*EndPos);
+		*ReservedEndPos += segleft;
+		endbytepos = XLogRecPtrToBytePos(*ReservedEndPos);
 	}
 	Insert->CurrBytePos = endbytepos;
 	Insert->PrevBytePos = startbytepos;
@@ -1307,8 +1297,8 @@ ReserveXLogSwitch(XLogRecPtr *StartPos, XLogRecPtr *EndPos, XLogRecPtr *PrevPtr)
 
 	*PrevPtr = XLogBytePosToRecPtr(prevbytepos);
 
-	Assert(XLogSegmentOffset(*EndPos, wal_segment_size) == 0);
-	Assert(XLogRecPtrToBytePos(*EndPos) == endbytepos);
+	Assert(XLogSegmentOffset(*ReservedEndPos, wal_segment_size) == 0);
+	Assert(XLogRecPtrToBytePos(*ReservedEndPos) == endbytepos);
 	Assert(XLogRecPtrToBytePos(*StartPos) == startbytepos);
 	Assert(XLogRecPtrToBytePos(*PrevPtr) == prevbytepos);
 
