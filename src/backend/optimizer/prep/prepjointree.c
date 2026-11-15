@@ -214,6 +214,7 @@ transform_MERGE_to_join(Query *parse)
 	FromExpr   *target;
 	Node	   *source;
 	int			sourcerti;
+	Relids		nullable_relids = NULL;
 
 	if (parse->commandType != CMD_MERGE)
 		return;
@@ -323,23 +324,25 @@ transform_MERGE_to_join(Query *parse)
 	parse->jointree->quals = NULL;
 
 	/*
-	 * If necessary, mark parse->targetlist entries that refer to the target
-	 * as nullable by the join.  Normally the targetlist will be empty for a
-	 * MERGE, but if the target is a trigger-updatable view, it will contain a
-	 * whole-row Var referring to the expanded view query.
+	 * Collect the RT indexes of relations on nullable sides of the join.
 	 */
-	if (parse->targetList != NIL &&
-		(jointype == JOIN_RIGHT || jointype == JOIN_FULL))
-		parse->targetList = (List *)
-			add_nulling_relids((Node *) parse->targetList,
-							   bms_make_singleton(parse->mergeTargetRelation),
-							   bms_make_singleton(joinrti));
+	if (jointype == JOIN_RIGHT || jointype == JOIN_FULL)
+		nullable_relids =
+			bms_add_member(nullable_relids, parse->mergeTargetRelation);
+	if (jointype == JOIN_LEFT || jointype == JOIN_FULL)
+		nullable_relids =
+			bms_join(nullable_relids,
+					 get_relids_in_jointree(source, true, true));
 
 	/*
-	 * If the source relation is on the outer side of the join, mark any
-	 * source relation Vars in the join condition, actions, and RETURNING list
-	 * as nullable by the join.  These Vars will be added to the targetlist by
-	 * preprocess_targetlist(), so it's important to mark them correctly here.
+	 * Mark Vars used above the join as nullable by the join.  This includes
+	 * Vars in the query targetlist, action expressions, and RETURNING list.
+	 * Vars from the latter expressions will be added to the targetlist by
+	 * preprocess_targetlist(), so they must be marked correctly here.
+	 *
+	 * Normally the query targetlist is empty for MERGE, but for a
+	 * trigger-updatable view it contains a whole-row Var referring to the
+	 * expanded view query.
 	 *
 	 * It might seem that this is not necessary for Vars in the join
 	 * condition, since it is inside the join, but it is also needed above the
@@ -348,38 +351,33 @@ transform_MERGE_to_join(Query *parse)
 	 * creates a modified copy of the join condition, for use above the join,
 	 * without modifying the original join condition, inside the join.
 	 */
-	if (jointype == JOIN_LEFT || jointype == JOIN_FULL)
+	if (nullable_relids != NULL)
 	{
-		Relids		sourcerelids;
+		Relids		nullingrel = bms_make_singleton(joinrti);
 
-		/*
-		 * If the source relation is a join, we must mark any Vars referring
-		 * to relations under the join as well as the join relation itself.
-		 */
-		sourcerelids = get_relids_in_jointree(source, true, true);
-
-		parse->mergeJoinCondition =
-			add_nulling_relids(parse->mergeJoinCondition,
-							   sourcerelids,
-							   bms_make_singleton(joinrti));
+		parse->targetList = (List *)
+			add_nulling_relids((Node *) parse->targetList,
+							   nullable_relids, nullingrel);
 
 		foreach_node(MergeAction, action, parse->mergeActionList)
 		{
 			action->qual =
 				add_nulling_relids(action->qual,
-								   sourcerelids,
-								   bms_make_singleton(joinrti));
+								   nullable_relids, nullingrel);
 
 			action->targetList = (List *)
 				add_nulling_relids((Node *) action->targetList,
-								   sourcerelids,
-								   bms_make_singleton(joinrti));
+								   nullable_relids, nullingrel);
 		}
 
 		parse->returningList = (List *)
 			add_nulling_relids((Node *) parse->returningList,
-							   sourcerelids,
-							   bms_make_singleton(joinrti));
+							   nullable_relids, nullingrel);
+
+		if (jointype == JOIN_LEFT || jointype == JOIN_FULL)
+			parse->mergeJoinCondition =
+				add_nulling_relids(parse->mergeJoinCondition,
+								   nullable_relids, nullingrel);
 	}
 
 	/*
