@@ -579,8 +579,8 @@ typedef struct ExprEvalStep
 		/* for EEOP_DOMAIN_NOTNULL / DOMAIN_CHECK */
 		struct
 		{
-			/* name of constraint */
-			char	   *constraintname;
+			/* constraint being checked */
+			DomainConstraintState *constraint;
 			/* where the result of a CHECK constraint will be stored */
 			Datum	   *checkvalue;
 			bool	   *checknull;

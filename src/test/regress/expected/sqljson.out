@@ -1337,6 +1337,7 @@ LINE 1: SELECT NULL::jd5 IS JSON WITH UNIQUE KEYS;
 -- domain constraint violation during cast
 SELECT a::jd2 IS JSON WITH UNIQUE KEYS as col1 FROM (VALUES('{"a": 1, "a": 2}')) s(a); -- error
 ERROR:  value for domain jd2 violates check constraint "jd2_check"
+DETAIL:  Check constraint expression: ((VALUE -> 'a'::text) = '1'::jsonb).
 -- A user-defined string-category type with no implicit cast to text must
 -- produce a clean error rather than crash for IS JSON / JSON() input
 -- (per bug #19491).
@@ -1575,6 +1576,7 @@ SELECT JSON_SERIALIZE('123' RETURNING sqljson_char2);
 ERROR:  value too long for type character(2)
 SELECT JSON_SERIALIZE('12' RETURNING sqljson_char2);
 ERROR:  value for domain sqljson_char2 violates check constraint "sqljson_char2_check"
+DETAIL:  Check constraint expression: (VALUE <> '12'::bpchar).
 -- Bug #18657: JsonValueExpr.raw_expr was not initialized in ExecInitExprRec()
 -- causing the Aggrefs contained in it to also not be initialized, which led
 -- to a crash in ExecBuildAggTrans() as mentioned in the bug report:

@@ -63,6 +63,7 @@
 #include "utils/lsyscache.h"
 #include "utils/partcache.h"
 #include "utils/rls.h"
+#include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
 
 
@@ -1831,9 +1832,9 @@ ExecutePlan(QueryDesc *queryDesc,
 /*
  * ExecRelCheck --- check that tuple meets check constraints for result relation
  *
- * Returns NULL if OK, else name of failed check constraint
+ * Returns NULL if OK, else struct of failed check constraint
  */
-static const char *
+static const ConstrCheck *
 ExecRelCheck(ResultRelInfo *resultRelInfo,
 			 TupleTableSlot *slot, EState *estate)
 {
@@ -1897,7 +1898,7 @@ ExecRelCheck(ResultRelInfo *resultRelInfo,
 		 * ExecQual.
 		 */
 		if (checkconstr && !ExecCheck(checkconstr, econtext))
-			return check[i].ccname;
+			return &check[i];
 	}
 
 	/* NULL result means no error */
@@ -2084,11 +2085,13 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 	 */
 	if (rel->rd_rel->relchecks > 0)
 	{
-		const char *failed;
+		const ConstrCheck *failed;
 
 		if ((failed = ExecRelCheck(resultRelInfo, slot, estate)) != NULL)
 		{
+			char	   *check_desc;
 			char	   *val_desc;
+			List	   *context;
 			Relation	orig_rel = rel;
 
 			/*
@@ -2123,6 +2126,10 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 			else
 				modifiedCols = bms_union(ExecGetInsertedCols(resultRelInfo, estate),
 										 ExecGetUpdatedCols(resultRelInfo, estate));
+
+			context = deparse_context_for(RelationGetRelationName(orig_rel), RelationGetRelid(orig_rel));
+			check_desc = deparse_expression(stringToNode(failed->ccbin), context, false, false);
+
 			val_desc = ExecBuildSlotValueDescription(RelationGetRelid(rel),
 													 slot,
 													 tupdesc,
@@ -2131,9 +2138,11 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 			ereport(ERROR,
 					(errcode(ERRCODE_CHECK_VIOLATION),
 					 errmsg("new row for relation \"%s\" violates check constraint \"%s\"",
-							RelationGetRelationName(orig_rel), failed),
-					 val_desc ? errdetail("Failing row contains %s.", val_desc) : 0,
-					 errtableconstraint(orig_rel, failed)));
+							RelationGetRelationName(orig_rel), failed->ccname),
+					 val_desc ?
+					 errdetail("Failing row contains %s. Check constraint expression: %s.",
+							   val_desc, check_desc) : 0,
+					 errtableconstraint(orig_rel, failed->ccname)));
 		}
 	}
 }

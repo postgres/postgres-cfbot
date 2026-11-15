@@ -3576,7 +3576,7 @@ ExecInitCoerceToDomain(ExprEvalStep *scratch, CoerceToDomain *ctest,
 		Datum	   *save_innermost_domainval;
 		bool	   *save_innermost_domainnull;
 
-		scratch->d.domaincheck.constraintname = con->name;
+		scratch->d.domaincheck.constraint = con;
 
 		/*
 		 * If this CoerceToDomain is being evaluated softly and its argument,
