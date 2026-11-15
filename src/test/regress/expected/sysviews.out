@@ -161,6 +161,7 @@ select name, setting from pg_settings where name like 'enable%';
  enable_distinct_reordering     | on
  enable_eager_aggregate         | on
  enable_gathermerge             | on
+ enable_goo_join_search         | off
  enable_group_by_reordering     | on
  enable_groupagg                | on
  enable_hashagg                 | on
