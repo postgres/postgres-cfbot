@@ -16,11 +16,19 @@
 
 #include "nodes/pathnodes.h"
 
+typedef enum GooGreedyStrategy
+{
+	GOO_GREEDY_STRATEGY_RESULT_SIZE,
+	GOO_GREEDY_STRATEGY_COST,
+	GOO_GREEDY_STRATEGY_COMBINED
+}			GooGreedyStrategy;
+
 /*
  * allpaths.c
  */
 extern PGDLLIMPORT bool enable_geqo;
 extern PGDLLIMPORT bool enable_goo_join_search;
+extern PGDLLIMPORT int goo_greedy_strategy;
 extern PGDLLIMPORT bool enable_eager_aggregate;
 extern PGDLLIMPORT int geqo_threshold;
 extern PGDLLIMPORT double min_eager_agg_group_size;

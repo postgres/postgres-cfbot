@@ -1228,6 +1228,16 @@
   max => 'MAX_KILOBYTES',
 },
 
+/* Test-only GUC. */
+{ name => 'goo_greedy_strategy', type => 'enum', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
+  short_desc => 'Selects the heuristic used by GOO to compare join candidates.',
+  long_desc => 'Valid values are result_size, cost, and combined.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'goo_greedy_strategy',
+  boot_val => 'GOO_GREEDY_STRATEGY_COMBINED',
+  options => 'goo_greedy_strategy_options',
+},
+
 { name => 'gss_accept_delegation', type => 'bool', context => 'PGC_SIGHUP', group => 'CONN_AUTH_AUTH',
   short_desc => 'Sets whether GSSAPI delegation should be accepted from the client.',
   variable => 'pg_gss_accept_delegation',
