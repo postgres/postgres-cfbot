@@ -2962,10 +2962,10 @@ View definition:
    FROM at_view_1 v1;
 
 explain (verbose, costs off) select * from at_view_2;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                             QUERY PLAN                              
+---------------------------------------------------------------------
  Seq Scan on public.at_base_table bt
-   Output: bt.id, bt.stuff, to_json(ROW(bt.id, bt.stuff))
+   Output: bt.id, bt.stuff, to_json(ROW(bt.id, bt.stuff)::at_view_1)
 (2 rows)
 
 select * from at_view_2;
@@ -3002,10 +3002,10 @@ View definition:
    FROM at_view_1 v1;
 
 explain (verbose, costs off) select * from at_view_2;
-                         QUERY PLAN                          
--------------------------------------------------------------
+                               QUERY PLAN                               
+------------------------------------------------------------------------
  Seq Scan on public.at_base_table bt
-   Output: bt.id, bt.stuff, to_json(ROW(bt.id, bt.stuff, 4))
+   Output: bt.id, bt.stuff, to_json(ROW(bt.id, bt.stuff, 4)::at_view_1)
 (2 rows)
 
 select * from at_view_2;
