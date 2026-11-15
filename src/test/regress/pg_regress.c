@@ -1918,7 +1918,34 @@ schedule_read_group(_sched *s, char **tests, int *num_tests)
 }
 
 /*
- * Run all the tests specified in one schedule file.
+ * During  the test execution the concurrency level varies
+ * this computes the average concurrency from the moment the
+ * first test starts to the moment the last test stops.
+ */
+static void
+log_group_concurrency(instr_time *test_start, instr_time *test_stop, 
+	double *grand_total, int num_tests)
+{
+	double group_start = INSTR_TIME_GET_NANOSEC(test_start[0]);
+	double group_stop = INSTR_TIME_GET_NANOSEC(test_stop[0]);
+	double total = (group_stop - group_start);
+	for(int i = 1; i < num_tests; i++)
+	{
+		double t0 = INSTR_TIME_GET_NANOSEC(test_start[i]);
+		double tf = INSTR_TIME_GET_NANOSEC(test_stop[i]);
+		if (t0 < group_start)
+			group_start = t0;
+		if (tf > group_stop)
+			group_stop = tf;
+		total += tf - t0;
+	}
+	*grand_total += total;
+	if (num_tests > 1)
+		note("effective concurrency %.2f / %d", total / (group_stop - group_start), num_tests);
+}
+
+/*
+ * Run all the tests specified in one schedule file
  */
 static void
 run_schedule(const char *schedule, test_start_function startfunc,
@@ -1933,6 +1960,9 @@ run_schedule(const char *schedule, test_start_function startfunc,
 	instr_time	stoptimes[MAX_PARALLEL_TESTS];
 	int			statuses[MAX_PARALLEL_TESTS];
 	_sched		rd;
+	double		total_test_time = 0;
+	instr_time	schedule_start_time;
+	instr_time	schedule_stop_time;
 	int			num_tests;
 
 	memset(tests, 0, sizeof(tests));
@@ -1947,6 +1977,7 @@ run_schedule(const char *schedule, test_start_function startfunc,
 	if (!rd.file)
 		bail("could not open file \"%s\" for reading: %m", schedule);
 
+	INSTR_TIME_SET_CURRENT(schedule_start_time);
 	while (schedule_read_group(&rd, tests, &num_tests))
 	{
 		int			i;
@@ -1992,6 +2023,8 @@ run_schedule(const char *schedule, test_start_function startfunc,
 			wait_for_tests(pids, statuses, stoptimes, tests, num_tests);
 			note_end();
 		}
+
+		log_group_concurrency(starttimes, stoptimes, &total_test_time, num_tests);
 
 		/* Check results for all tests */
 		for (i = 0; i < num_tests; i++)
@@ -2054,6 +2087,11 @@ run_schedule(const char *schedule, test_start_function startfunc,
 			free_stringlist(&tags[i]);
 		}
 	}
+	INSTR_TIME_SET_CURRENT(schedule_stop_time);
+	
+	note("schedule effective concurrency %.2f", 
+		total_test_time / (INSTR_TIME_GET_NANOSEC(schedule_stop_time) - INSTR_TIME_GET_NANOSEC(schedule_start_time))
+	);
 
 	fclose(rd.file);
 }
