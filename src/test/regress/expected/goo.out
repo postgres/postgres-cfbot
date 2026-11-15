@@ -43,6 +43,13 @@ INSERT INTO t16 SELECT i, i FROM generate_series(1,10) i;
 INSERT INTO t17 SELECT i, i FROM generate_series(1,10) i;
 INSERT INTO t18 SELECT i, i FROM generate_series(1,10) i;
 ANALYZE;
+-- Verify combined is the default strategy.
+SHOW goo_greedy_strategy;
+ goo_greedy_strategy 
+---------------------
+ combined
+(1 row)
+
 --
 -- Basic 3-way join (sanity check)
 --
@@ -177,42 +184,42 @@ JOIN t12 ON t10.k = t12.k
 JOIN t13 ON t11.l = t13.l
 JOIN t14 ON t12.m = t14.m
 JOIN t15 ON t13.n = t15.n;
-                           QUERY PLAN                           
-----------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  Aggregate
    ->  Hash Join
          Hash Cond: (t7.h = t9.h)
          ->  Hash Join
                Hash Cond: (t8.i = t10.i)
                ->  Hash Join
-                     Hash Cond: (t2.c = t4.c)
+                     Hash Cond: (t6.g = t8.g)
                      ->  Hash Join
-                           Hash Cond: (t3.b = t1.b)
+                           Hash Cond: (t5.f = t7.f)
                            ->  Hash Join
-                                 Hash Cond: (t5.f = t7.f)
+                                 Hash Cond: (t4.e = t6.e)
                                  ->  Hash Join
                                        Hash Cond: (t3.d = t5.d)
-                                       ->  Seq Scan on t3
+                                       ->  Hash Join
+                                             Hash Cond: (t2.c = t4.c)
+                                             ->  Hash Join
+                                                   Hash Cond: (t1.b = t3.b)
+                                                   ->  Hash Join
+                                                         Hash Cond: (t1.a = t2.a)
+                                                         ->  Seq Scan on t1
+                                                         ->  Hash
+                                                               ->  Seq Scan on t2
+                                                   ->  Hash
+                                                         ->  Seq Scan on t3
+                                             ->  Hash
+                                                   ->  Seq Scan on t4
                                        ->  Hash
                                              ->  Seq Scan on t5
                                  ->  Hash
-                                       ->  Seq Scan on t7
+                                       ->  Seq Scan on t6
                            ->  Hash
-                                 ->  Hash Join
-                                       Hash Cond: (t1.a = t2.a)
-                                       ->  Seq Scan on t1
-                                       ->  Hash
-                                             ->  Seq Scan on t2
+                                 ->  Seq Scan on t7
                      ->  Hash
-                           ->  Hash Join
-                                 Hash Cond: (t6.g = t8.g)
-                                 ->  Hash Join
-                                       Hash Cond: (t4.e = t6.e)
-                                       ->  Seq Scan on t4
-                                       ->  Hash
-                                             ->  Seq Scan on t6
-                                 ->  Hash
-                                       ->  Seq Scan on t8
+                           ->  Seq Scan on t8
                ->  Hash
                      ->  Hash Join
                            Hash Cond: (t12.m = t14.m)
@@ -601,30 +608,30 @@ JOIN chain1c ON chain1b.val = chain1c.id
 JOIN chain2a ON chain1a.val = chain2a.id  -- Cross-chain join
 JOIN chain2b ON chain2a.val = chain2b.id
 JOIN chain2c ON chain2b.val = chain2c.id;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
  Aggregate
    ->  Hash Join
-         Hash Cond: (chain1a.val = chain2a.id)
+         Hash Cond: (chain2b.val = chain2c.id)
          ->  Hash Join
-               Hash Cond: (chain1b.val = chain1c.id)
+               Hash Cond: (chain2a.val = chain2b.id)
                ->  Hash Join
-                     Hash Cond: (chain1a.id = chain1b.id)
-                     ->  Seq Scan on chain1a
-                     ->  Hash
-                           ->  Seq Scan on chain1b
-               ->  Hash
-                     ->  Seq Scan on chain1c
-         ->  Hash
-               ->  Hash Join
-                     Hash Cond: (chain2b.val = chain2c.id)
+                     Hash Cond: (chain1a.val = chain2a.id)
                      ->  Hash Join
-                           Hash Cond: (chain2a.val = chain2b.id)
-                           ->  Seq Scan on chain2a
+                           Hash Cond: (chain1b.id = chain1a.id)
+                           ->  Hash Join
+                                 Hash Cond: (chain1b.val = chain1c.id)
+                                 ->  Seq Scan on chain1b
+                                 ->  Hash
+                                       ->  Seq Scan on chain1c
                            ->  Hash
-                                 ->  Seq Scan on chain2b
+                                 ->  Seq Scan on chain1a
                      ->  Hash
-                           ->  Seq Scan on chain2c
+                           ->  Seq Scan on chain2a
+               ->  Hash
+                     ->  Seq Scan on chain2b
+         ->  Hash
+               ->  Seq Scan on chain2c
 (22 rows)
 
 --
@@ -698,3 +705,4 @@ DEALLOCATE goo_plan;
 DEALLOCATE standard_plan;
 RESET geqo_threshold;
 RESET enable_goo_join_search;
+RESET goo_greedy_strategy;

@@ -47,6 +47,9 @@ INSERT INTO t18 SELECT i, i FROM generate_series(1,10) i;
 
 ANALYZE;
 
+-- Verify combined is the default strategy.
+SHOW goo_greedy_strategy;
+
 --
 -- Basic 3-way join (sanity check)
 --
@@ -362,3 +365,4 @@ DEALLOCATE standard_plan;
 
 RESET geqo_threshold;
 RESET enable_goo_join_search;
+RESET goo_greedy_strategy;
