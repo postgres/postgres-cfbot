@@ -33,6 +33,9 @@ tests += {
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
   'tap': {
+    'env': {
+      'enable_injection_points': get_option('injection_points') ? 'yes' : 'no',
+    },
     'tests': [
       't/001_basic.pl',
       't/002_databases.pl',
@@ -45,6 +48,7 @@ tests += {
       't/009_growing_files.pl',
       't/010_keep_recycled_wals.pl',
       't/011_wal_copy.pl',
+      't/012_hint_bits.pl',
     ],
   },
 }

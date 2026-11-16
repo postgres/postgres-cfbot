@@ -1146,11 +1146,11 @@ XLogCheckBufferNeedsBackup(Buffer buffer)
  * MarkBufferDirtyHint().
  *
  * We only need to do something if page has not yet been full page written in
- * this checkpoint round. The LSN of the inserted wal record is returned if we
- * had to write, InvalidXLogRecPtr otherwise.
+ * this checkpoint round, or if 'force' is set. The LSN of the inserted wal
+ * record is returned if we had to write, InvalidXLogRecPtr otherwise.
  */
 XLogRecPtr
-XLogSaveBufferForHint(Buffer buffer, bool buffer_std)
+XLogSaveBufferForHint(Buffer buffer, bool buffer_std, bool force)
 {
 	XLogRecPtr	recptr = InvalidXLogRecPtr;
 	XLogRecPtr	lsn;
@@ -1177,7 +1177,7 @@ XLogSaveBufferForHint(Buffer buffer, bool buffer_std)
 	 */
 	lsn = PageGetLSN(BufferGetPage(buffer));
 
-	if (lsn <= RedoRecPtr)
+	if (lsn <= RedoRecPtr || force)
 	{
 		int			flags = 0;
 

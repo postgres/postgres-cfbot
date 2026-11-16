@@ -293,6 +293,8 @@ extern XLogRecPtr XLogAssignLSN(void);
 extern void UpdateFullPageWrites(void);
 extern void GetFullPageWriteInfo(XLogRecPtr *RedoRecPtr_p, bool *doPageWrites_p);
 extern XLogRecPtr GetRedoRecPtr(void);
+extern XLogRecPtr GetLastReplayedCheckPointRedo(void);
+extern bool RecoveryHintXidIsSafe(TransactionId xid, XLogRecPtr page_lsn);
 extern XLogRecPtr GetInsertRecPtr(void);
 extern XLogRecPtr GetFlushRecPtr(TimeLineID *insertTLI);
 extern TimeLineID GetWALInsertionTimeLine(void);

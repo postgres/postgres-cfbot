@@ -317,7 +317,9 @@ extern void BufferGetTag(Buffer buffer, RelFileLocator *rlocator,
 
 extern void MarkBufferDirtyHint(Buffer buffer, bool buffer_std);
 
-extern bool BufferSetHintBits16(uint16 *ptr, uint16 val, Buffer buffer);
+extern bool BufferSetHintBits16(uint16 *ptr, uint16 val, Buffer buffer,
+								TransactionId xid);
+extern bool BufferHintsNeedXid(Buffer buffer);
 extern bool BufferBeginSetHintBits(Buffer buffer);
 extern void BufferFinishSetHintBits(Buffer buffer, bool mark_dirty, bool buffer_std);
 

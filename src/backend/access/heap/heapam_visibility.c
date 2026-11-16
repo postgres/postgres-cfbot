@@ -96,7 +96,25 @@ typedef enum SetHintBitsState
 	SHB_DISABLED,
 	/* allowed to set hint bits */
 	SHB_ENABLED,
+	/* hint bits are restricted, set them one by one with their XID */
+	SHB_PER_XID,
 } SetHintBitsState;
+
+/*
+ * The transaction a hint bit is about, or InvalidTransactionId if that is
+ * not a single plain XID.
+ */
+static inline TransactionId
+HintBitXid(HeapTupleHeader tuple, uint16 infomask)
+{
+	if (tuple->t_infomask & HEAP_MOVED)
+		return InvalidTransactionId;
+	if (infomask & (HEAP_XMIN_COMMITTED | HEAP_XMIN_INVALID))
+		return HeapTupleHeaderGetRawXmin(tuple);
+	if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
+		return InvalidTransactionId;
+	return HeapTupleHeaderGetRawXmax(tuple);
+}
 
 /*
  * SetHintBitsExt()
@@ -165,29 +183,33 @@ SetHintBitsExt(HeapTupleHeader tuple, Buffer buffer,
 		}
 	}
 
+	if (state && *state == SHB_INITIAL)
+	{
+		if (BufferBeginSetHintBits(buffer))
+			*state = SHB_ENABLED;
+		else if (BufferHintsNeedXid(buffer))
+			*state = SHB_PER_XID;
+		else
+		{
+			*state = SHB_DISABLED;
+			return;
+		}
+	}
+
 	/*
 	 * If we're not operating in batch mode, use BufferSetHintBits16() to mark
 	 * the page dirty, that's cheaper than
 	 * BufferBeginSetHintBits()/BufferFinishSetHintBits(). That's important
 	 * for cases where we set a lot of hint bits on a page individually.
 	 */
-	if (!state)
+	if (!state || unlikely(*state == SHB_PER_XID))
 	{
 		BufferSetHintBits16(&tuple->t_infomask,
-							tuple->t_infomask | infomask, buffer);
+							tuple->t_infomask | infomask, buffer,
+							HintBitXid(tuple, infomask));
 		return;
 	}
 
-	if (*state == SHB_INITIAL)
-	{
-		if (!BufferBeginSetHintBits(buffer))
-		{
-			*state = SHB_DISABLED;
-			return;
-		}
-
-		*state = SHB_ENABLED;
-	}
 	tuple->t_infomask |= infomask;
 }
 

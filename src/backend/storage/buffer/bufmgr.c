@@ -5737,6 +5737,42 @@ IncrBufferRefCount(Buffer buffer)
 }
 
 /*
+ * Has the first checkpoint after recovery completed?
+ *
+ * Until then, a buffer can still be dirty from before the last replayed
+ * checkpoint.  A hint bit set on it would reach disk without pg_rewind
+ * noticing the block.  So unless its transaction ended early enough, the
+ * hint is skipped in recovery, and WAL-logged or skipped after.
+ */
+static bool recovery_hints_done = false;
+
+/*
+ * Is this a buffer on which hint bits need special care, unless the
+ * transaction is known to be safe?  In recovery such hints must not be set,
+ * after recovery they must be WAL-logged.
+ */
+static inline bool
+RecoveryHintRestricted(Buffer buffer, uint64 buf_state)
+{
+	XLogRecPtr	threshold;
+
+	if (likely(recovery_hints_done) || !(buf_state & BM_PERMANENT) ||
+		!XLogHintBitIsNeeded())
+		return false;
+
+	threshold = GetLastReplayedCheckPointRedo();
+	if (!XLogRecPtrIsValid(threshold))
+	{
+		recovery_hints_done = true;
+		return false;
+	}
+
+	/* in recovery a clean buffer is fine, the hint does not dirty it */
+	return BufferGetLSNAtomic(buffer) <= threshold &&
+		((buf_state & BM_DIRTY) || !RecoveryInProgress());
+}
+
+/*
  * Shared-buffer only helper for MarkBufferDirtyHint() and
  * BufferSetHintBits16().
  *
@@ -5746,7 +5782,7 @@ IncrBufferRefCount(Buffer buffer)
  */
 static inline void
 MarkSharedBufferDirtyHint(Buffer buffer, BufferDesc *bufHdr, uint64 lockstate,
-						  bool buffer_std)
+						  bool buffer_std, bool force_wal)
 {
 	Page		page = BufferGetPage(buffer);
 
@@ -5824,9 +5860,15 @@ MarkSharedBufferDirtyHint(Buffer buffer, BufferDesc *bufHdr, uint64 lockstate,
 		 * Note that aggressive cleaning of blocks dirtied by hint bit setting
 		 * would increase the call rate. Bulk setting of hint bits would
 		 * reduce the call rate...
+		 *
+		 * A clean buffer can carry hints set during recovery, which nobody
+		 * checked.  So until the first checkpoint after recovery, WAL-log
+		 * regardless of the hint being set now.
 		 */
 		if (wal_log)
-			lsn = XLogSaveBufferForHint(buffer, buffer_std);
+			lsn = XLogSaveBufferForHint(buffer, buffer_std,
+										force_wal ||
+										RecoveryHintRestricted(buffer, lockstate));
 
 		if (XLogRecPtrIsValid(lsn))
 		{
@@ -5852,6 +5894,20 @@ MarkSharedBufferDirtyHint(Buffer buffer, BufferDesc *bufHdr, uint64 lockstate,
 		if (VacuumCostActive)
 			VacuumCostBalance += VacuumCostPageDirty;
 	}
+	else if (unlikely(force_wal) &&
+			 !RelFileLocatorSkippingWAL(BufTagGetRelFileLocator(&bufHdr->tag)))
+	{
+		XLogRecPtr	lsn;
+
+		/* dirtied before the last replayed checkpoint, WAL-log the hint */
+		lsn = XLogSaveBufferForHint(buffer, buffer_std, true);
+		if (XLogRecPtrIsValid(lsn))
+		{
+			LockBufHdr(bufHdr);
+			PageSetLSN(page, lsn);
+			UnlockBufHdr(bufHdr);
+		}
+	}
 }
 
 /*
@@ -5873,6 +5929,7 @@ inline void
 MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 {
 	BufferDesc *bufHdr;
+	uint64		buf_state;
 
 	if (!BufferIsValid(buffer))
 		elog(ERROR, "bad buffer ID: %d", buffer);
@@ -5884,10 +5941,9 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 	}
 
 	bufHdr = GetBufferDescriptor(buffer - 1);
+	buf_state = pg_atomic_read_u64(&bufHdr->state);
 
-	MarkSharedBufferDirtyHint(buffer, bufHdr,
-							  pg_atomic_read_u64(&bufHdr->state),
-							  buffer_std);
+	MarkSharedBufferDirtyHint(buffer, bufHdr, buf_state, buffer_std, false);
 }
 
 /*
@@ -7026,7 +7082,8 @@ IsBufferCleanupOK(Buffer buffer)
  * Updates *lockstate when returning true.
  */
 static inline bool
-SharedBufferBeginSetHintBits(Buffer buffer, BufferDesc *buf_hdr, uint64 *lockstate)
+SharedBufferBeginSetHintBits(Buffer buffer, BufferDesc *buf_hdr, uint64 *lockstate,
+							 TransactionId xid, bool *force_wal)
 {
 	uint64		old_state;
 	PrivateRefCountEntry *ref;
@@ -7040,6 +7097,20 @@ SharedBufferBeginSetHintBits(Buffer buffer, BufferDesc *buf_hdr, uint64 *locksta
 	mode = ref->data.lockmode;
 	if (mode == BUFFER_LOCK_UNLOCK)
 		elog(ERROR, "buffer is not locked");
+
+	/*
+	 * Don't set hints on a page last changed before the last replayed
+	 * checkpoint, unless the transaction ended early enough.  After recovery,
+	 * BufferSetHintBits16() WAL-logs the hint instead.
+	 */
+	old_state = pg_atomic_read_u64(&buf_hdr->state);
+	if (RecoveryHintRestricted(buffer, old_state) &&
+		!RecoveryHintXidIsSafe(xid, BufferGetLSNAtomic(buffer)))
+	{
+		if (force_wal == NULL || RecoveryInProgress())
+			return false;
+		*force_wal = true;
+	}
 
 	/* we're done if we are already holding a sufficient lock level */
 	if (mode == BUFFER_LOCK_EXCLUSIVE || mode == BUFFER_LOCK_SHARE_EXCLUSIVE)
@@ -7133,7 +7204,23 @@ BufferBeginSetHintBits(Buffer buffer)
 
 	buf_hdr = GetBufferDescriptor(buffer - 1);
 
-	return SharedBufferBeginSetHintBits(buffer, buf_hdr, &lockstate);
+	return SharedBufferBeginSetHintBits(buffer, buf_hdr, &lockstate,
+										InvalidTransactionId, NULL);
+}
+
+/*
+ * Did BufferBeginSetHintBits() fail because hint bits are restricted on this
+ * buffer?  If so, they can still be set one by one with
+ * BufferSetHintBits16(), which is told the transaction.
+ */
+bool
+BufferHintsNeedXid(Buffer buffer)
+{
+	if (BufferIsLocal(buffer))
+		return false;
+
+	return RecoveryHintRestricted(buffer,
+								  pg_atomic_read_u64(&GetBufferDescriptor(buffer - 1)->state));
 }
 
 /*
@@ -7168,10 +7255,11 @@ BufferFinishSetHintBits(Buffer buffer, bool mark_dirty, bool buffer_std)
  * than the former when setting hint bits multiple times in the same buffer.
  */
 bool
-BufferSetHintBits16(uint16 *ptr, uint16 val, Buffer buffer)
+BufferSetHintBits16(uint16 *ptr, uint16 val, Buffer buffer, TransactionId xid)
 {
 	BufferDesc *buf_hdr;
 	uint64		lockstate;
+	bool		force_wal = false;
 #ifdef USE_ASSERT_CHECKING
 	char	   *page;
 
@@ -7191,11 +7279,12 @@ BufferSetHintBits16(uint16 *ptr, uint16 val, Buffer buffer)
 
 	buf_hdr = GetBufferDescriptor(buffer - 1);
 
-	if (SharedBufferBeginSetHintBits(buffer, buf_hdr, &lockstate))
+	if (SharedBufferBeginSetHintBits(buffer, buf_hdr, &lockstate, xid,
+									 &force_wal))
 	{
 		*ptr = val;
 
-		MarkSharedBufferDirtyHint(buffer, buf_hdr, lockstate, true);
+		MarkSharedBufferDirtyHint(buffer, buf_hdr, lockstate, true, force_wal);
 
 		return true;
 	}
