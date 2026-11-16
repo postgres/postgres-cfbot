@@ -438,6 +438,12 @@ struct PlannerInfo
 	/* set true once ECs are canonical */
 	bool		ec_merging_done;
 
+	/* set true once the base relations' UniqueKeys have been built */
+	bool		uniquekeys_built;
+
+	/* base relations that keep a join relation from being proven distinct */
+	Relids		no_uniquekey_relids;
+
 	/* list of "canonical" PathKeys */
 	List	   *canon_pathkeys;
 
@@ -868,15 +874,22 @@ typedef struct PartitionSchemeData *PartitionScheme;
  * Two fields are used to cache knowledge acquired during the join search
  * about whether this rel is provably unique when being joined to given other
  * relation(s), ie, it can have at most one row matching any given row from
- * that join relation.  Currently we only attempt such proofs, and thus only
- * populate these fields, for base rels; but someday they might be used for
- * join rels too:
+ * that join relation.  These are used for both base rels and join rels:
  *
  *		unique_for_rels - list of UniqueRelInfo, each one being a set of other
  *					rels for which this one has been proven unique
  *		non_unique_for_rels - list of Relid sets, each one being a set of
  *					other rels for which we have tried and failed to prove
  *					this one unique
+ *
+ * Two fields hold the information that such proofs for join rels are based
+ * on (see uniquekeys.c).  They are only used for base rels:
+ *
+ *		uniquekeys - list of UniqueKeys, each one being a set of
+ *					EquivalenceClasses that no two rows of this rel agree on
+ *					(filled when first needed)
+ *		own_eclass_indexes - EquivalenceClasses that have a member belonging
+ *					to this rel alone (filled when first needed)
  *
  * Three fields are used to cache information about unique-ification of this
  * relation.  This is used to support semijoins where the relation appears on
@@ -1127,6 +1140,14 @@ typedef struct RelOptInfo
 	List	   *unique_for_rels;
 	/* known not unique for these set(s) */
 	List	   *non_unique_for_rels;
+
+	/*
+	 * information for proving join relations unique
+	 */
+	/* sets of ECs that no two rows of this rel agree on */
+	List	   *uniquekeys;
+	/* indexes in root->eq_classes of ECs with a member of this rel alone */
+	Bitmapset  *own_eclass_indexes;
 
 	/*
 	 * information about unique-ification of this relation
@@ -1674,6 +1695,8 @@ typedef struct EquivalenceClass
 	bool		ec_has_const;	/* any pseudoconstants in ec_members? */
 	bool		ec_has_volatile;	/* the (sole) member is a volatile expr */
 	bool		ec_broken;		/* failed to generate needed clauses? */
+	int			ec_index;		/* index in root->eq_classes, valid once EC
+								 * merging is done */
 	Index		ec_sortref;		/* originating sortclause label, or 0 */
 	Index		ec_min_security;	/* minimum security_level in ec_sources */
 	Index		ec_max_security;	/* maximum security_level in ec_sources */
@@ -3855,6 +3878,27 @@ typedef struct AggTransInfo
 	Datum		initValue pg_node_attr(read_write_ignore);
 	bool		initValueIsNull;
 } AggTransInfo;
+
+/*
+ * UniqueKey
+ *
+ * A UniqueKey represents the knowledge that no two rows of a base relation
+ * have equal values in all the EquivalenceClasses of a certain set.  Each EC
+ * in the set has a member belonging to the relation.  An empty set means that
+ * the relation has at most one row.
+ *
+ * Rows containing NULLs are not covered: the relation can have any number of
+ * rows in which the value of some EC in the set is NULL.
+ */
+typedef struct UniqueKey
+{
+	pg_node_attr(no_copy_equal, no_read, no_query_jumble)
+
+	NodeTag		type;
+
+	/* indexes in PlannerInfo's eq_classes list of the ECs in the key */
+	Bitmapset  *eclass_indexes;
+} UniqueKey;
 
 /*
  * UniqueRelInfo caches a fact that a relation is unique when being joined

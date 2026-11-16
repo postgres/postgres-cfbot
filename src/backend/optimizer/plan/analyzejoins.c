@@ -40,6 +40,7 @@
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 
 /*
  * Utility structure.  A sorting procedure is needed to simplify the search
@@ -601,7 +602,10 @@ reduce_semijoin_in_jointree(Node *jtnode, Relids syn_righthand)
 static bool
 rel_supports_distinctness(PlannerInfo *root, RelOptInfo *rel)
 {
-	/* We only know about baserels ... */
+	/* For a join relation, the proof has to come from UniqueKeys */
+	if (IS_JOIN_REL(rel))
+		return joinrel_supports_distinctness(root, rel);
+	/* Otherwise we only know about baserels ... */
 	if (rel->reloptkind != RELOPT_BASEREL)
 		return false;
 	if (rel->rtekind == RTE_RELATION)
@@ -662,6 +666,15 @@ static bool
 rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list,
 					List **extra_clauses)
 {
+	/*
+	 * For a join relation, see if UniqueKeys can prove it.  We can't supply
+	 * extra_clauses that way, but only self-join checks ask for those, and
+	 * they are only made on baserels.
+	 */
+	if (IS_JOIN_REL(rel))
+		return extra_clauses == NULL &&
+			joinrel_is_distinct_for(root, rel, clause_list);
+
 	/*
 	 * We could skip a couple of tests here if we assume all callers checked
 	 * rel_supports_distinctness first, but it doesn't seem worth taking any
@@ -1104,7 +1117,9 @@ innerrel_is_unique_ext(PlannerInfo *root,
 	{
 		/*
 		 * Cache the positive result for future probes, being sure to keep it
-		 * in the planner_cxt even if we are working in GEQO.
+		 * in the same context as the innerrel.  For a baserel that is the
+		 * planner_cxt even if we are working in GEQO, while a joinrel built
+		 * within GEQO is short-lived, and so should its cache entries be.
 		 *
 		 * Note: one might consider trying to isolate the minimal subset of
 		 * the outerrels that proved the innerrel unique.  But it's not worth
@@ -1112,7 +1127,7 @@ innerrel_is_unique_ext(PlannerInfo *root,
 		 * and so we'll see the minimally sufficient outerrels before any
 		 * supersets of them anyway.
 		 */
-		old_context = MemoryContextSwitchTo(root->planner_cxt);
+		old_context = MemoryContextSwitchTo(GetMemoryChunkContext(innerrel));
 		uniqueRelInfo = makeNode(UniqueRelInfo);
 		uniqueRelInfo->outerrelids = bms_copy(outerrelids);
 		uniqueRelInfo->self_join = self_join;
@@ -1143,7 +1158,7 @@ innerrel_is_unique_ext(PlannerInfo *root,
 		 */
 		if (force_cache || root->assumeReplanning)
 		{
-			old_context = MemoryContextSwitchTo(root->planner_cxt);
+			old_context = MemoryContextSwitchTo(GetMemoryChunkContext(innerrel));
 			innerrel->non_unique_for_rels =
 				lappend(innerrel->non_unique_for_rels,
 						bms_copy(outerrelids));
