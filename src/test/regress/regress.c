@@ -21,6 +21,8 @@
 
 #include "access/detoast.h"
 #include "access/htup_details.h"
+#include "access/table.h"
+#include "access/tableam.h"
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_operator.h"
@@ -1743,4 +1745,24 @@ test_pg_locale_apis(PG_FUNCTION_ARGS)
 	test_case_mapping(locale);
 
 	PG_RETURN_VOID();
+}
+
+/*
+ * Test both modes of the table AM's emptiness check.
+ */
+PG_FUNCTION_INFO_V1(test_table_is_empty);
+Datum
+test_table_is_empty(PG_FUNCTION_ARGS)
+{
+	Relation	rel;
+	bool		is_empty;
+
+	rel = table_open(PG_GETARG_OID(0), AccessExclusiveLock);
+	if (!RELKIND_HAS_TABLE_AM(rel->rd_rel->relkind))
+		elog(ERROR, "relation \"%s\" does not have a table access method",
+			 RelationGetRelationName(rel));
+	is_empty = table_relation_is_empty(rel, PG_GETARG_BOOL(1));
+	table_close(rel, NoLock);
+
+	PG_RETURN_BOOL(is_empty);
 }

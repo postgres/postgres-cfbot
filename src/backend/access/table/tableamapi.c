@@ -86,6 +86,7 @@ GetTableAmRoutine(Oid amhandler)
 	Assert(routine->index_validate_scan != NULL);
 
 	Assert(routine->relation_size != NULL);
+	Assert(routine->relation_is_empty != NULL);
 	Assert(routine->relation_needs_toast_table != NULL);
 
 	Assert(routine->relation_estimate_size != NULL);
