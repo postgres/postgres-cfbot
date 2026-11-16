@@ -73,6 +73,47 @@ in the tuple itself.  We do this by storing the locker's Xid in XMAX, and
 setting infomask bits specifying the locking strength.  See "Infomask Bits"
 below for details on the bit patterns we use.
 
+Carrying locks across UPDATE
+----------------------------
+
+When UPDATE creates a new tuple version, it normally carries pre-existing
+lockers from the old tuple to the new tuple.  That is necessary when another
+transaction or a different subtransaction of the current transaction has
+locked the old tuple, since the lock must continue to protect the updated
+version.  This is essential for referential-integrity checks that use
+FOR KEY SHARE locks.  MultiXact XMAX values are handled separately and may
+likewise need to preserve surviving lockers.
+
+heap_update() records the update in the old tuple's XMAX and uses the new
+tuple's XMAX to preserve surviving lockers.  For a single-XID XMAX carried to
+the new tuple, the state is encoded as
+HEAP_XMAX_KEYSHR_LOCK | HEAP_XMAX_LOCK_ONLY, with no HEAP_KEYS_UPDATED bit.
+This can represent another transaction's FOR KEY SHARE lock, such as one
+taken by a referential-integrity check, or a lock held by a different
+subtransaction of the current transaction.  This representation does not
+preserve the old tuple lock's original strength.
+
+There is a narrow exception when the old tuple's XMAX is a single XID that is
+marked HEAP_XMAX_LOCK_ONLY, and that XID is the same XID that is now updating
+the tuple.  In that case, there is no independent locker to carry forward.
+After excluding MultiXacts, heap_update() tests for this case as follows,
+where infomask and xwait come from the old tuple and xid is the updating XID:
+
+    HEAP_XMAX_IS_LOCKED_ONLY(infomask) &&
+    TransactionIdEquals(xwait, xid)
+
+In the same-XID case, the new tuple's XMIN is the updating XID, so other
+transactions cannot treat the new version as a visible committed tuple while
+the update is in progress.  If the updating transaction or subtransaction
+aborts, the new tuple's XMIN identifies that same aborted transaction or
+subtransaction, so the new version cannot become visible, and the lock
+acquired by that XID is released too.  Once the top-level transaction commits,
+the self-owned tuple lock also ends.  A self-owned
+HEAP_XMAX_KEYSHR_LOCK | HEAP_XMAX_LOCK_ONLY marker carried to the new tuple
+therefore has no remaining concurrency or referential-integrity role.  The
+safety of omitting it follows from the locker and updater having the same
+transaction lifetime and does not depend on comparing their lock strengths.
+
 MultiXacts
 ----------
 
