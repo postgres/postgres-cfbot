@@ -2044,6 +2044,44 @@ FROM v;
         NaN |  #.####### |  #.####### |  #.#######
 (7 rows)
 
+-- Rounding the significand must preserve normalised scientific notation.
+WITH v(val, fmt, expected) AS
+  (VALUES (99::numeric, '9EEEE', ' 1e+02'),
+          (-99, '9EEEE', '-1e+02'),
+          (999, '9.9EEEE', ' 1.0e+03'),
+          (-999, '9.9EEEE', '-1.0e+03'),
+          (9999, '9.99EEEE', ' 1.00e+04'),
+          (-9999, '9.99EEEE', '-1.00e+04'),
+          (9.994, '9.99EEEE', ' 9.99e+00'),
+          (9.995, '9.99EEEE', ' 1.00e+01'),
+          (-9.994, '9.99EEEE', '-9.99e+00'),
+          (-9.995, '9.99EEEE', '-1.00e+01'),
+          (0.9994, '9.99EEEE', ' 9.99e-01'),
+          (0.9995, '9.99EEEE', ' 1.00e+00'),
+          (-0.9994, '9.99EEEE', '-9.99e-01'),
+          (-0.9995, '9.99EEEE', '-1.00e+00'),
+          (0, '9.99EEEE', ' 0.00e+00'),
+          (1, '9.99EEEE', ' 1.00e+00'))
+SELECT bool_and(to_char(val, fmt) = expected) AS ok FROM v;
+ ok 
+----
+ t
+(1 row)
+
+-- The bigint overload uses the same scientific notation conversion.
+WITH v(val, fmt, expected) AS
+  (VALUES (99::bigint, '9EEEE', ' 1e+02'),
+          (-99, '9EEEE', '-1e+02'),
+          (999, '9.9EEEE', ' 1.0e+03'),
+          (-999, '9.9EEEE', '-1.0e+03'),
+          (9999, '9.99EEEE', ' 1.00e+04'),
+          (-9999, '9.99EEEE', '-1.00e+04'))
+SELECT bool_and(to_char(val, fmt) = expected) AS ok FROM v;
+ ok 
+----
+ t
+(1 row)
+
 WITH v(exp) AS
   (VALUES(-16379),(-16378),(-1234),(-789),(-45),(-5),(-4),(-3),(-2),(-1),(0),
          (1),(2),(3),(4),(5),(38),(275),(2345),(45678),(131070),(131071))
