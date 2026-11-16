@@ -294,6 +294,44 @@ DROP DOMAIN domain3;
 DROP DOMAIN domain4;
 DROP FUNCTION foo(INT);
 
+-- The fast emptiness check is conservative; the exact check ignores tuples
+-- deleted by us or by committed transactions, and ignores aborted inserts.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set regresslib :libdir '/regress' :dlsuffix
+CREATE FUNCTION test_table_is_empty(regclass, boolean) RETURNS boolean
+  AS :'regresslib', 'test_table_is_empty' LANGUAGE C STRICT;
+CREATE TABLE check_empty (a int) WITH (autovacuum_enabled = false);
+SELECT test_table_is_empty('check_empty', true) AS fast,
+       test_table_is_empty('check_empty', false) AS exact;
+BEGIN;
+INSERT INTO check_empty VALUES (1);
+SELECT test_table_is_empty('check_empty', true) AS fast,
+       test_table_is_empty('check_empty', false) AS exact;
+DELETE FROM check_empty;
+SELECT test_table_is_empty('check_empty', true) AS fast,
+       test_table_is_empty('check_empty', false) AS exact;
+ROLLBACK;
+SELECT test_table_is_empty('check_empty', true) AS fast,
+       test_table_is_empty('check_empty', false) AS exact;
+INSERT INTO check_empty VALUES (1);
+BEGIN;
+DELETE FROM check_empty;
+SELECT test_table_is_empty('check_empty', true) AS fast,
+       test_table_is_empty('check_empty', false) AS exact;
+ROLLBACK;
+-- An aborted delete must not hide the live tuple.
+SELECT test_table_is_empty('check_empty', true) AS fast,
+       test_table_is_empty('check_empty', false) AS exact;
+DELETE FROM check_empty;
+SELECT test_table_is_empty('check_empty', true) AS fast,
+       test_table_is_empty('check_empty', false) AS exact;
+TRUNCATE check_empty;
+SELECT test_table_is_empty('check_empty', true) AS fast,
+       test_table_is_empty('check_empty', false) AS exact;
+DROP TABLE check_empty;
+DROP FUNCTION test_table_is_empty(regclass, boolean);
+
 -- Fall back to full rewrite for volatile expressions
 CREATE TABLE T(pk INT NOT NULL PRIMARY KEY);
 
