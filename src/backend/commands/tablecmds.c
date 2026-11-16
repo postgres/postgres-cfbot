@@ -355,6 +355,140 @@ typedef struct ForeignTruncateInfo
 	List	   *rels;
 } ForeignTruncateInfo;
 
+/* Structure to hold DROP/ TRUNCATE TABLE information */
+typedef struct DropOrTruncateTableInfo
+{
+	Oid			reloid;
+	char		relname[NAMEDATALEN];
+	char		schemaname[NAMEDATALEN];
+	SubTransactionId subxid;
+	bool		is_truncate;
+} DropOrTruncateTableInfo;
+
+/* Per-transaction list of dropped tables */
+static List *pending_drop_tables = NIL;
+
+/*
+ * Register a dropped or truncated table, to log its LSN at commit.
+ */
+void
+RegisterDropOrTruncateTable(Oid reloid, bool is_truncate)
+{
+	DropOrTruncateTableInfo *info;
+	MemoryContext oldcontext;
+	char		relkind;
+	char	   *relname;
+	char	   *schemaname;
+
+	/* Point-in-time recovery is not possible with wal_level = minimal */
+	if (!log_object_drops || !XLogIsNeeded())
+		return;
+
+	relkind = get_rel_relkind(reloid);
+	if (relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE)
+		return;
+	if (get_rel_persistence(reloid) != RELPERSISTENCE_PERMANENT)
+		return;
+
+	relname = get_rel_name(reloid);
+	schemaname = get_namespace_name(get_rel_namespace(reloid));
+
+	oldcontext = MemoryContextSwitchTo(TopTransactionContext);
+
+	info = (DropOrTruncateTableInfo *) palloc(sizeof(DropOrTruncateTableInfo));
+	info->reloid = reloid;
+	strlcpy(info->relname, relname, NAMEDATALEN);
+	strlcpy(info->schemaname, schemaname, NAMEDATALEN);
+	info->subxid = GetCurrentSubTransactionId();
+	info->is_truncate = is_truncate;
+
+	pending_drop_tables = lappend(pending_drop_tables, info);
+
+	MemoryContextSwitchTo(oldcontext);
+
+	pfree(relname);
+	pfree(schemaname);
+}
+
+/*
+ * Log every table dropped or truncated in this transaction, with the start
+ * LSN of its commit record.  Called from RecordTransactionCommit() before
+ * waiting for synchronous replication.
+ */
+void
+LogDropOrTruncateTable(XLogRecPtr commit_lsn)
+{
+	ListCell   *lc;
+	DropOrTruncateTableInfo *last;
+
+	if (pending_drop_tables == NIL)
+		return;
+
+	last = llast(pending_drop_tables);
+
+	foreach(lc, pending_drop_tables)
+	{
+		DropOrTruncateTableInfo *info = (DropOrTruncateTableInfo *) lfirst(lc);
+
+		ereport(LOG,
+				info->is_truncate ?
+				errmsg("table \"%s.%s\" (OID %u) truncated at LSN %X/%08X",
+					   info->schemaname, info->relname, info->reloid,
+					   LSN_FORMAT_ARGS(commit_lsn)) :
+				errmsg("table \"%s.%s\" (OID %u) dropped at LSN %X/%08X",
+					   info->schemaname, info->relname, info->reloid,
+					   LSN_FORMAT_ARGS(commit_lsn)),
+				(info == last) ?
+				errhint("To recover dropped or truncated tables, use "
+						"recovery_target_lsn = '%X/%08X' with "
+						"recovery_target_inclusive = false.",
+						LSN_FORMAT_ARGS(commit_lsn)) : 0);
+	}
+}
+
+/*
+ * Post-subcommit or post-subabort processing for log_object_drops.
+ *
+ * On subcommit, entries registered in this subtransaction become the
+ * parent's; on subabort they are removed, since those drops never happened.
+ */
+void
+AtEOSubXact_DropOrTruncateTable(bool isCommit, SubTransactionId mySubid,
+								SubTransactionId parentSubid)
+{
+	ListCell   *lc;
+
+	if (pending_drop_tables == NIL)
+		return;
+
+	foreach(lc, pending_drop_tables)
+	{
+		DropOrTruncateTableInfo *info = (DropOrTruncateTableInfo *) lfirst(lc);
+
+		if (info->subxid != mySubid)
+			continue;
+		if (isCommit)
+			info->subxid = parentSubid;
+		else
+		{
+			pending_drop_tables = foreach_delete_current(pending_drop_tables, lc);
+			pfree(info);
+		}
+	}
+}
+
+/*
+ * End-of-transaction cleanup for log_object_drops.  The tables were already
+ * logged by LogDropOrTruncateTable() at commit; here we only free the list.
+ */
+void
+AtEOXact_DropOrTruncateTable(void)
+{
+	/* Commit, abort and prepare all end with an empty list */
+	list_free_deep(pending_drop_tables);
+	pending_drop_tables = NIL;
+}
+
 /* Partial or complete FK creation in addFkConstraint() */
 typedef enum addFkConstraintSides
 {
@@ -2187,6 +2321,12 @@ ExecuteTruncateGuts(List *explicit_rels,
 	foreach(cell, rels)
 	{
 		Relation	rel = (Relation) lfirst(cell);
+
+		/*
+		 * RegisterDropOrTruncateTable() decides whether this table is logged.
+		 * Pass "true" because this is a TRUNCATE, not a DROP
+		 */
+		RegisterDropOrTruncateTable(RelationGetRelid(rel), true);
 
 		/* Skip partitioned tables as there is nothing to do */
 		if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
