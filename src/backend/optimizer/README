@@ -1033,18 +1033,23 @@ UniqueKey consisting of the ECs that a and b belong to.  As with PathKeys,
 an EC that contains a constant is left out.  That can leave an empty
 UniqueKey, which means that the relation has at most one row.
 
-A UniqueKey says nothing about rows in which the value of one of its ECs is
-NULL, because a unique index allows any number of such rows.  That is good
-enough for matching mergejoinable join clauses, which are assumed to be
-strict.
+By default, a UniqueKey says nothing about rows in which the value of one
+of its ECs is NULL, because a unique index allows any number of such rows.
+That is good enough for matching mergejoinable join clauses, which are
+assumed to be strict.  DISTINCT and GROUP BY, however, consider NULLs equal
+to each other.  A UniqueKey that also holds on those terms is marked
+null_aware; that is the case if the index is NULLS NOT DISTINCT, or if each
+column in the UniqueKey has a NOT NULL constraint or is forced to be
+non-NULL by a strict restriction clause.
 
 The UniqueKeys of base relations are built the first time they are needed,
 so that a query that never needs them does not pay for them.
 
 UniqueKeys are used to detect unique inner sides of joins when the inner
-side is itself a join, as described in the following.  For now only plain
-tables get UniqueKeys, and only joins that involve no outer joins,
-semijoins or antijoins are handled.
+side is itself a join, and to skip DISTINCT and GROUP BY steps whose input
+is already distinct.  The following describes each of these in turn.  For
+now only plain tables get UniqueKeys, and only joins that involve no outer
+joins, semijoins or antijoins are handled.
 
 We do not keep UniqueKeys for join relations.  A join relation would
 typically have many of them, most of which would never be used.  And since
@@ -1078,6 +1083,21 @@ and neither relation has a UniqueKey within that.
 The second step relies on all members of an EC that are computable within
 the join relation being equal in its output.  That is why a broken EC is
 never used.
+
+The same procedure tells whether the result of the scan/join phase is
+already distinct on the DISTINCT or GROUP BY columns: start with the ECs of
+those columns, and use only UniqueKeys marked null_aware.  If so, a
+DISTINCT step is skipped, and so is a grouping step that has no aggregates
+or HAVING clause to evaluate.
+
+A UniqueKey that is not marked null_aware can still be used there if join
+clauses keep its columns from being NULL.  In
+
+	SELECT DISTINCT a.id, b.y FROM a JOIN b ON a.x = b.u
+
+with a unique index on the nullable column b.u, every row of b that the
+join emits has a non-NULL b.u, so the index is as good as one on a NOT NULL
+column.
 
 
 Order of processing for EquivalenceClasses and PathKeys
