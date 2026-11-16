@@ -3887,8 +3887,12 @@ typedef struct AggTransInfo
  * in the set has a member belonging to the relation.  An empty set means that
  * the relation has at most one row.
  *
- * Rows containing NULLs are not covered: the relation can have any number of
- * rows in which the value of some EC in the set is NULL.
+ * By default, rows containing NULLs are not covered: the relation can have
+ * any number of rows in which the value of some EC in the set is NULL.  If
+ * null_aware is true, the UniqueKey also holds with NULLs considered
+ * equal to each other, either because the underlying index is NULLS NOT
+ * DISTINCT or because none of the columns can be NULL in the relation's
+ * output.
  */
 typedef struct UniqueKey
 {
@@ -3898,6 +3902,9 @@ typedef struct UniqueKey
 
 	/* indexes in PlannerInfo's eq_classes list of the ECs in the key */
 	Bitmapset  *eclass_indexes;
+
+	/* does the key also hold with NULLs considered equal to each other? */
+	bool		null_aware;
 } UniqueKey;
 
 /*

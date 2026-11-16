@@ -155,4 +155,181 @@ select * from uk_a a left join
 
 reset enable_hashjoin;
 reset enable_mergejoin;
-drop table uk_a, uk_b, uk_c, uk_d;
+--
+-- Test skipping DISTINCT and GROUP BY steps when the input is already
+-- distinct
+--
+create table uk_n (id int primary key, u int unique, v int, w int);
+create unique index on uk_n (v) nulls not distinct;
+-- a single relation with its key among the DISTINCT columns
+explain (costs off)
+select distinct id, x from uk_a;
+    QUERY PLAN    
+------------------
+ Seq Scan on uk_a
+(1 row)
+
+-- but not without the key
+explain (costs off)
+select distinct x, y from uk_a;
+       QUERY PLAN       
+------------------------
+ HashAggregate
+   Group Key: x, y
+   ->  Seq Scan on uk_a
+(3 rows)
+
+-- a key column that is equal to a constant is not needed
+explain (costs off)
+select distinct b, x from uk_d where a = 1;
+              QUERY PLAN              
+--------------------------------------
+ Bitmap Heap Scan on uk_d
+   Recheck Cond: (a = 1)
+   ->  Bitmap Index Scan on uk_d_pkey
+         Index Cond: (a = 1)
+(4 rows)
+
+-- a join needs the keys of all its relations
+explain (costs off)
+select distinct a.id, b.id from uk_a a join uk_b b on a.x = b.x;
+           QUERY PLAN           
+--------------------------------
+ Merge Join
+   Merge Cond: (a.x = b.x)
+   ->  Sort
+         Sort Key: a.x
+         ->  Seq Scan on uk_a a
+   ->  Sort
+         Sort Key: b.x
+         ->  Seq Scan on uk_b b
+(8 rows)
+
+explain (costs off)
+select distinct a.id, b.x from uk_a a join uk_b b on a.x = b.x;
+              QUERY PLAN              
+--------------------------------------
+ HashAggregate
+   Group Key: a.id, b.x
+   ->  Merge Join
+         Merge Cond: (a.x = b.x)
+         ->  Sort
+               Sort Key: a.x
+               ->  Seq Scan on uk_a a
+         ->  Sort
+               Sort Key: b.x
+               ->  Seq Scan on uk_b b
+(10 rows)
+
+-- unless the join clauses supply them
+explain (costs off)
+select distinct a.id, a.y from uk_a a join uk_b b on a.x = b.id;
+           QUERY PLAN           
+--------------------------------
+ Hash Join
+   Hash Cond: (a.x = b.id)
+   ->  Seq Scan on uk_a a
+   ->  Hash
+         ->  Seq Scan on uk_b b
+(5 rows)
+
+-- a unique index on a nullable column allows duplicate NULLs
+explain (costs off)
+select distinct u from uk_n;
+       QUERY PLAN       
+------------------------
+ HashAggregate
+   Group Key: u
+   ->  Seq Scan on uk_n
+(3 rows)
+
+-- unless a strict restriction clause filters them out
+explain (costs off)
+select distinct u from uk_n where u > 0;
+              QUERY PLAN               
+---------------------------------------
+ Bitmap Heap Scan on uk_n
+   Recheck Cond: (u > 0)
+   ->  Bitmap Index Scan on uk_n_u_key
+         Index Cond: (u > 0)
+(4 rows)
+
+-- or the index is NULLS NOT DISTINCT
+explain (costs off)
+select distinct v from uk_n;
+    QUERY PLAN    
+------------------
+ Seq Scan on uk_n
+(1 row)
+
+-- a column that a join clause equates to something cannot be NULL
+explain (costs off)
+select distinct a.id, n.w from uk_a a join uk_n n on a.x = n.u;
+           QUERY PLAN           
+--------------------------------
+ Hash Join
+   Hash Cond: (a.x = n.u)
+   ->  Seq Scan on uk_a a
+   ->  Hash
+         ->  Seq Scan on uk_n n
+(5 rows)
+
+-- but that takes a join clause on each column of the key
+explain (costs off)
+select distinct a.id, n.u from uk_a a join uk_n n on a.x = n.w;
+              QUERY PLAN              
+--------------------------------------
+ HashAggregate
+   Group Key: a.id, n.u
+   ->  Merge Join
+         Merge Cond: (n.w = a.x)
+         ->  Sort
+               Sort Key: n.w
+               ->  Seq Scan on uk_n n
+         ->  Sort
+               Sort Key: a.x
+               ->  Seq Scan on uk_a a
+(10 rows)
+
+-- GROUP BY without aggregates is handled likewise
+explain (costs off)
+select a.id, a.y from uk_a a join uk_b b on a.x = b.id group by a.id, a.y;
+           QUERY PLAN           
+--------------------------------
+ Hash Join
+   Hash Cond: (a.x = b.id)
+   ->  Seq Scan on uk_a a
+   ->  Hash
+         ->  Seq Scan on uk_b b
+(5 rows)
+
+-- but aggregates need the grouping step
+explain (costs off)
+select id, count(*) from uk_a group by id;
+       QUERY PLAN       
+------------------------
+ HashAggregate
+   Group Key: id
+   ->  Seq Scan on uk_a
+(3 rows)
+
+-- as does DISTINCT ON, and set-returning functions in the targetlist
+explain (costs off)
+select distinct on (id) id, x from uk_a;
+                QUERY PLAN                
+------------------------------------------
+ Unique
+   ->  Index Scan using uk_a_pkey on uk_a
+(2 rows)
+
+explain (costs off)
+select distinct id, generate_series(1, 2) from uk_a;
+               QUERY PLAN               
+----------------------------------------
+ HashAggregate
+   Group Key: id, generate_series(1, 2)
+   ->  ProjectSet
+         ->  Seq Scan on uk_a
+(4 rows)
+
+drop table uk_a, uk_b, uk_c, uk_d, uk_n;
