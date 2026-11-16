@@ -8071,10 +8071,7 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	 * might have a not-null constraint, or a check constraint that indirectly
 	 * rejects nulls.  If there are any domain constraints then we construct
 	 * an explicit NULL default value that will be passed through
-	 * CoerceToDomain processing.  (This is a tad inefficient, since it causes
-	 * rewriting the table which we really wouldn't have to do; but we do it
-	 * to preserve the historical behavior that such a failure will be raised
-	 * only if the table currently contains some rows.)
+	 * CoerceToDomain processing.
 	 *
 	 * Note: we use build_column_default, and not just the cooked default
 	 * returned by AddRelationNewConstraints, so that the right thing happens
@@ -8092,8 +8089,17 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	 */
 	if (RELKIND_HAS_STORAGE(relkind))
 	{
+		bool		is_empty;
 		bool		has_domain_constraints;
+		bool		has_volatile_constraints = false;
 		bool		has_missing = false;
+
+		/*
+		 * If the table AM can prove the table empty, there are no old rows to
+		 * fill.  We already hold AccessExclusiveLock, so it will remain
+		 * empty.
+		 */
+		is_empty = (relkind == RELKIND_RELATION) && table_relation_is_empty(rel, true);
 
 		/*
 		 * For an identity column, we can't use build_column_default(),
@@ -8112,7 +8118,8 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 			defval = (Expr *) build_column_default(rel, attribute->attnum);
 
 		/* Build CoerceToDomain(NULL) expression if needed */
-		has_domain_constraints = DomainHasConstraints(attribute->atttypid, NULL);
+		has_domain_constraints = DomainHasConstraints(attribute->atttypid,
+													  &has_volatile_constraints);
 		if (!defval && has_domain_constraints)
 		{
 			Oid			baseTypeId;
@@ -8135,7 +8142,17 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 				elog(ERROR, "failed to coerce base type to domain");
 		}
 
-		if (defval)
+		if (is_empty)
+		{
+			/*
+			 * Don't evaluate the default, but preserve the phase 3 check for
+			 * stored uses of the table's row type: those need not be empty
+			 * just because the table is.
+			 */
+			if (defval)
+				find_composite_type_dependencies(rel->rd_rel->reltype, rel, NULL);
+		}
+		else if (defval)
 		{
 			NewColumnValue *newval;
 
@@ -8154,14 +8171,15 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 			 * Attempt to skip a complete table rewrite by storing the
 			 * specified DEFAULT value outside of the heap.  This is only
 			 * allowed for plain relations and non-generated columns, and the
-			 * default expression can't be volatile (stable is OK).  Note that
-			 * contain_volatile_functions deems CoerceToDomain immutable, but
-			 * here we consider that coercion to a domain with constraints is
-			 * volatile; else it might fail even when the table is empty.
+			 * default expression and any domain constraints can't be volatile
+			 * (stable is OK).  Note that contain_volatile_functions deems
+			 * CoerceToDomain immutable, so we check domain constraints
+			 * separately above.  Errors are reported normally; tables known
+			 * to be empty have already been excluded.
 			 */
 			if (rel->rd_rel->relkind == RELKIND_RELATION &&
 				!colDef->generated &&
-				!has_domain_constraints &&
+				!has_volatile_constraints &&
 				!contain_volatile_functions((Node *) defval))
 			{
 				EState	   *estate;
@@ -8197,7 +8215,7 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 			}
 		}
 
-		if (!has_missing)
+		if (!is_empty && !has_missing)
 		{
 			/*
 			 * If the new column is NOT NULL, and there is no missing value,
