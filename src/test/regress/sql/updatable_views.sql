@@ -2098,6 +2098,93 @@ select * from uv_upsert_pt order by id;
 drop view uv_upsert_ptv;
 drop table uv_upsert_pt;
 
+-- Check UPDATE FOR PORTION OF works correctly
+create table uv_fpo_tab (id int4range, valid_at tsrange, b float,
+    constraint pk_uv_fpo_tab primary key (id, valid_at without overlaps));
+insert into uv_fpo_tab values ('[1,1]', '[2020-01-01, 2030-01-01)', 0);
+create view uv_fpo_view as
+    select b, b+1 as c, valid_at, id, '2.0'::text as two from uv_fpo_tab;
+
+insert into uv_fpo_view (id, valid_at, b) values ('[1,1]', '[2010-01-01, 2020-01-01)', 1);
+select * from uv_fpo_view order by id, valid_at;
+update uv_fpo_view for portion of valid_at from '2015-01-01' to '2020-01-01' set b = 2 where id = '[1,1]';
+select * from uv_fpo_view order by id, valid_at;
+delete from uv_fpo_view for portion of valid_at from '2017-01-01' to '2022-01-01' where id = '[1,1]';
+select * from uv_fpo_view order by id, valid_at;
+
+-- UPDATE/DELETE FOR PORTION fails if the column is not updatable
+-- (e.g. a computed expression, not a base column):
+create view uv_fpo_view_nonupd as
+  select id, '[1,20]'::int4range as valid_at, b
+  from uv_fpo_tab;
+-- Updating fails:
+update uv_fpo_view_nonupd for portion of valid_at from 1 to 10 set b = 2;
+-- Deleting fails:
+delete from uv_fpo_view_nonupd for portion of valid_at from 1 to 10;
+drop view uv_fpo_view_nonupd;
+
+-- WITH CHECK OPTION must be enforced on temporal leftovers, i.e. the rows
+-- FOR PORTION OF inserts to preserve the untouched parts of the target row.
+-- This applies to DELETE as well as UPDATE.
+create table uv_fpo_wco_tab (id int4range, valid_at daterange, b int);
+insert into uv_fpo_wco_tab values ('[1,1]', '[2020-01-01,2030-01-01)', 0);
+create view uv_fpo_wco_view as
+  select * from uv_fpo_wco_tab
+  where valid_at && daterange('2024-01-01', '2025-01-01')
+  with check option;
+-- The leftovers fall outside the view, so both commands fail:
+update uv_fpo_wco_view for portion of valid_at from '2024-01-01' to '2025-01-01' set b = 1;
+delete from uv_fpo_wco_view for portion of valid_at from '2024-01-01' to '2025-01-01';
+-- The base table is unchanged:
+select * from uv_fpo_wco_tab order by valid_at;
+-- Leftovers that still satisfy the view are allowed:
+delete from uv_fpo_wco_view for portion of valid_at from '2024-03-01' to '2024-06-01';
+update uv_fpo_wco_view for portion of valid_at from '2024-07-01' to '2024-08-01' set b = 1;
+select * from uv_fpo_wco_tab order by valid_at;
+-- Without WITH CHECK OPTION the leftovers may leave the view:
+create view uv_fpo_nowco_view as
+  select * from uv_fpo_wco_tab
+  where valid_at && daterange('2024-01-01', '2025-01-01');
+delete from uv_fpo_nowco_view for portion of valid_at from '2024-01-01' to '2024-02-01';
+update uv_fpo_nowco_view for portion of valid_at from '2024-09-01' to '2026-01-01' set b = 2;
+select * from uv_fpo_wco_tab order by valid_at;
+drop view uv_fpo_wco_view;
+drop view uv_fpo_nowco_view;
+drop table uv_fpo_wco_tab;
+
+-- On a partitioned table a leftover can be routed to a partition that is not
+-- one of the plan's result relations.  WITH CHECK OPTION must be enforced
+-- there too.
+create table uv_fpo_wco_part (id int4range, valid_at daterange, b int)
+  partition by range (lower(valid_at));
+create table uv_fpo_wco_part1 partition of uv_fpo_wco_part
+  for values from (minvalue) to ('2000-06-01');
+create table uv_fpo_wco_part2 partition of uv_fpo_wco_part
+  for values from ('2000-06-01') to (maxvalue);
+insert into uv_fpo_wco_part values ('[1,1]', '[2000-01-01,2004-01-01)', 0);
+-- This view accepts both leftovers.  The where clause prunes away part2, but
+-- the second leftover is routed there anyway:
+create view uv_fpo_wco_part_view as
+  select * from uv_fpo_wco_part where b = 0 with check option;
+delete from uv_fpo_wco_part_view
+  for portion of valid_at from '2000-03-01' to '2000-07-01'
+  where lower(valid_at) < '2000-06-01';
+select tableoid::regclass, * from uv_fpo_wco_part order by valid_at;
+-- This view rejects the leftover that lands in part2:
+delete from uv_fpo_wco_part;
+insert into uv_fpo_wco_part values ('[1,1]', '[2000-01-01,2004-01-01)', 0);
+create view uv_fpo_wco_part_view2 as
+  select * from uv_fpo_wco_part where lower(valid_at) < '2000-02-01'
+  with check option;
+delete from uv_fpo_wco_part_view2
+  for portion of valid_at from '2000-03-01' to '2000-07-01'
+  where lower(valid_at) < '2000-06-01';
+-- The base table is unchanged:
+select tableoid::regclass, * from uv_fpo_wco_part order by valid_at;
+drop view uv_fpo_wco_part_view;
+drop view uv_fpo_wco_part_view2;
+drop table uv_fpo_wco_part;
+
 -- Test whole-row references to the view
 create table uv_iocu_tab (a int unique, b text);
 create view uv_iocu_view as
@@ -2332,3 +2419,282 @@ values (1, 2, default, 5, 4, default, 3), (10, 11, 'C value', 14, 13, 100, 12);
 select * from base_tab order by a;
 drop view base_tab_view;
 drop table base_tab;
+
+-- FOR PORTION OF on a view with DO INSTEAD rules.  As on a table, the rule
+-- actions fire only for rows that overlap the target range, NEW holds the
+-- targeted portion of the range, and OLD holds the whole row.  The original
+-- statement doesn't run, so there are no temporal leftovers.
+create table uv_fpo_rinst_tab (id int4range, valid_at daterange, b int)
+  partition by list (id);
+create table uv_fpo_rinst_tab1 partition of uv_fpo_rinst_tab
+  for values in ('[1,1]');
+create table uv_fpo_rinst_tab2 partition of uv_fpo_rinst_tab
+  for values in ('[2,2]');
+insert into uv_fpo_rinst_tab values
+  ('[1,1]', '[2000-01-01,2010-01-01)', 0),
+  ('[2,2]', '[2020-01-01,2030-01-01)', 0);
+create table uv_fpo_rinst_log (tag text, old_valid_at daterange,
+  new_valid_at daterange, b int);
+create view uv_fpo_rinst_view as select id, valid_at, b from uv_fpo_rinst_tab;
+create rule uv_fpo_rinst_upd as on update to uv_fpo_rinst_view
+  do instead insert into uv_fpo_rinst_log
+    values ('upd', old.valid_at, new.valid_at, new.b)
+    returning null::int4range, new_valid_at, b;
+create rule uv_fpo_rinst_del as on delete to uv_fpo_rinst_view
+  do instead insert into uv_fpo_rinst_log
+    values ('del', old.valid_at, null, old.b)
+    returning null::int4range, old_valid_at, b;
+update uv_fpo_rinst_view
+  for portion of valid_at from '2002-01-01' to '2004-01-01' set b = 1
+  returning *;
+delete from uv_fpo_rinst_view
+  for portion of valid_at from '2006-01-01' to '2008-01-01'
+  returning *;
+update uv_fpo_rinst_view
+  for portion of valid_at from '2012-01-01' to '2014-01-01' set b = 2;
+-- through an auto-updatable view with the columns in a different order
+create view uv_fpo_rinst_outer as select b, valid_at, id from uv_fpo_rinst_view;
+update uv_fpo_rinst_outer
+  for portion of valid_at from '2024-01-01' to '2026-01-01' set b = 3;
+drop view uv_fpo_rinst_outer;
+select * from uv_fpo_rinst_log order by tag, old_valid_at;
+select * from uv_fpo_rinst_tab order by id, valid_at;
+truncate uv_fpo_rinst_log;
+
+-- The rules also apply to statements parsed before the rules existed.
+drop rule uv_fpo_rinst_upd on uv_fpo_rinst_view;
+create function uv_fpo_rinst_fn() returns void language sql begin atomic
+  update uv_fpo_rinst_view
+    for portion of valid_at from '2002-01-01' to '2004-01-01' set b = 4;
+end;
+prepare uv_fpo_rinst_prep as update uv_fpo_rinst_view
+  for portion of valid_at from '2004-01-01' to '2006-01-01' set b = 5;
+execute uv_fpo_rinst_prep;  -- auto-updates the view, making leftovers
+create rule uv_fpo_rinst_upd as on update to uv_fpo_rinst_view
+  do instead insert into uv_fpo_rinst_log
+    values ('upd', old.valid_at, new.valid_at, new.b);
+select uv_fpo_rinst_fn();
+execute uv_fpo_rinst_prep;
+select * from uv_fpo_rinst_log order by tag, old_valid_at;
+deallocate uv_fpo_rinst_prep;
+drop function uv_fpo_rinst_fn();
+truncate uv_fpo_rinst_log;
+
+-- A conditional DO INSTEAD rule needs an unconditional one too.  Its action
+-- also sees the FOR PORTION OF restriction.
+drop rule uv_fpo_rinst_upd on uv_fpo_rinst_view;
+create rule uv_fpo_rinst_cond as on update to uv_fpo_rinst_view
+  where old.id = '[2,2]'
+  do instead insert into uv_fpo_rinst_log
+    values ('cond', old.valid_at, new.valid_at, new.b);
+update uv_fpo_rinst_view
+  for portion of valid_at from '2026-01-01' to '2028-01-01' set b = 6; -- error
+create rule uv_fpo_rinst_upd as on update to uv_fpo_rinst_view
+  do instead insert into uv_fpo_rinst_log
+    values ('upd', old.valid_at, new.valid_at, new.b);
+update uv_fpo_rinst_view
+  for portion of valid_at from '2026-01-01' to '2028-01-01' set b = 6;
+select * from uv_fpo_rinst_log order by tag, old_valid_at;
+drop view uv_fpo_rinst_view;
+drop table uv_fpo_rinst_tab, uv_fpo_rinst_log;
+
+-- FOR PORTION OF on a view with INSTEAD OF triggers.  The triggers fire only
+-- for rows that overlap the target range, NEW holds the targeted portion of
+-- the range, and OLD holds the whole row.  The trigger replaces the command,
+-- so there are no temporal leftovers.
+create table uv_fpo_instead_tab (id int4range, valid_at daterange, b int);
+insert into uv_fpo_instead_tab values
+  ('[1,1]', '[2000-01-01,2010-01-01)', 0),
+  ('[2,2]', '[2020-01-01,2030-01-01)', 0);
+create view uv_fpo_instead_view as
+  select id, valid_at, b from uv_fpo_instead_tab;
+create function uv_fpo_instead_trig() returns trigger language plpgsql as
+$$
+begin
+  raise notice '% OLD: %, NEW: %', tg_op, old, new;
+  return coalesce(new, old);
+end;
+$$;
+create trigger uv_fpo_instead_upd_trig
+  instead of update on uv_fpo_instead_view
+  for each row execute function uv_fpo_instead_trig();
+create trigger uv_fpo_instead_del_trig
+  instead of delete on uv_fpo_instead_view
+  for each row execute function uv_fpo_instead_trig();
+update uv_fpo_instead_view
+  for portion of valid_at from '2002-01-01' to '2004-01-01' set b = 1
+  returning *;
+delete from uv_fpo_instead_view
+  for portion of valid_at from '2006-01-01' to '2008-01-01'
+  returning *;
+update uv_fpo_instead_view
+  for portion of valid_at from '2012-01-01' to '2014-01-01' set b = 2;
+select * from uv_fpo_instead_tab order by id, valid_at;
+-- A check option on a view on top still applies to the trigger's NEW.
+create view uv_fpo_instead_wco as
+  select * from uv_fpo_instead_view where b < 10 with check option;
+update uv_fpo_instead_wco
+  for portion of valid_at from '2002-01-01' to '2004-01-01' set b = 20; -- error
+drop view uv_fpo_instead_wco;
+
+-- With only one of the triggers, the other command auto-updates the view and
+-- inserts leftovers.
+drop trigger uv_fpo_instead_del_trig on uv_fpo_instead_view;
+delete from uv_fpo_instead_view
+  for portion of valid_at from '2006-01-01' to '2008-01-01';
+drop trigger uv_fpo_instead_upd_trig on uv_fpo_instead_view;
+create trigger uv_fpo_instead_del_trig
+  instead of delete on uv_fpo_instead_view
+  for each row execute function uv_fpo_instead_trig();
+update uv_fpo_instead_view
+  for portion of valid_at from '2024-01-01' to '2026-01-01' set b = 3;
+select * from uv_fpo_instead_tab order by id, valid_at;
+drop view uv_fpo_instead_view;
+drop table uv_fpo_instead_tab;
+drop function uv_fpo_instead_trig();
+
+-- A trigger can preserve the untargeted history by using FOR PORTION OF
+-- itself, here on a partitioned table, where a leftover moves to the other
+-- partition.  The trigger also fires through an auto-updatable view on top,
+-- and a DO ALSO rule's action sees the same narrowed NEW.  A DELETE trigger
+-- sees only OLD, though, so this one can't tell which portion was targeted,
+-- and deletes the whole row.
+create table uv_fpo_instead_part (id int4range, valid_at daterange, b int)
+  partition by range (lower(valid_at));
+create table uv_fpo_instead_part1 partition of uv_fpo_instead_part
+  for values from ('2000-01-01') to ('2005-01-01');
+create table uv_fpo_instead_part2 partition of uv_fpo_instead_part
+  for values from ('2005-01-01') to (maxvalue);
+insert into uv_fpo_instead_part values
+  ('[1,1]', '[2000-01-01,2008-01-01)', 0),
+  ('[2,2]', '[2000-01-01,2008-01-01)', 0);
+create view uv_fpo_instead_view as
+  select id, valid_at, b from uv_fpo_instead_part;
+create view uv_fpo_instead_outer as
+  select b, valid_at, id from uv_fpo_instead_view;
+create function uv_fpo_instead_trig() returns trigger language plpgsql as
+$$
+begin
+  if tg_op = 'DELETE' then
+    delete from uv_fpo_instead_part
+      for portion of valid_at (old.valid_at) where id = old.id;
+    return old;
+  end if;
+  update uv_fpo_instead_part
+    for portion of valid_at (new.valid_at) set b = new.b where id = old.id;
+  return new;
+end;
+$$;
+create trigger uv_fpo_instead_upd_trig
+  instead of update on uv_fpo_instead_view
+  for each row execute function uv_fpo_instead_trig();
+create trigger uv_fpo_instead_del_trig
+  instead of delete on uv_fpo_instead_view
+  for each row execute function uv_fpo_instead_trig();
+create table uv_fpo_instead_log (old_valid_at daterange,
+  new_valid_at daterange, b int);
+create rule uv_fpo_instead_also as on update to uv_fpo_instead_view
+  do also insert into uv_fpo_instead_log
+    values (old.valid_at, new.valid_at, new.b);
+update uv_fpo_instead_outer
+  for portion of valid_at from '2002-01-01' to '2006-01-01' set b = 1
+  where id = '[1,1]';
+delete from uv_fpo_instead_view
+  for portion of valid_at from '2004-01-01' to '2005-01-01'
+  where id = '[2,2]';
+select * from uv_fpo_instead_log;
+select tableoid::regclass, * from uv_fpo_instead_part order by id, valid_at;
+drop table uv_fpo_instead_part cascade;
+drop table uv_fpo_instead_log;
+drop function uv_fpo_instead_trig();
+
+-- FOR PORTION OF on a view with DO ALSO rules.  As on a table, the rule
+-- actions fire only for rows that overlap the target range, NEW holds the
+-- targeted portion of the range, and OLD holds the whole row.  The view is
+-- still auto-updated, inserting temporal leftovers.  Here it's a
+-- security-barrier view on a partitioned table, and one leftover moves to
+-- the other partition.
+create table uv_fpo_also_vtab (id int4range, valid_at daterange, b int)
+  partition by range (lower(valid_at));
+create table uv_fpo_also_vtab1 partition of uv_fpo_also_vtab
+  for values from ('2000-01-01') to ('2005-01-01');
+create table uv_fpo_also_vtab2 partition of uv_fpo_also_vtab
+  for values from ('2005-01-01') to (maxvalue);
+insert into uv_fpo_also_vtab values
+  ('[1,1]', '[2000-01-01,2010-01-01)', 0),
+  ('[2,2]', '[2020-01-01,2030-01-01)', 0);
+create table uv_fpo_also_log (tag text, old_valid_at daterange,
+  new_valid_at daterange, b int);
+create view uv_fpo_also_view with (security_barrier) as
+  select id, valid_at, b from uv_fpo_also_vtab;
+create rule uv_fpo_also_upd as on update to uv_fpo_also_view
+  do also insert into uv_fpo_also_log
+    values ('upd', old.valid_at, new.valid_at, new.b);
+create rule uv_fpo_also_del as on delete to uv_fpo_also_view
+  do also insert into uv_fpo_also_log
+    values ('del', old.valid_at, null, old.b);
+update uv_fpo_also_view
+  for portion of valid_at from '2002-01-01' to '2006-01-01' set b = 1;
+delete from uv_fpo_also_view
+  for portion of valid_at from '2007-01-01' to '2008-01-01';
+update uv_fpo_also_view
+  for portion of valid_at from '2012-01-01' to '2014-01-01' set b = 2;
+-- through an auto-updatable view with the columns in a different order
+create view uv_fpo_also_outer as select b, valid_at, id from uv_fpo_also_view;
+update uv_fpo_also_outer
+  for portion of valid_at from '2024-01-01' to '2026-01-01' set b = 3;
+select * from uv_fpo_also_log order by tag, old_valid_at;
+select tableoid::regclass, * from uv_fpo_also_vtab order by id, valid_at;
+drop view uv_fpo_also_outer, uv_fpo_also_view;
+drop table uv_fpo_also_vtab, uv_fpo_also_log;
+
+-- A DO ALSO rule on the base table is fine: the rule action is built from a
+-- query that already carries the FOR PORTION OF restriction.
+create table uv_fpo_also_tab (id int4range, valid_at tsrange, b float);
+insert into uv_fpo_also_tab values ('[1,1]', '[2000-01-01,2030-01-01)', 0);
+create table uv_fpo_also_tab_log (valid_at tsrange, b float);
+create rule uv_fpo_also_tab_upd as on update to uv_fpo_also_tab
+  do also insert into uv_fpo_also_tab_log values (new.valid_at, new.b);
+update uv_fpo_also_tab
+  for portion of valid_at from '2010-01-01' to '2020-01-01'
+  set b = 99 where id = '[1,1]';
+select * from uv_fpo_also_tab order by valid_at;
+select * from uv_fpo_also_tab_log order by valid_at;
+drop table uv_fpo_also_tab, uv_fpo_also_tab_log;
+
+-- INSTEAD OF triggers also apply to FOR PORTION OF statements parsed before
+-- the trigger existed.  This can happen in at least a couple ways: a rewrite
+-- rule or a BEGIN ATOMIC function.
+create function uv_fpo_instead_trig() returns trigger language plpgsql as
+$$ begin raise notice 'NEW: %', new; return new; end $$;
+
+-- via a rewrite rule
+create table uv_fpo_rule_tab (id int4range, valid_at tsrange, b float);
+insert into uv_fpo_rule_tab values ('[1,1]', '[2000-01-01, 2030-01-01)', 0);
+create view uv_fpo_rule_view as select id, valid_at, b from uv_fpo_rule_tab;
+create rule uv_fpo_rule as on insert to uv_fpo_rule_tab do also
+  update uv_fpo_rule_view
+    for portion of valid_at from '2010-01-01' to '2020-01-01'
+    set b = 99 where id = '[1,1]';
+create trigger uv_fpo_rule_instead
+  instead of update on uv_fpo_rule_view
+  for each row execute function uv_fpo_instead_trig();
+insert into uv_fpo_rule_tab values ('[2,2]', '[2000-01-01,2030-01-01)', 0);
+drop table uv_fpo_rule_tab cascade;
+
+-- via a BEGIN ATOMIC function body
+create table uv_fpo_atomic_tab (id int4range, valid_at tsrange, b float);
+insert into uv_fpo_atomic_tab values ('[1,1]', '[2000-01-01, 2030-01-01)', 0);
+create view uv_fpo_atomic_view as select id, valid_at, b from uv_fpo_atomic_tab;
+create function uv_fpo_atomic_fn() returns void language sql begin atomic
+  update uv_fpo_atomic_view
+    for portion of valid_at from '2010-01-01' to '2020-01-01'
+    set b = 99 where id = '[1,1]';
+end;
+create trigger uv_fpo_atomic_instead
+  instead of update on uv_fpo_atomic_view
+  for each row execute function uv_fpo_instead_trig();
+select uv_fpo_atomic_fn();
+drop function uv_fpo_atomic_fn();
+drop table uv_fpo_atomic_tab cascade;
+drop function uv_fpo_instead_trig();

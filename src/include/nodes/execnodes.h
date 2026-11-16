@@ -39,6 +39,7 @@
 #include "partitioning/partdefs.h"
 #include "storage/buf.h"
 #include "utils/reltrigger.h"
+#include "utils/typcache.h"
 
 
 /*
@@ -467,6 +468,27 @@ typedef struct MergeActionState
 } MergeActionState;
 
 /*
+ * ForPortionOfState
+ *
+ * Executor state of a FOR PORTION OF operation.
+ */
+typedef struct ForPortionOfState
+{
+	NodeTag		type;
+
+	int			fp_rangeAttno;	/* the attno of the range column */
+	Datum		fp_targetRange; /* the range/multirange from FOR PORTION OF */
+	TupleTableSlot *fp_existing;	/* slot to store old tuple */
+	TupleTableSlot *fp_leftover;	/* slot to store leftover */
+	FmgrInfo   *fp_withoutPortionInfo;	/* without_portion flinfo */
+	FunctionCallInfo fp_withoutPortionFcinfo;	/* without_portion fcinfo */
+	ReturnSetInfo *fp_withoutPortionRsi;	/* without_portion rsi */
+	FmgrInfo   *fp_overlapsInfo;	/* overlaps flinfo, for CheckSplit */
+	Oid			fp_overlapsCollation;	/* overlaps input collation */
+	void	   *fp_domaininfo;	/* cache space for domain_check() */
+} ForPortionOfState;
+
+/*
  * ResultRelInfo
  *
  * Whenever we update an existing relation, we have to update indexes on the
@@ -601,6 +623,9 @@ typedef struct ResultRelInfo
 
 	/* for MERGE, expr state for checking the join condition */
 	ExprState  *ri_MergeJoinCondition;
+
+	/* FOR PORTION OF evaluation state */
+	ForPortionOfState *ri_forPortionOf;
 
 	/* partition check expression state (NULL if not set up yet) */
 	ExprState  *ri_PartitionCheckExpr;
@@ -1460,6 +1485,15 @@ typedef struct ModifyTableState
 
 	/* controls transition table population for INSERT...ON CONFLICT UPDATE */
 	struct TransitionCaptureState *mt_oc_transition_capture;
+
+	/*
+	 * True while ExecForPortionOfLeftovers() is inserting a temporal
+	 * leftover.  Such an insert is a statement in its own right as far as
+	 * the SQL standard is concerned, even though mt_operation is CMD_UPDATE
+	 * or CMD_DELETE, so the few places that would otherwise treat it as part
+	 * of the enclosing statement consult this instead.
+	 */
+	bool		mt_forPortionOfLeftover;
 
 	/* Flags showing which subcommands are present INS/UPD/DEL/DO NOTHING */
 	int			mt_merge_subcommands;

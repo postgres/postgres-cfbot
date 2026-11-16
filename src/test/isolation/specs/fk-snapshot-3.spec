@@ -27,6 +27,10 @@ step s1ser	{ BEGIN ISOLATION LEVEL SERIALIZABLE; }
 step s1del	{ DELETE FROM parent WHERE id = '[1,2)'; }
 step s1upok	{ UPDATE parent SET valid_at = '[2020-01-01,2026-01-01)' WHERE id = '[1,2)'; }
 step s1upbad	{ UPDATE parent SET valid_at = '[2020-01-01,2024-01-01)' WHERE id = '[1,2)'; }
+# Same coverage changes as s1upok/s1upbad, but done with DELETE ... FOR PORTION OF,
+# which trims the parent row and inserts leftovers:
+step s1delfpook		{ DELETE FROM parent FOR PORTION OF valid_at FROM '2026-01-01' TO '2027-01-01'; }
+step s1delfpobad	{ DELETE FROM parent FOR PORTION OF valid_at FROM '2024-01-01' TO '2025-01-01'; }
 step s1c	{ COMMIT; }
 
 session s2
@@ -80,3 +84,24 @@ permutation s1rr s2rr s1upbad s2ins s1c s2c
 # ...with SERIALIZABLE:
 permutation s1ser s2ser s2ins s1upbad s2c s1c
 permutation s1ser s2ser s1upbad s2ins s1c s2c
+
+# Trim the valid time with DELETE FOR PORTION OF, keeping enough coverage that
+# the child stays valid: the remaining spans [2020-01-01,2026-01-01) and
+# [2027-01-01,2030-01-01) still contain the child's [2020-01-01,2025-01-01).
+# DELETE FOR PORTION OF removes the matched parent row and reinserts leftovers
+# for the untouched spans, rather than updating the row in place.  So unlike the
+# plain narrowing UPDATE in s1upok above -- which leaves less coverage and yet
+# lets a concurrent child insert succeed -- when s1 changes the parent first the
+# child's RI recheck follows the deleted parent tuple via EvalPlanQual and does
+# not rescan to find the newly-inserted leftover, so the insert is rejected.
+# This is the same READ COMMITTED FOR PORTION OF anomaly documented in
+# for-portion-of.spec; explicit locking is the workaround.  Only READ COMMITTED
+# is interesting here: at the higher levels these orderings raise a
+# serialization failure, just as they do for the plain UPDATE steps above.
+permutation s1rc s2rc s2ins s1delfpook s2c s1c
+permutation s1rc s2rc s1delfpook s2ins s1c s2c
+
+# Carve a hole out of the valid time with DELETE FOR PORTION OF, removing
+# coverage the child needs.  The foreign key is still enforced:
+permutation s1rc s2rc s2ins s1delfpobad s2c s1c
+permutation s1rc s2rc s1delfpobad s2ins s1c s2c
