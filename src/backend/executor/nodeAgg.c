@@ -4437,9 +4437,16 @@ ExecEndAgg(AggState *node)
 
 		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
 		si = &node->shared_info->sinstrument[ParallelWorkerNumber];
-		si->hash_batches_used = node->hash_batches_used;
-		si->hash_disk_used = node->hash_disk_used;
-		si->hash_mem_peak = node->hash_mem_peak;
+
+		/*
+		 * Gather and GatherMerge spin up new workers on rescan, so accumulate
+		 * the values over all scans.  hash_batches_used is 1 if nothing
+		 * spilled, so count the in-memory batch only once.
+		 */
+		si->hash_batches_used = Max(si->hash_batches_used, 1) +
+			node->hash_batches_used - 1;
+		si->hash_disk_used = Max(si->hash_disk_used, node->hash_disk_used);
+		si->hash_mem_peak = Max(si->hash_mem_peak, node->hash_mem_peak);
 	}
 
 	/* Make sure we have closed any open tuplesorts */
