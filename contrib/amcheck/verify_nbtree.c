@@ -441,12 +441,13 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 
 	/*
 	 * Remember the current size of the heap for beyond-EOF TID checks.  When
-	 * the main fork is missing entirely, skip those checks (by making any
-	 * comparison against heapnblocks false): the user may have deliberately
-	 * excluded the corrupt table from table-level verification, which is what
-	 * reports a missing main fork.
+	 * the main fork is not heapAM or the main fork is missing entirely, skip
+	 * those checks (by making any comparison against heapnblocks false): the
+	 * user may have deliberately excluded the corrupt table from table-level
+	 * verification, which is what reports a missing main fork.
 	 */
-	if (smgrexists(RelationGetSmgr(state->heaprel), MAIN_FORKNUM))
+	if (state->heaprel->rd_rel->relam == HEAP_TABLE_AM_OID &&
+		smgrexists(RelationGetSmgr(state->heaprel), MAIN_FORKNUM))
 		state->heapnblocks = RelationGetNumberOfBlocks(state->heaprel);
 	else
 		state->heapnblocks = InvalidBlockNumber;
