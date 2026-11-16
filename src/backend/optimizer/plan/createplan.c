@@ -267,11 +267,12 @@ static IncrementalSort *make_incrementalsort(Plan *lefttree,
 											 int numCols, int nPresortedCols,
 											 AttrNumber *sortColIdx, Oid *sortOperators,
 											 Oid *collations, bool *nullsFirst);
+static List *get_sort_input_vars(PlannerInfo *root, Plan *plan);
 static Plan *prepare_sort_from_pathkeys(PlannerInfo *root,
 										Plan *lefttree, List *pathkeys,
+										List *input_vars,
 										Relids relids,
 										const AttrNumber *reqColIdx,
-										bool adjust_tlist_in_place,
 										int *p_numsortkeys,
 										AttrNumber **p_sortColIdx,
 										Oid **p_sortOperators,
@@ -1209,6 +1210,120 @@ mark_async_capable_plan(Plan *plan, Path *path)
 }
 
 /*
+ * Fix the common sort-column layout using the parent's output expressions.
+ * Matching an existing parent column is important: two different parent
+ * columns can translate to the same expression in only one UNION ALL child.
+ * Reserve positions for missing keys without claiming that the parent can
+ * compute them.  The children will supply and validate those columns.
+ */
+static AttrNumber *
+get_append_sort_col_idx(Plan *plan, List *pathkeys, Relids relids)
+{
+	AttrNumber *sortColIdx = palloc_array(AttrNumber, list_length(pathkeys));
+	AttrNumber	nextcol = list_length(plan->targetlist) + 1;
+	ListCell   *lc;
+	int			keyno = 0;
+
+	foreach(lc, pathkeys)
+	{
+		PathKey    *pathkey = lfirst_node(PathKey, lc);
+		EquivalenceClass *ec = pathkey->pk_eclass;
+		TargetEntry *tle = NULL;
+		ListCell   *lc2;
+		int			prevkey = 0;
+
+		if (ec->ec_has_volatile)
+			tle = get_sortgroupref_tle(ec->ec_sortref, plan->targetlist);
+		else
+		{
+			foreach(lc2, plan->targetlist)
+			{
+				tle = lfirst_node(TargetEntry, lc2);
+				if (find_ec_member_matching_expr(ec, tle->expr, relids))
+					break;
+				tle = NULL;
+			}
+		}
+
+		if (tle != NULL)
+			sortColIdx[keyno] = tle->resno;
+		else
+		{
+			/* Reuse a reserved column if this EC appeared earlier. */
+			foreach(lc2, pathkeys)
+			{
+				if (lc2 == lc)
+					break;
+				if (lfirst_node(PathKey, lc2)->pk_eclass == ec)
+					break;
+				prevkey++;
+			}
+			if (prevkey < keyno)
+				sortColIdx[keyno] = sortColIdx[prevkey];
+			else
+				sortColIdx[keyno] = nextcol++;
+		}
+		keyno++;
+	}
+
+	return sortColIdx;
+}
+
+/*
+ * Extend an Append/MergeAppend's descriptive targetlist to describe sort
+ * columns actually provided by its children.  Positions are fixed by the
+ * parent output layout, and all children must supply the same positions.
+ * For added columns, use an equivalent expression in the parent's
+ * relid namespace, with the actual child's output type.
+ *
+ * No computability test is needed here: Append does not evaluate expressions,
+ * and the sort expression has already been checked at the child projection.
+ */
+static void
+add_append_sort_columns(PlannerInfo *root, Plan *plan, List *pathkeys,
+						const AttrNumber *sortColIdx, Plan *child, Relids relids)
+{
+	ListCell   *lc;
+	int			keyno = 0;
+
+	foreach(lc, pathkeys)
+	{
+		PathKey    *pathkey = lfirst_node(PathKey, lc);
+		AttrNumber	colno = sortColIdx[keyno++];
+		TargetEntry *childtle;
+		EquivalenceMemberIterator it;
+		EquivalenceMember *em;
+		Expr	   *sortexpr;
+
+		if (colno <= list_length(plan->targetlist))
+			continue;
+
+		Assert(colno == list_length(plan->targetlist) + 1);
+		childtle = get_tle_by_resno(child->targetlist, colno);
+		Assert(childtle != NULL);
+
+		setup_eclass_member_iterator(&it, pathkey->pk_eclass, relids);
+		while ((em = eclass_member_iterator_next(&it)) != NULL)
+		{
+			if (em->em_is_const ||
+				((em->em_is_child || relids != NULL) &&
+				 !bms_is_subset(em->em_relids, relids)))
+				continue;
+			if (exprType((Node *) em->em_expr) ==
+				exprType((Node *) childtle->expr))
+				break;
+		}
+		if (em == NULL)
+			elog(ERROR, "could not find parent expression for append sort column");
+
+		sortexpr = (Expr *) replace_nestloop_params(root, (Node *) em->em_expr);
+		plan->targetlist = lappend(plan->targetlist,
+								   makeTargetEntry(copyObject(sortexpr), colno,
+												   NULL, true));
+	}
+}
+
+/*
  * create_append_plan
  *	  Create an Append plan for 'best_path' and (recursively) plans
  *	  for its subpaths.
@@ -1225,14 +1340,12 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	List	   *pathkeys = best_path->path.pathkeys;
 	List	   *subplans = NIL;
 	ListCell   *subpaths;
+	ListCell   *subplans_cell;
 	int			nasyncplans = 0;
 	RelOptInfo *rel = best_path->path.parent;
-	int			nodenumsortkeys = 0;
 	AttrNumber *nodeSortColIdx = NULL;
-	Oid		   *nodeSortOperators = NULL;
-	Oid		   *nodeCollations = NULL;
-	bool	   *nodeNullsFirst = NULL;
 	bool		consider_async = false;
+	bool		first_subplan = true;
 
 	/*
 	 * The subpaths list could be empty, if every child was proven empty by
@@ -1263,11 +1376,6 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	 * the Append is pretty useless; but we wait till setrefs.c to get rid of
 	 * it.  Doing so here doesn't work because the varno of the child scan
 	 * plan won't match the parent-rel Vars it'll be asked to emit.
-	 *
-	 * We don't have the actual creation of the Append node split out into a
-	 * separate make_xxx function.  This is because we want to run
-	 * prepare_sort_from_pathkeys on it before we do so on the individual
-	 * child plans, to make cross-checking the sort info easier.
 	 */
 	plan = makeNode(Append);
 	plan->plan.targetlist = tlist;
@@ -1277,39 +1385,28 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	plan->apprelids = rel->relids;
 	plan->child_append_relid_sets = best_path->child_append_relid_sets;
 
-	if (pathkeys != NIL)
-	{
-		/*
-		 * Compute sort column info, and adjust the Append's tlist as needed.
-		 * Because we pass adjust_tlist_in_place = true, we may ignore the
-		 * function result; it must be the same plan node.  However, we then
-		 * need to detect whether any tlist entries were added.
-		 */
-		(void) prepare_sort_from_pathkeys(root, (Plan *) plan, pathkeys,
-										  best_path->path.parent->relids,
-										  NULL,
-										  true,
-										  &nodenumsortkeys,
-										  &nodeSortColIdx,
-										  &nodeSortOperators,
-										  &nodeCollations,
-										  &nodeNullsFirst);
-		tlist_was_changed = (orig_tlist_length != list_length(plan->plan.targetlist));
-	}
-
 	/* If appropriate, consider async append */
 	consider_async = (enable_async_append && pathkeys == NIL &&
 					  !best_path->path.parallel_safe &&
 					  list_length(best_path->subpaths) > 1);
 
-	/* Build the plan for each child */
+	/* Build and attach all children before preparing their sort inputs. */
 	foreach(subpaths, best_path->subpaths)
 	{
 		Path	   *subpath = (Path *) lfirst(subpaths);
-		Plan	   *subplan;
 
-		/* Must insist that all children return the same tlist */
-		subplan = create_plan_recurse(root, subpath, CP_EXACT_TLIST);
+		subplans = lappend(subplans,
+						   create_plan_recurse(root, subpath, CP_EXACT_TLIST));
+	}
+	plan->appendplans = subplans;
+	if (pathkeys != NIL)
+		nodeSortColIdx = get_append_sort_col_idx((Plan *) plan, pathkeys,
+												 rel->relids);
+
+	forboth(subpaths, best_path->subpaths, subplans_cell, subplans)
+	{
+		Path	   *subpath = (Path *) lfirst(subpaths);
+		Plan	   *subplan = (Plan *) lfirst(subplans_cell);
 
 		/*
 		 * For ordered Appends, we must insert a Sort node if subplan isn't
@@ -1331,9 +1428,9 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 			 * the same sort key columns the Append expects.
 			 */
 			subplan = prepare_sort_from_pathkeys(root, subplan, pathkeys,
+												 get_sort_input_vars(root, subplan),
 												 subpath->parent->relids,
 												 nodeSortColIdx,
-												 false,
 												 &numsortkeys,
 												 &sortColIdx,
 												 &sortOperators,
@@ -1341,21 +1438,25 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 												 &nullsFirst);
 
 			/*
-			 * Check that we got the same sort key information.  We just
-			 * Assert that the sortops match, since those depend only on the
-			 * pathkeys; but it seems like a good idea to check the sort
-			 * column numbers explicitly, to ensure the tlists match up.
+			 * Verify that this child uses the sort-column layout chosen for
+			 * the Append.  This check applies to the first child as well as
+			 * subsequent children.
 			 */
-			Assert(numsortkeys == nodenumsortkeys);
 			if (memcmp(sortColIdx, nodeSortColIdx,
 					   numsortkeys * sizeof(AttrNumber)) != 0)
 				elog(ERROR, "Append child's targetlist doesn't match Append");
-			Assert(memcmp(sortOperators, nodeSortOperators,
-						  numsortkeys * sizeof(Oid)) == 0);
-			Assert(memcmp(collations, nodeCollations,
-						  numsortkeys * sizeof(Oid)) == 0);
-			Assert(memcmp(nullsFirst, nodeNullsFirst,
-						  numsortkeys * sizeof(bool)) == 0);
+
+			/*
+			 * Use the first actual child to determine the expressions and
+			 * types of any sort columns that must be added to the Append's
+			 * targetlist.
+			 */
+			if (first_subplan)
+			{
+				add_append_sort_columns(root, (Plan *) plan, pathkeys,
+										nodeSortColIdx, subplan, rel->relids);
+				first_subplan = false;
+			}
 
 			/* Now, insert a Sort node if subplan isn't sufficiently ordered */
 			if (!pathkeys_count_contained_in(pathkeys, subpath->pathkeys,
@@ -1400,9 +1501,11 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 			++nasyncplans;
 		}
 
-		subplans = lappend(subplans, subplan);
+		lfirst(subplans_cell) = subplan;
 	}
 
+	tlist_was_changed =
+		(orig_tlist_length != list_length(plan->plan.targetlist));
 	/* Set below if we find quals that we can use to run-time prune */
 	plan->part_prune_index = -1;
 
@@ -1441,7 +1544,7 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	copy_generic_path_info(&plan->plan, (Path *) best_path);
 
 	/*
-	 * If prepare_sort_from_pathkeys added sort columns, but we were told to
+	 * If the children required extra sort columns, but we were told to
 	 * produce either the exact tlist or a narrow tlist, we should get rid of
 	 * the sort columns again.  We must inject a projection node to do so.
 	 */
@@ -1474,14 +1577,9 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 	List	   *pathkeys = best_path->path.pathkeys;
 	List	   *subplans = NIL;
 	ListCell   *subpaths;
+	ListCell   *subplans_cell;
 	RelOptInfo *rel = best_path->path.parent;
 
-	/*
-	 * We don't have the actual creation of the MergeAppend node split out
-	 * into a separate make_xxx function.  This is because we want to run
-	 * prepare_sort_from_pathkeys on it before we do so on the individual
-	 * child plans, to make cross-checking the sort info easier.
-	 */
 	copy_generic_path_info(plan, (Path *) best_path);
 	plan->targetlist = tlist;
 	plan->qual = NIL;
@@ -1490,32 +1588,22 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 	node->apprelids = rel->relids;
 	node->child_append_relid_sets = best_path->child_append_relid_sets;
 
-	/*
-	 * Compute sort column info, and adjust MergeAppend's tlist as needed.
-	 * Because we pass adjust_tlist_in_place = true, we may ignore the
-	 * function result; it must be the same plan node.  However, we then need
-	 * to detect whether any tlist entries were added.
-	 */
-	(void) prepare_sort_from_pathkeys(root, plan, pathkeys,
-									  best_path->path.parent->relids,
-									  NULL,
-									  true,
-									  &node->numCols,
-									  &node->sortColIdx,
-									  &node->sortOperators,
-									  &node->collations,
-									  &node->nullsFirst);
-	tlist_was_changed = (orig_tlist_length != list_length(plan->targetlist));
-
-	/*
-	 * Now prepare the child plans.  We must apply prepare_sort_from_pathkeys
-	 * even to subplans that don't need an explicit sort, to make sure they
-	 * are returning the same sort key columns the MergeAppend expects.
-	 */
+	/* Build and attach all children before preparing their sort inputs. */
 	foreach(subpaths, best_path->subpaths)
 	{
 		Path	   *subpath = (Path *) lfirst(subpaths);
-		Plan	   *subplan;
+
+		subplans = lappend(subplans,
+						   create_plan_recurse(root, subpath, CP_EXACT_TLIST));
+	}
+	node->mergeplans = subplans;
+	Assert(subplans != NIL);
+	node->sortColIdx = get_append_sort_col_idx(plan, pathkeys, rel->relids);
+
+	forboth(subpaths, best_path->subpaths, subplans_cell, subplans)
+	{
+		Path	   *subpath = (Path *) lfirst(subpaths);
+		Plan	   *subplan = (Plan *) lfirst(subplans_cell);
 		int			numsortkeys;
 		AttrNumber *sortColIdx;
 		Oid		   *sortOperators;
@@ -1523,15 +1611,11 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 		bool	   *nullsFirst;
 		int			presorted_keys;
 
-		/* Build the child plan */
-		/* Must insist that all children return the same tlist */
-		subplan = create_plan_recurse(root, subpath, CP_EXACT_TLIST);
-
 		/* Compute sort column info, and adjust subplan's tlist as needed */
 		subplan = prepare_sort_from_pathkeys(root, subplan, pathkeys,
+											 get_sort_input_vars(root, subplan),
 											 subpath->parent->relids,
 											 node->sortColIdx,
-											 false,
 											 &numsortkeys,
 											 &sortColIdx,
 											 &sortOperators,
@@ -1539,21 +1623,33 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 											 &nullsFirst);
 
 		/*
-		 * Check that we got the same sort key information.  We just Assert
-		 * that the sortops match, since those depend only on the pathkeys;
-		 * but it seems like a good idea to check the sort column numbers
-		 * explicitly, to ensure the tlists really do match up.
+		 * Verify that this child uses the common sort-column layout chosen
+		 * for the MergeAppend.
 		 */
-		Assert(numsortkeys == node->numCols);
 		if (memcmp(sortColIdx, node->sortColIdx,
 				   numsortkeys * sizeof(AttrNumber)) != 0)
 			elog(ERROR, "MergeAppend child's targetlist doesn't match MergeAppend");
-		Assert(memcmp(sortOperators, node->sortOperators,
-					  numsortkeys * sizeof(Oid)) == 0);
-		Assert(memcmp(collations, node->collations,
-					  numsortkeys * sizeof(Oid)) == 0);
-		Assert(memcmp(nullsFirst, node->nullsFirst,
-					  numsortkeys * sizeof(bool)) == 0);
+
+		/* Obtain executor sort metadata from the first actual child. */
+		if (node->sortOperators == NULL)
+		{
+			node->numCols = numsortkeys;
+			node->sortOperators = sortOperators;
+			node->collations = collations;
+			node->nullsFirst = nullsFirst;
+			add_append_sort_columns(root, plan, pathkeys,
+									node->sortColIdx, subplan, rel->relids);
+		}
+		else
+		{
+			Assert(numsortkeys == node->numCols);
+			Assert(memcmp(sortOperators, node->sortOperators,
+						  numsortkeys * sizeof(Oid)) == 0);
+			Assert(memcmp(collations, node->collations,
+						  numsortkeys * sizeof(Oid)) == 0);
+			Assert(memcmp(nullsFirst, node->nullsFirst,
+						  numsortkeys * sizeof(bool)) == 0);
+		}
 
 		/* Now, insert a Sort node if subplan isn't sufficiently ordered */
 		if (!pathkeys_count_contained_in(pathkeys, subpath->pathkeys,
@@ -1590,8 +1686,10 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 			subplan = sort_plan;
 		}
 
-		subplans = lappend(subplans, subplan);
+		lfirst(subplans_cell) = subplan;
 	}
+
+	tlist_was_changed = (orig_tlist_length != list_length(plan->targetlist));
 
 	/* Set below if we find quals that we can use to run-time prune */
 	node->part_prune_index = -1;
@@ -1619,7 +1717,7 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 	node->mergeplans = subplans;
 
 	/*
-	 * If prepare_sort_from_pathkeys added sort columns, but we were told to
+	 * If the children required extra sort columns, but we were told to
 	 * produce either the exact tlist or a narrow tlist, we should get rid of
 	 * the sort columns again.  We must inject a projection node to do so.
 	 */
@@ -1860,9 +1958,9 @@ create_gather_merge_plan(PlannerInfo *root, GatherMergePath *best_path)
 
 	/* Compute sort column info, and adjust subplan's tlist as needed */
 	subplan = prepare_sort_from_pathkeys(root, subplan, pathkeys,
+										 get_sort_input_vars(root, subplan),
 										 best_path->subpath->parent->relids,
 										 gm_plan->sortColIdx,
-										 false,
 										 &gm_plan->numCols,
 										 &gm_plan->sortColIdx,
 										 &gm_plan->sortOperators,
@@ -6204,6 +6302,197 @@ make_incrementalsort(Plan *lefttree, int numCols, int nPresortedCols,
 }
 
 /*
+ * Identify values available when adding a sort expression to this plan.
+ * For a node that cannot project we will insert a Result, whose inputs are
+ * precisely this node's outputs.  Scans can use their scan Vars; joins and
+ * upper nodes must use their subplans' actual output expressions.
+ */
+static List *
+get_projection_input_exprs(Plan *plan)
+{
+	List	   *exprs;
+
+	if (!is_projection_capable_plan(plan))
+		return plan->targetlist;
+
+	switch (nodeTag(plan))
+	{
+		case T_NestLoop:
+		case T_MergeJoin:
+		case T_HashJoin:
+			return list_concat(list_copy(plan->lefttree->targetlist),
+							   list_copy(plan->righttree->targetlist));
+		case T_BitmapHeapScan:
+			/* Its lefttree supplies TIDs, not projection input columns. */
+			break;
+		case T_IndexOnlyScan:
+			return ((IndexOnlyScan *) plan)->indextlist;
+		case T_ForeignScan:
+			if (((ForeignScan *) plan)->fdw_scan_tlist != NIL)
+				return ((ForeignScan *) plan)->fdw_scan_tlist;
+			break;
+		case T_CustomScan:
+			if (((CustomScan *) plan)->custom_scan_tlist != NIL)
+				return ((CustomScan *) plan)->custom_scan_tlist;
+			break;
+		case T_Agg:
+		case T_WindowAgg:
+			/* These nodes also compute their own aggregate/window values. */
+			exprs = list_copy(plan->lefttree->targetlist);
+			{
+				List	   *vars = pull_var_clause((Node *) plan->targetlist,
+												   PVC_INCLUDE_AGGREGATES |
+												   PVC_INCLUDE_WINDOWFUNCS |
+												   PVC_INCLUDE_PLACEHOLDERS);
+				ListCell   *lc;
+
+				foreach(lc, vars)
+				{
+					Node	   *node = lfirst(lc);
+
+					if ((IsA(plan, Agg) && (IsA(node, Aggref) || IsA(node, GroupingFunc))) ||
+						(IsA(plan, WindowAgg) && IsA(node, WindowFunc)))
+						exprs = lappend(exprs, node);
+				}
+				list_free(vars);
+			}
+			return exprs;
+		default:
+			if (plan->lefttree != NULL && !IsA(plan, SubqueryScan))
+				return plan->lefttree->targetlist;
+			break;
+	}
+
+	/* A scan (or a childless Result) uses local Vars, not subplan outputs. */
+	return pull_var_clause((Node *) plan->targetlist,
+						   PVC_INCLUDE_AGGREGATES |
+						   PVC_INCLUDE_WINDOWFUNCS |
+						   PVC_INCLUDE_PLACEHOLDERS);
+}
+
+static inline bool
+plan_is_join(Plan *plan)
+{
+	return IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin);
+}
+
+/*
+ * Supply find_computable_ec_member() with independently available Vars and
+ * quasi-Vars, not computed child expressions whose internal Vars may be
+ * inaccessible.  Scans have already exposed their local dependencies above.
+ */
+static List *
+get_sort_input_vars(PlannerInfo *root, Plan *plan)
+{
+	List	   *vars = get_available_input_vars(get_projection_input_exprs(plan));
+	ListCell   *lc;
+	List	   *outputvars;
+
+	outputvars = pull_var_clause((Node *) plan->targetlist,
+								 PVC_INCLUDE_AGGREGATES |
+								 PVC_INCLUDE_WINDOWFUNCS |
+								 PVC_INCLUDE_PLACEHOLDERS);
+
+	/* Preserve the output-side spelling of an outer join's input values. */
+	if (plan_is_join(plan) && !bms_is_empty(((Join *) plan)->ojrelids))
+	{
+		List	   *adjusted = NIL;
+
+		/*
+		 * An outer join's output Vars and PHVs can include nulling rels that
+		 * are absent from the corresponding child outputs.  Match all other
+		 * fields exactly, and require the input's nulling rels to be a subset
+		 * of the output's.
+		 *
+		 * If a match is found, retain the output-side representation for the
+		 * subsequent EC dependency check.  Only consider values independently
+		 * supplied by a child; occurrence within an output expression alone
+		 * does not establish availability.
+		 */
+		foreach(lc, outputvars)
+		{
+			Var		   *node = (Var *) lfirst(lc);
+			ListCell   *lc2;
+
+			foreach(lc2, vars)
+			{
+				Var		   *input = (Var *) lfirst(lc2);
+
+				if (IsA(node, Var) && IsA(input, Var))
+				{
+					Var			tmp = *node;
+
+					tmp.varnullingrels = input->varnullingrels;
+					if (equal(&tmp, input) &&
+						bms_is_subset(input->varnullingrels, node->varnullingrels))
+						break;
+				}
+				else if (IsA(node, PlaceHolderVar) && IsA(input, PlaceHolderVar))
+				{
+					PlaceHolderVar *phv = (PlaceHolderVar *) node;
+					PlaceHolderVar *inputphv = (PlaceHolderVar *) input;
+					PlaceHolderVar copy = *phv;
+
+					copy.phnullingrels = inputphv->phnullingrels;
+					if (equal(&copy, inputphv) &&
+						bms_is_subset(inputphv->phnullingrels, phv->phnullingrels))
+						break;
+				}
+			}
+			if (lc2 != NULL)
+				adjusted = lappend(adjusted, node);
+		}
+		vars = list_concat(vars, adjusted);
+	}
+
+	/* These values will be replaced by Params when adding the sort column. */
+	foreach(lc, root->curOuterParams)
+	{
+		NestLoopParam *nlp = lfirst_node(NestLoopParam, lc);
+
+		vars = lappend(vars, nlp->paramval);
+	}
+
+	/*
+	 * An existing projection can also supply a local PHV whose expression
+	 * uses only these inputs.  Do not infer availability merely from its
+	 * occurrence in the output: a null-extended PHV cannot be recomputed
+	 * here, and a volatile expression must not be evaluated a second time.
+	 */
+	foreach(lc, outputvars)
+	{
+		Node	   *node = lfirst(lc);
+		PlaceHolderVar *phv;
+		List	   *needed;
+		ListCell   *lc2;
+
+		if (!IsA(node, PlaceHolderVar) || list_member(vars, node))
+			continue;
+
+		phv = (PlaceHolderVar *) node;
+		if (!bms_is_empty(phv->phnullingrels) ||
+			contain_volatile_functions((Node *) phv->phexpr))
+			continue;
+
+		needed = pull_var_clause((Node *) phv->phexpr,
+								 PVC_INCLUDE_AGGREGATES |
+								 PVC_INCLUDE_WINDOWFUNCS |
+								 PVC_INCLUDE_PLACEHOLDERS);
+		foreach(lc2, needed)
+		{
+			if (!list_member(vars, lfirst(lc2)))
+				break;
+		}
+		list_free(needed);
+		if (lc2 == NULL)
+			vars = lappend(vars, phv);
+	}
+
+	list_free(outputvars);
+	return vars;
+}
+
+/*
  * prepare_sort_from_pathkeys
  *	  Prepare to sort according to given pathkeys
  *
@@ -6217,7 +6506,6 @@ make_incrementalsort(Plan *lefttree, int numCols, int nPresortedCols,
  *	  'pathkeys' is the list of pathkeys by which the result is to be sorted
  *	  'relids' identifies the relation being sorted, or is NULL
  *	  'reqColIdx' is NULL or an array of required sort key column numbers
- *	  'adjust_tlist_in_place' is true if lefttree must be modified in-place
  *
  * We must convert the pathkey information into arrays of sort key column
  * numbers, sort operator OIDs, collation OIDs, and nulls-first flags,
@@ -6231,6 +6519,12 @@ make_incrementalsort(Plan *lefttree, int numCols, int nPresortedCols,
  * use parent EC members either, since their PlaceHolderVars could falsely
  * match the translated ones in the child's tlist.
  *
+ * input_vars lists the independent Vars and quasi-Vars available to the
+ * projection that will compute any added sort expression.  It must not contain
+ * computed output expressions whose internal Vars are not separately available.
+ * Append/MergeAppend callers invoke
+ * this function on their already-built children, not on a parent template.
+ *
  * If reqColIdx isn't NULL then it contains sort key column numbers that
  * we should match.  This is used when making child plans for a MergeAppend;
  * it's an error if we can't match the columns.
@@ -6240,18 +6534,15 @@ make_incrementalsort(Plan *lefttree, int numCols, int nPresortedCols,
  * compute these expressions, since a Sort or MergeAppend node itself won't
  * do any such calculations.  If the input plan type isn't one that can do
  * projections, this means adding a Result node just to do the projection.
- * However, the caller can pass adjust_tlist_in_place = true to force the
- * lefttree tlist to be modified in-place regardless of whether the node type
- * can project --- we use this for fixing the tlist of MergeAppend itself.
  *
  * Returns the node which is to be the input to the Sort (either lefttree,
  * or a Result stacked atop lefttree).
  */
 static Plan *
 prepare_sort_from_pathkeys(PlannerInfo *root, Plan *lefttree, List *pathkeys,
+						   List *input_vars,
 						   Relids relids,
 						   const AttrNumber *reqColIdx,
-						   bool adjust_tlist_in_place,
 						   int *p_numsortkeys,
 						   AttrNumber **p_sortColIdx,
 						   Oid **p_sortOperators,
@@ -6259,6 +6550,7 @@ prepare_sort_from_pathkeys(PlannerInfo *root, Plan *lefttree, List *pathkeys,
 						   bool **p_nullsFirst)
 {
 	List	   *tlist = lefttree->targetlist;
+	bool		adjust_tlist_in_place = false;
 	ListCell   *i;
 	int			numsortkeys;
 	AttrNumber *sortColIdx;
@@ -6360,7 +6652,7 @@ prepare_sort_from_pathkeys(PlannerInfo *root, Plan *lefttree, List *pathkeys,
 			/*
 			 * No matching tlist item; look for a computable expression.
 			 */
-			em = find_computable_ec_member(NULL, ec, tlist, relids, false);
+			em = find_computable_ec_member(NULL, ec, input_vars, relids, false);
 			if (!em)
 				elog(ERROR, "could not find pathkey item to sort");
 			pk_datatype = em->em_datatype;
@@ -6445,9 +6737,9 @@ make_sort_from_pathkeys(PlannerInfo *root, Plan *lefttree, List *pathkeys,
 
 	/* Compute sort column info, and adjust lefttree as needed */
 	lefttree = prepare_sort_from_pathkeys(root, lefttree, pathkeys,
+										  get_sort_input_vars(root, lefttree),
 										  relids,
 										  NULL,
-										  false,
 										  &numsortkeys,
 										  &sortColIdx,
 										  &sortOperators,
@@ -6483,9 +6775,9 @@ make_incrementalsort_from_pathkeys(PlannerInfo *root, Plan *lefttree,
 
 	/* Compute sort column info, and adjust lefttree as needed */
 	lefttree = prepare_sort_from_pathkeys(root, lefttree, pathkeys,
+										  get_sort_input_vars(root, lefttree),
 										  relids,
 										  NULL,
-										  false,
 										  &numsortkeys,
 										  &sortColIdx,
 										  &sortOperators,
