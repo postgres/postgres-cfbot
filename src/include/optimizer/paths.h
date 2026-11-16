@@ -212,6 +212,15 @@ extern bool is_redundant_with_indexclauses(RestrictInfo *rinfo,
 										   List *indexclauses);
 
 /*
+ * uniquekeys.c
+ *	  utilities for proving relations distinct using UniqueKeys
+ */
+extern bool joinrel_supports_distinctness(PlannerInfo *root,
+										  RelOptInfo *joinrel);
+extern bool joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
+									List *clause_list);
+
+/*
  * pathkeys.c
  *	  utilities for matching and building path keys
  */
