@@ -1813,6 +1813,7 @@ alter table recur1 alter column f2 type recur2; -- fails
 
 -- SET STORAGE may need to add a TOAST table
 create table test_storage (a text, c text storage plain);
+insert into test_storage values ('a', 'c');
 select reltoastrelid <> 0 as has_toast_table
   from pg_class where oid = 'test_storage'::regclass;
 alter table test_storage alter a set storage plain;
