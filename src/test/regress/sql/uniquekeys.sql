@@ -116,4 +116,35 @@ select distinct on (id) id, x from uk_a;
 explain (costs off)
 select distinct id, generate_series(1, 2) from uk_a;
 
+-- DISTINCT over grouped input needs all the grouping columns
+explain (costs off)
+select distinct x, count(*) from uk_a group by x;
+
+explain (costs off)
+select distinct x, count(*) from uk_a group by x, y;
+
+-- or grouping columns that the scan/join relation is distinct for
+explain (costs off)
+select distinct a.id, count(*) from uk_a a join uk_b b on a.x = b.id
+group by a.id, b.y;
+
+explain (costs off)
+select distinct b.id, count(*) from uk_a a join uk_b b on a.x = b.id
+group by a.id, b.id;
+
+-- unless there are grouping sets
+explain (costs off)
+select distinct x, count(*) from uk_a group by grouping sets ((x), ());
+
+-- aggregation without GROUP BY returns one row
+explain (costs off)
+select distinct count(*) from uk_a;
+
+-- window functions do not change the rows of their input
+explain (costs off)
+select distinct id, sum(x) over (partition by y) from uk_a;
+
+explain (costs off)
+select distinct x, sum(x) over (partition by y) from uk_a;
+
 drop table uk_a, uk_b, uk_c, uk_d, uk_n;

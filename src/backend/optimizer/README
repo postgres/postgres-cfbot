@@ -1099,6 +1099,15 @@ with a unique index on the nullable column b.u, every row of b that the
 join emits has a non-NULL b.u, so the index is as good as one on a NOT NULL
 column.
 
+A DISTINCT step can also follow grouping or window functions, for which we
+keep no UniqueKeys.  Grouping without grouping sets emits one row for each
+group, so its output is distinct if all the grouping columns are among the
+DISTINCT columns, or if the relation below is distinct for those that are,
+since they then determine the group.  It emits at most one row if there is
+no GROUP BY.  Window functions neither add nor remove rows, so their output
+is distinct if the relation below them is distinct for the DISTINCT columns
+(see is_redundant_distinct).
+
 
 Order of processing for EquivalenceClasses and PathKeys
 -------------------------------------------------------
