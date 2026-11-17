@@ -982,9 +982,17 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 	 * apply workers initialization, and to handle origin creation dynamically
 	 * when tables are added to the subscription. It is not clear whether
 	 * preventing creation of origins is worth additional complexity.
+	 *
+	 * In binary-upgrade mode, the origin has already been restored by
+	 * pg_dumpall with its roident from the old cluster, so don't create it
+	 * again. pg_upgrade rejects subscriptions whose origin is missing.
 	 */
-	ReplicationOriginNameForLogicalRep(subid, InvalidOid, originname, sizeof(originname));
-	replorigin_create(originname);
+	if (!IsBinaryUpgrade)
+	{
+		ReplicationOriginNameForLogicalRep(subid, InvalidOid, originname,
+										   sizeof(originname));
+		replorigin_create(originname);
+	}
 
 	/*
 	 * Connect to remote side to execute requested commands and fetch table
