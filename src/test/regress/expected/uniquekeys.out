@@ -332,4 +332,103 @@ select distinct id, generate_series(1, 2) from uk_a;
          ->  Seq Scan on uk_a
 (4 rows)
 
+-- DISTINCT over grouped input needs all the grouping columns
+explain (costs off)
+select distinct x, count(*) from uk_a group by x;
+       QUERY PLAN       
+------------------------
+ HashAggregate
+   Group Key: x
+   ->  Seq Scan on uk_a
+(3 rows)
+
+explain (costs off)
+select distinct x, count(*) from uk_a group by x, y;
+          QUERY PLAN          
+------------------------------
+ HashAggregate
+   Group Key: x, count(*)
+   ->  HashAggregate
+         Group Key: x, y
+         ->  Seq Scan on uk_a
+(5 rows)
+
+-- or grouping columns that the scan/join relation is distinct for
+explain (costs off)
+select distinct a.id, count(*) from uk_a a join uk_b b on a.x = b.id
+group by a.id, b.y;
+              QUERY PLAN              
+--------------------------------------
+ HashAggregate
+   Group Key: a.id, b.y
+   ->  Hash Join
+         Hash Cond: (a.x = b.id)
+         ->  Seq Scan on uk_a a
+         ->  Hash
+               ->  Seq Scan on uk_b b
+(7 rows)
+
+explain (costs off)
+select distinct b.id, count(*) from uk_a a join uk_b b on a.x = b.id
+group by a.id, b.id;
+                 QUERY PLAN                 
+--------------------------------------------
+ HashAggregate
+   Group Key: b.id, count(*)
+   ->  HashAggregate
+         Group Key: a.id, b.id
+         ->  Hash Join
+               Hash Cond: (a.x = b.id)
+               ->  Seq Scan on uk_a a
+               ->  Hash
+                     ->  Seq Scan on uk_b b
+(9 rows)
+
+-- unless there are grouping sets
+explain (costs off)
+select distinct x, count(*) from uk_a group by grouping sets ((x), ());
+          QUERY PLAN          
+------------------------------
+ HashAggregate
+   Group Key: x, count(*)
+   ->  MixedAggregate
+         Hash Key: x
+         Group Key: ()
+         ->  Seq Scan on uk_a
+(6 rows)
+
+-- aggregation without GROUP BY returns one row
+explain (costs off)
+select distinct count(*) from uk_a;
+       QUERY PLAN       
+------------------------
+ Aggregate
+   ->  Seq Scan on uk_a
+(2 rows)
+
+-- window functions do not change the rows of their input
+explain (costs off)
+select distinct id, sum(x) over (partition by y) from uk_a;
+            QUERY PLAN            
+----------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY y)
+   ->  Sort
+         Sort Key: y
+         ->  Seq Scan on uk_a
+(5 rows)
+
+explain (costs off)
+select distinct x, sum(x) over (partition by y) from uk_a;
+               QUERY PLAN               
+----------------------------------------
+ HashAggregate
+   Group Key: x, sum(x) OVER w1
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY y)
+         ->  Sort
+               Sort Key: y
+               ->  Seq Scan on uk_a
+(7 rows)
+
 drop table uk_a, uk_b, uk_c, uk_d, uk_n;

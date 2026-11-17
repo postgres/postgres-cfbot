@@ -185,7 +185,7 @@ static RelOptInfo *create_grouping_paths(PlannerInfo *root,
 										 grouping_sets_data *gd);
 static bool is_degenerate_grouping(PlannerInfo *root);
 static bool is_redundant_grouping(PlannerInfo *root, RelOptInfo *input_rel);
-static bool is_redundant_distinct(PlannerInfo *root, RelOptInfo *input_rel);
+static bool is_redundant_distinct(PlannerInfo *root, RelOptInfo *scanjoin_rel);
 static void create_redundant_step_paths(PlannerInfo *root,
 										RelOptInfo *input_rel,
 										RelOptInfo *output_rel,
@@ -227,6 +227,7 @@ static void create_one_window_path(PlannerInfo *root,
 								   List *activeWindows);
 static RelOptInfo *create_distinct_paths(PlannerInfo *root,
 										 RelOptInfo *input_rel,
+										 RelOptInfo *scanjoin_rel,
 										 PathTarget *target);
 static void create_partial_distinct_paths(PlannerInfo *root,
 										  RelOptInfo *input_rel,
@@ -1853,6 +1854,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		bool		scanjoin_target_parallel_safe;
 		bool		scanjoin_target_same_exprs;
 		bool		have_grouping;
+		RelOptInfo *scanjoin_rel;
 		WindowFuncLists *wflists = NULL;
 		List	   *activeWindows = NIL;
 		grouping_sets_data *gset_data = NULL;
@@ -1967,6 +1969,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		 * of the query's sort clause, distinct clause, etc.
 		 */
 		current_rel = query_planner(root, standard_qp_callback, &qp_extra);
+		scanjoin_rel = current_rel;
 
 		/*
 		 * Convert the query's result tlist into PathTarget format.
@@ -2151,6 +2154,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		{
 			current_rel = create_distinct_paths(root,
 												current_rel,
+												scanjoin_rel,
 												sort_input_target);
 		}
 	}							/* end of if (setOperations) */
@@ -4317,10 +4321,11 @@ is_redundant_grouping(PlannerInfo *root, RelOptInfo *input_rel)
  * is_redundant_distinct
  *
  * A redundant DISTINCT is one whose input rows are certain to be distinct
- * already.
+ * already.  The input rows are those of the scan/join relation, possibly
+ * after grouping and window functions.
  */
 static bool
-is_redundant_distinct(PlannerInfo *root, RelOptInfo *input_rel)
+is_redundant_distinct(PlannerInfo *root, RelOptInfo *scanjoin_rel)
 {
 	Query	   *parse = root->parse;
 
@@ -4331,8 +4336,55 @@ is_redundant_distinct(PlannerInfo *root, RelOptInfo *input_rel)
 	if (parse->hasTargetSRFs)
 		return false;
 
-	/* As above, it's fine if distinct_pathkeys is empty */
-	return rel_is_distinct_for_pathkeys(root, input_rel,
+	if (parse->groupClause || parse->groupingSets ||
+		parse->hasAggs || root->hasHavingQual)
+	{
+		List	   *common_pathkeys = NIL;
+
+		if (parse->groupingSets)
+			return false;
+
+		/* Without GROUP BY, at most one row comes out of the grouping step */
+		if (parse->groupClause == NIL)
+			return true;
+
+		/* group_pathkeys does not represent an unsortable GROUP BY */
+		if (!grouping_is_sortable(root->processed_groupClause))
+			return false;
+
+		/*
+		 * There is one row for each group, so the rows are distinct if all
+		 * the grouping columns are among the DISTINCT columns.  Failing that,
+		 * they are distinct if the scan/join relation is distinct for the
+		 * grouping columns that are, since those then determine the group.
+		 */
+		for (int i = 0; i < root->num_groupby_pathkeys; i++)
+		{
+			PathKey    *gpathkey = list_nth_node(PathKey,
+												 root->group_pathkeys, i);
+
+			foreach_node(PathKey, dpathkey, root->distinct_pathkeys)
+			{
+				if (dpathkey->pk_eclass == gpathkey->pk_eclass)
+				{
+					common_pathkeys = lappend(common_pathkeys, gpathkey);
+					break;
+				}
+			}
+		}
+
+		if (list_length(common_pathkeys) == root->num_groupby_pathkeys)
+			return true;
+
+		return rel_is_distinct_for_pathkeys(root, scanjoin_rel,
+											common_pathkeys);
+	}
+
+	/*
+	 * Window functions don't change the rows, so check the scan/join rel.  As
+	 * above, it's fine if distinct_pathkeys is empty.
+	 */
+	return rel_is_distinct_for_pathkeys(root, scanjoin_rel,
 										root->distinct_pathkeys);
 }
 
@@ -5181,6 +5233,7 @@ create_one_window_path(PlannerInfo *root,
  * Build a new upperrel containing Paths for SELECT DISTINCT evaluation.
  *
  * input_rel: contains the source-data Paths
+ * scanjoin_rel: the scan/join relation of the query
  * target: the pathtarget for the result Paths to compute
  *
  * Note: input paths should already compute the desired pathtarget, since
@@ -5188,7 +5241,7 @@ create_one_window_path(PlannerInfo *root,
  */
 static RelOptInfo *
 create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
-					  PathTarget *target)
+					  RelOptInfo *scanjoin_rel, PathTarget *target)
 {
 	RelOptInfo *distinct_rel;
 
@@ -5212,7 +5265,7 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	distinct_rel->useridiscurrent = input_rel->useridiscurrent;
 	distinct_rel->fdwroutine = input_rel->fdwroutine;
 
-	if (is_redundant_distinct(root, input_rel))
+	if (is_redundant_distinct(root, scanjoin_rel))
 	{
 		/* the input rows are distinct already, so just pass them on */
 		create_redundant_step_paths(root, input_rel, distinct_rel, target);
