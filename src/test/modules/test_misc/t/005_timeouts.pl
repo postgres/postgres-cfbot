@@ -203,4 +203,43 @@ ok( $node->poll_query_until(
 	'transaction timeout terminates the backend during ClientRead');
 $psql_session->{run}->finish;
 
+#
+# 6. Test that sending a FATAL error cannot block backend exit.
+#
+$psql_session = $node->background_psql('postgres');
+$pid = $psql_session->query_safe('SELECT pg_backend_pid()');
+$log_offset = -s $node->logfile;
+
+# Send a query in pipeline mode and leave its results unread. The dynamic
+# query text makes the FATAL error context larger than the socket buffers.
+# Turn off ON_ERROR_STOP for \flush, since psql treats PQflush's successful
+# return of zero as a failure.
+$psql_session->query_until(
+	qr/sleep_sent/, q[
+   BEGIN;
+   SET LOCAL log_error_verbosity = 'terse';
+   SET LOCAL max_parallel_workers_per_gather = 0;
+   SET LOCAL transaction_timeout = '5s';
+   \startpipeline
+   DO $$
+   BEGIN
+     EXECUTE 'SELECT pg_sleep(60) /*' || repeat('x', 8 * 1024 * 1024) || '*/';
+   END;
+   $$;
+   \set ON_ERROR_STOP off
+   \flush
+   \echo sleep_sent
+]);
+$node->wait_for_event('client backend', 'PgSleep');
+
+$node->wait_for_log(
+	qr/\[$pid\].*FATAL:\s+terminating connection due to transaction timeout/,
+	$log_offset);
+ok( $node->poll_query_until(
+		'postgres', qq[
+		SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE pid = $pid);
+	]),
+	'backend exits even when the client does not read the FATAL error');
+$psql_session->{run}->kill_kill;
+
 done_testing();
