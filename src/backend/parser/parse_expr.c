@@ -4954,6 +4954,11 @@ transformJsonBehavior(ParseState *pstate, JsonExpr *jsexpr,
 			 * build_coercion_expression() assumes implicit coercion when
 			 * coercing the typmod, so that inputs exceeding length cause an
 			 * error instead of silent truncation.
+			 *
+			 * Whichever coercion context is used, mark the result
+			 * COERCE_IMPLICIT_CAST: the cast is implied by the RETURNING
+			 * clause, not written by the user, so ruleutils.c leaves it out
+			 * and reparsing the RETURNING clause derives it again.
 			 */
 			coerced_expr =
 				coerce_to_target_type(pstate, expr, exprType(expr),
@@ -4962,7 +4967,7 @@ transformJsonBehavior(ParseState *pstate, JsonExpr *jsexpr,
 									   typcategory == TYPCATEGORY_BITSTRING) ?
 									  COERCION_ASSIGNMENT :
 									  COERCION_EXPLICIT,
-									  COERCE_EXPLICIT_CAST,
+									  COERCE_IMPLICIT_CAST,
 									  exprLocation((Node *) behavior));
 
 			if (coerced_expr == NULL)
