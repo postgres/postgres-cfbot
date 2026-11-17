@@ -1851,17 +1851,13 @@ SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING varchar(3)
 				  DEFAULT lower('ABCDEF'::text) ON EMPTY) AS r;
 \sv queryfuncs_view_default;
 CREATE OR REPLACE VIEW public.queryfuncs_view_default AS
- SELECT JSON_VALUE('{}'::jsonb, '$."a"' RETURNING character varying(3) DEFAULT lower('ABCDEF'::text)::character varying(3) ON EMPTY) AS r
+ SELECT JSON_VALUE('{}'::jsonb, '$."a"' RETURNING character varying(3) DEFAULT lower('ABCDEF'::text) ON EMPTY) AS r
 SELECT * FROM queryfuncs_view_default;
 ERROR:  value too long for type character varying(3)
 SELECT pg_get_viewdef('queryfuncs_view_default'::regclass) AS def \gset
 CREATE VIEW queryfuncs_view_default_re AS :def
 SELECT * FROM queryfuncs_view_default_re;
-  r  
------
- abc
-(1 row)
-
+ERROR:  value too long for type character varying(3)
 CREATE VIEW queryfuncs_view_default_cast AS
 SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING varchar(3)
 				  DEFAULT lower('ABCDEF'::text)::varchar(3) ON EMPTY) AS r;
@@ -1881,17 +1877,13 @@ SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING queryfuncs_d_varchar3
 				  DEFAULT lower('ABCDEF'::text) ON EMPTY) AS r;
 \sv queryfuncs_view_default_dom;
 CREATE OR REPLACE VIEW public.queryfuncs_view_default_dom AS
- SELECT JSON_VALUE('{}'::jsonb, '$."a"' RETURNING queryfuncs_d_varchar3 DEFAULT lower('ABCDEF'::text)::queryfuncs_d_varchar3 ON EMPTY) AS r
+ SELECT JSON_VALUE('{}'::jsonb, '$."a"' RETURNING queryfuncs_d_varchar3 DEFAULT lower('ABCDEF'::text) ON EMPTY) AS r
 SELECT * FROM queryfuncs_view_default_dom;
 ERROR:  value too long for type character varying(3)
 SELECT pg_get_viewdef('queryfuncs_view_default_dom'::regclass) AS def \gset
 CREATE VIEW queryfuncs_view_default_dom_re AS :def
 SELECT * FROM queryfuncs_view_default_dom_re;
-  r  
------
- abc
-(1 row)
-
+ERROR:  value too long for type character varying(3)
 DROP VIEW queryfuncs_view_default, queryfuncs_view_default_re,
 	queryfuncs_view_default_cast, queryfuncs_view_default_dom,
 	queryfuncs_view_default_dom_re;
