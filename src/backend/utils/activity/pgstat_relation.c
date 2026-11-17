@@ -41,6 +41,18 @@ typedef struct TwoPhasePgStatRecord
 	bool		truncdropped;	/* was the relation truncated/dropped? */
 } TwoPhasePgStatRecord;
 
+/*
+ * Extended 2PC state for n_ins_since_vacuum. Keep the existing record as
+ * the prefix so that prepared transactions created by an older binary remain
+ * readable after a minor-version update.
+ */
+typedef struct TwoPhasePgStatRecordV2
+{
+	TwoPhasePgStatRecord base;
+	PgStat_Counter ins_since_vacuum;
+	PgStat_Counter ins_since_vacuum_pre_truncdrop;
+} TwoPhasePgStatRecordV2;
+
 
 static PgStat_RelationStatus *pgstat_prep_relation_pending(PgStat_Kind kind,
 														   Oid rel_id, bool isshared);
@@ -799,26 +811,29 @@ AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state)
 
 	for (trans = xact_state->first; trans != NULL; trans = trans->next)
 	{
-		PgStat_RelationStatus *relstat PG_USED_FOR_ASSERTS_ONLY;
-		TwoPhasePgStatRecord record;
+		PgStat_RelationStatus *relstat;
+		TwoPhasePgStatRecordV2 record;
 
 		Assert(trans->nest_level == 1);
 		Assert(trans->upper == NULL);
 		relstat = trans->parent;
 		Assert(relstat->tab.trans == trans);
 
-		record.tuples_inserted = trans->tuples_inserted;
-		record.tuples_updated = trans->tuples_updated;
-		record.tuples_deleted = trans->tuples_deleted;
-		record.inserted_pre_truncdrop = trans->inserted_pre_truncdrop;
-		record.updated_pre_truncdrop = trans->updated_pre_truncdrop;
-		record.deleted_pre_truncdrop = trans->deleted_pre_truncdrop;
-		record.id = relstat->tab.id;
-		record.shared = relstat->tab.shared;
-		record.truncdropped = trans->truncdropped;
+		record.base.tuples_inserted = trans->tuples_inserted;
+		record.base.tuples_updated = trans->tuples_updated;
+		record.base.tuples_deleted = trans->tuples_deleted;
+		record.base.inserted_pre_truncdrop = trans->inserted_pre_truncdrop;
+		record.base.updated_pre_truncdrop = trans->updated_pre_truncdrop;
+		record.base.deleted_pre_truncdrop = trans->deleted_pre_truncdrop;
+		record.base.id = relstat->tab.id;
+		record.base.shared = relstat->tab.shared;
+		record.base.truncdropped = trans->truncdropped;
+		record.ins_since_vacuum = relstat->tab.counts_xact.ins_since_vacuum;
+		record.ins_since_vacuum_pre_truncdrop = trans->ins_since_vacuum_pre_truncdrop +
+			trans->inserted_pre_truncdrop;
 
 		RegisterTwoPhaseRecord(TWOPHASE_RM_PGSTAT_ID, 0,
-							   &record, sizeof(TwoPhasePgStatRecord));
+							   &record, sizeof(TwoPhasePgStatRecordV2));
 	}
 }
 
@@ -841,8 +856,7 @@ PostPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state)
 
 		relstat = trans->parent;
 		if (trans->truncdropped)
-			relstat->tab.counts_xact.ins_since_vacuum +=
-				trans->ins_since_vacuum_pre_truncdrop;
+			relstat->tab.counts_xact.ins_since_vacuum = 0;
 		relstat->tab.trans = NULL;
 	}
 }
@@ -857,7 +871,11 @@ pgstat_twophase_postcommit(FullTransactionId fxid, uint16 info,
 						   void *recdata, uint32 len)
 {
 	TwoPhasePgStatRecord *rec = (TwoPhasePgStatRecord *) recdata;
+	TwoPhasePgStatRecordV2 *rec_v2 = (TwoPhasePgStatRecordV2 *) recdata;
 	PgStat_RelationStatus *pgstat_info;
+	bool		has_ins_since_vacuum = len >= sizeof(TwoPhasePgStatRecordV2);
+
+	Assert(len == sizeof(TwoPhasePgStatRecord) || has_ins_since_vacuum);
 
 	/* Find or create a relstat entry for the rel */
 	pgstat_info = pgstat_prep_relation_pending(PGSTAT_KIND_RELATION, rec->id, rec->shared);
@@ -872,7 +890,8 @@ pgstat_twophase_postcommit(FullTransactionId fxid, uint16 info,
 		/* forget live/dead stats seen by backend thus far */
 		pgstat_info->tab.counts_xact.delta_live_tuples = 0;
 		pgstat_info->tab.counts_xact.delta_dead_tuples = 0;
-		pgstat_info->tab.counts_xact.ins_since_vacuum = 0;
+		pgstat_info->tab.counts_xact.ins_since_vacuum =
+			has_ins_since_vacuum ? rec_v2->ins_since_vacuum : 0;
 	}
 	pgstat_info->tab.counts_xact.delta_live_tuples +=
 		rec->tuples_inserted - rec->tuples_deleted;
@@ -895,7 +914,12 @@ pgstat_twophase_postabort(FullTransactionId fxid, uint16 info,
 						  void *recdata, uint32 len)
 {
 	TwoPhasePgStatRecord *rec = (TwoPhasePgStatRecord *) recdata;
+	TwoPhasePgStatRecordV2 *rec_v2 = (TwoPhasePgStatRecordV2 *) recdata;
 	PgStat_RelationStatus *pgstat_info;
+	PgStat_Counter ins_since_vacuum = rec->tuples_inserted;
+	bool		has_ins_since_vacuum = len >= sizeof(TwoPhasePgStatRecordV2);
+
+	Assert(len == sizeof(TwoPhasePgStatRecord) || has_ins_since_vacuum);
 
 	/* Find or create a relstat entry for the rel */
 	pgstat_info = pgstat_prep_relation_pending(PGSTAT_KIND_RELATION, rec->id, rec->shared);
@@ -906,13 +930,17 @@ pgstat_twophase_postabort(FullTransactionId fxid, uint16 info,
 		rec->tuples_inserted = rec->inserted_pre_truncdrop;
 		rec->tuples_updated = rec->updated_pre_truncdrop;
 		rec->tuples_deleted = rec->deleted_pre_truncdrop;
+		if (has_ins_since_vacuum)
+			ins_since_vacuum += rec_v2->ins_since_vacuum + rec_v2->ins_since_vacuum_pre_truncdrop;
+		else
+			ins_since_vacuum = rec->tuples_inserted;
 	}
 	pgstat_info->tab.counts_xact.tuples_inserted += rec->tuples_inserted;
 	pgstat_info->tab.counts_xact.tuples_updated += rec->tuples_updated;
 	pgstat_info->tab.counts_xact.tuples_deleted += rec->tuples_deleted;
 	pgstat_info->tab.counts_xact.delta_dead_tuples +=
 		rec->tuples_inserted + rec->tuples_updated;
-	pgstat_info->tab.counts_xact.ins_since_vacuum += rec->tuples_inserted;
+	pgstat_info->tab.counts_xact.ins_since_vacuum += ins_since_vacuum;
 }
 
 /*

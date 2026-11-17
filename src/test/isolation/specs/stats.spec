@@ -6,6 +6,9 @@ setup
     INSERT INTO test_stat_tab(key, value) VALUES('k0', 1);
     INSERT INTO test_stat_oid(name, oid) VALUES('test_stat_tab', 'test_stat_tab'::regclass);
 
+    CREATE TABLE test_stat_trunc(value int);
+    INSERT INTO test_stat_oid(name, oid) VALUES('test_stat_trunc', 'test_stat_trunc'::regclass);
+
     -- include 10us sleep to ensure that runtime measures as more than zero
     CREATE FUNCTION test_stat_func() RETURNS VOID LANGUAGE plpgsql AS
       $$BEGIN PERFORM pg_sleep(10e-6); END;$$;
@@ -33,6 +36,7 @@ teardown
     DROP TABLE test_slru_stats;
 
     DROP TABLE IF EXISTS test_stat_tab;
+    DROP TABLE IF EXISTS test_stat_trunc;
     DROP FUNCTION IF EXISTS test_stat_func();
     DROP FUNCTION IF EXISTS test_stat_func2();
     DROP FUNCTION test_stat_func_ifexists();
@@ -47,6 +51,10 @@ step s1_clear_snapshot { SELECT pg_stat_clear_snapshot(); }
 step s1_begin { BEGIN; }
 step s1_commit { COMMIT; }
 step s1_rollback { ROLLBACK; }
+step s1_savepoint_p1 { SAVEPOINT p1; }
+step s1_rollback_to_p1 { ROLLBACK TO SAVEPOINT p1; }
+step s1_savepoint_p2 { SAVEPOINT p2; }
+step s1_rollback_to_p2 { ROLLBACK TO SAVEPOINT p2; }
 step s1_prepare_a { PREPARE TRANSACTION 'a'; }
 step s1_commit_prepared_a { COMMIT PREPARED 'a'; }
 step s1_rollback_prepared_a { ROLLBACK PREPARED 'a'; }
@@ -97,6 +105,8 @@ step s1_table_update_k2 { UPDATE test_stat_tab SET value = value + 1 WHERE key =
 step s1_table_delete_k1 { DELETE FROM test_stat_tab WHERE key = 'k1';}
 step s1_table_truncate { TRUNCATE test_stat_tab; }
 step s1_table_drop { DROP TABLE test_stat_tab; }
+step s1_trunc_insert_five { INSERT INTO test_stat_trunc SELECT generate_series(1, 5); }
+step s1_trunc_truncate { TRUNCATE test_stat_trunc; }
 
 step s1_table_stats {
     SELECT
@@ -110,6 +120,12 @@ step s1_table_stats {
         pg_stat_get_vacuum_count(tso.oid) AS vacuum_count
     FROM test_stat_oid AS tso
     WHERE tso.name = 'test_stat_tab'
+}
+
+step s1_trunc_ins_since_vacuum {
+    SELECT pg_stat_get_ins_since_vacuum(tso.oid) AS n_ins_since_vacuum
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_trunc'
 }
 
 # SLRU stats steps
@@ -565,14 +581,24 @@ permutation
   s1_begin
   s1_table_update_k1 # should *not* be counted, different rel
   s1_table_update_k1 # ditto
+  s1_trunc_insert_five
+  s1_savepoint_p1
+  s1_trunc_insert_five
+  s1_rollback_to_p1
   s1_table_truncate
+  s1_trunc_truncate
   s1_table_insert_k1 # should be counted
   s1_table_update_k1 # ditto
+  s1_trunc_insert_five
+  s1_savepoint_p2
+  s1_trunc_insert_five
+  s1_rollback_to_p2
   s1_prepare_a
   s1_ff # flush out non-transactional stats, might happen anyway
   s2_commit_prepared_a
   s2_ff
   s1_table_stats
+  s1_trunc_ins_since_vacuum
 
 # S1 prepares, S1 aborts prepared
 permutation
@@ -594,13 +620,23 @@ permutation
   s1_begin
   s1_table_update_k1 # should be counted
   s1_table_update_k1 # ditto
+  s1_trunc_insert_five
+  s1_savepoint_p1
+  s1_trunc_insert_five
+  s1_rollback_to_p1
   s1_table_truncate
+  s1_trunc_truncate
   s1_table_insert_k1 # should *not* be counted, different rel
   s1_table_update_k1 # ditto
+  s1_trunc_insert_five
+  s1_savepoint_p2
+  s1_trunc_insert_five
+  s1_rollback_to_p2
   s1_prepare_a
   s2_rollback_prepared_a
   s1_ff s2_ff
   s1_table_stats
+  s1_trunc_ins_since_vacuum
 
 
 ### 2PC: rolled back drop maintains live / dead counters
