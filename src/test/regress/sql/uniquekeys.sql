@@ -47,8 +47,54 @@ select * from uk_a a left join
   (uk_b b join uk_c c on b.x = c.id join uk_d d on c.x = d.a and c.y = d.b)
   on a.x = b.id;
 
+-- a left join's clause leaves one row of its nullable side.  Keep the
+-- planner from rearranging the left joins, so that the join relation of
+-- interest remains the inner side.
+set join_collapse_limit = 1;
+
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b left join uk_c c on b.x = c.id) on a.x = b.id;
+
+-- but not if it doesn't cover a key of the nullable side
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b left join uk_c c on b.x = c.x) on a.x = b.id;
+
+reset join_collapse_limit;
+
 reset enable_hashjoin;
 reset enable_mergejoin;
+
+-- A clause on a column that is nulled by an outer join works like one on the
+-- column itself.  The join of interest is put under a full join, because a
+-- left join's clause would let the planner reduce the outer join below it.
+explain (verbose, costs off)
+select * from uk_a a full join
+  (uk_b b left join uk_c c on b.x = c.x) on a.x = b.id and a.y = c.id;
+
+-- but not if the expression can be non-NULL in a null-extended row
+explain (verbose, costs off)
+select * from uk_a a full join
+  (uk_b b left join uk_c c on b.x = c.x)
+  on a.x = b.id and a.y = coalesce(c.id, 0);
+
+-- a full join's clauses do not limit either of its sides
+explain (verbose, costs off)
+select * from uk_a a full join
+  (uk_b b full join uk_c c on b.x = c.x) on a.x = b.id;
+
+explain (verbose, costs off)
+select * from uk_a a full join
+  (uk_b b full join uk_c c on b.x = c.x) on a.x = b.id and a.y = c.id;
+
+-- a relation nulled by a full join needs a clause of its own, even if it
+-- has at most one row
+explain (verbose, costs off)
+select * from uk_c c left join
+  ((select * from uk_a where id = 1) a full join
+   (select * from uk_b where id = 1) b on a.x = b.x)
+  on c.x = coalesce(a.y, b.y);
 
 --
 -- Test skipping DISTINCT and GROUP BY steps when the input is already
@@ -97,9 +143,45 @@ select distinct v from uk_n;
 explain (costs off)
 select distinct a.id, n.w from uk_a a join uk_n n on a.x = n.u;
 
+explain (costs off)
+select distinct a.id, n.w from uk_a a left join uk_n n on a.x = n.u;
+
 -- but that takes a join clause on each column of the key
 explain (costs off)
 select distinct a.id, n.u from uk_a a join uk_n n on a.x = n.w;
+
+-- outer joins
+explain (costs off)
+select distinct a.id, b.y from uk_a a left join uk_b b on a.x = b.id;
+
+explain (costs off)
+select distinct a.id, b.y from uk_a a left join uk_b b on a.x = b.x;
+
+explain (costs off)
+select distinct a.id, b.id from uk_a a left join uk_b b on a.x = b.x;
+
+explain (costs off)
+select distinct a.id, b.id from uk_a a full join uk_b b on a.x = b.x;
+
+-- a left join's null-extended row cannot be mistaken for a row that has a
+-- NULL in its key
+explain (costs off)
+select distinct a.id, n.v from uk_a a left join uk_n n on a.x = n.w;
+
+-- but a full join's can
+explain (costs off)
+select distinct n1.v, n2.v from uk_n n1 full join uk_n n2 on n1.w = n2.w;
+
+-- unless a NOT NULL column tells them apart
+explain (costs off)
+select distinct n1.v, n1.id, n2.v, n2.id
+from uk_n n1 full join uk_n n2 on n1.w = n2.w;
+
+-- or a strict restriction clause filters out the NULLs
+explain (costs off)
+select distinct n1.v, n2.v
+from (select * from uk_n where v > 0) n1 full join
+  (select * from uk_n where v > 0) n2 on n1.w = n2.w;
 
 -- GROUP BY without aggregates is handled likewise
 explain (costs off)

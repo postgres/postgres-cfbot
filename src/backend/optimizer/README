@@ -1047,9 +1047,9 @@ so that a query that never needs them does not pay for them.
 
 UniqueKeys are used to detect unique inner sides of joins when the inner
 side is itself a join, and to skip DISTINCT and GROUP BY steps whose input
-is already distinct.  The following describes each of these in turn.  For
-now only plain tables get UniqueKeys, and only joins that involve no outer
-joins, semijoins or antijoins are handled.
+is already distinct.  The following describes each of these in turn, and
+then how outer joins fit in.  For now only plain tables get UniqueKeys, and
+only joins that involve no semijoins or antijoins are handled.
 
 We do not keep UniqueKeys for join relations.  A join relation would
 typically have many of them, most of which would never be used.  And since
@@ -1107,6 +1107,72 @@ since they then determine the group.  It emits at most one row if there is
 no GROUP BY.  Window functions neither add nor remove rows, so their output
 is distinct if the relation below them is distinct for the DISTINCT columns
 (see is_redundant_distinct).
+
+Outer joins fit into this as follows.  UniqueKeys always describe the rows
+that a base relation really has, and their ECs are those of the relation's
+columns as they are when it is scanned.  In the output of a join relation
+that includes outer joins, a base relation can also be represented by a
+null-extended row.  We regard that as one more possible row of the
+relation, so that the procedure above still shows that only one combination
+is possible.  This takes three additions.
+
+1. Nulled expressions.  A question can be about an expression that is
+nulled by outer joins, such as b.y in
+
+	SELECT DISTINCT a.id, b.y FROM a LEFT JOIN b ON a.x = b.z
+
+which is in a different EC than the un-nulled b.y that a UniqueKey would
+use.  We start with the EC of the un-nulled expression instead, creating it
+if there is none.  That is valid because the two are equal wherever the
+nulled one is not NULL.  It is done only for expressions that are certain
+to be NULL when their relation is null-extended, which rules out something
+like COALESCE(b.y, 0).
+
+2. Left joins.  For a given left-hand row, a left join emits either the
+right-hand rows that satisfy its clauses or a single null-extended row,
+never both.  So every matching right-hand row has the same values in the
+right-hand ECs of the join's mergejoinable clauses, and we treat those ECs
+as fixed from the start.  In
+
+	SELECT ... FROM a LEFT JOIN b ON a.x = b.id
+
+with a unique index on b.id, a row of a leaves one row of b or the
+null-extended row.
+
+Those clauses are assumed to be strict too, so the right-hand rows that
+match are not NULL in those ECs.  When NULLs are considered equal, a
+UniqueKey that is not marked null_aware can therefore still be used if its
+ECs are among them: it holds for the matching rows, and the null-extended
+row is the only other possibility.
+
+3. Full joins.  A full join emits null-extended rows for both of its sides,
+so none of that holds, and its clauses are not used.  Moreover, showing
+that a relation has at most one row is not enough: the join's output can
+contain both that row and a null-extended row for the relation, and fixing
+the other relations does not tell us which one we get.  In
+
+	SELECT ... FROM c LEFT JOIN
+	  ((SELECT * FROM a WHERE id = 1) a FULL JOIN
+	   (SELECT * FROM b WHERE id = 1) b ON a.x = b.x)
+	  ON c.x = COALESCE(a.y, b.y)
+
+a and b have at most one row each, yet the full join can emit both a's row
+with b null-extended and b's row with a null-extended, and both can match
+the same row of c.  So for a relation that is nulled by a full join we
+require that one of the fixed ECs have a member of the relation.  A join
+clause on that member is not satisfied by a null-extended row.
+
+When NULLs are considered equal, that is still not enough, because a
+null-extended row looks the same as a row of the relation's own that is
+NULL in all the columns in question.  In
+
+	SELECT DISTINCT a.v, b.v FROM a FULL JOIN b ON a.x = b.w
+
+an unmatched row of a whose a.v is NULL yields (NULL, NULL), and so does an
+unmatched row of b whose b.v is NULL.  So the required EC must then have a
+column of the relation that cannot be NULL, due to a NOT NULL constraint or
+a strict restriction clause.  Such a column is NULL in the join's output
+only when the relation is null-extended, which tells the two cases apart.
 
 
 Order of processing for EquivalenceClasses and PathKeys

@@ -293,6 +293,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->unique_for_rels = NIL;
 	rel->non_unique_for_rels = NIL;
 	rel->uniquekeys = NIL;
+	rel->notnull_eclass_indexes = NULL;
 	rel->own_eclass_indexes = NULL;
 	rel->unique_rel = NULL;
 	rel->unique_pathkeys = NIL;
@@ -916,6 +917,7 @@ build_join_rel(PlannerInfo *root,
 	joinrel->unique_for_rels = NIL;
 	joinrel->non_unique_for_rels = NIL;
 	joinrel->uniquekeys = NIL;
+	joinrel->notnull_eclass_indexes = NULL;
 	joinrel->own_eclass_indexes = NULL;
 	joinrel->unique_rel = NULL;
 	joinrel->unique_pathkeys = NIL;

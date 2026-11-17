@@ -882,12 +882,16 @@ typedef struct PartitionSchemeData *PartitionScheme;
  *					other rels for which we have tried and failed to prove
  *					this one unique
  *
- * Two fields hold the information that such proofs for join rels are based
+ * Three fields hold the information that such proofs for join rels are based
  * on (see uniquekeys.c).  They are only used for base rels:
  *
  *		uniquekeys - list of UniqueKeys, each one being a set of
  *					EquivalenceClasses that no two rows of this rel agree on
  *					(filled when first needed)
+ *		notnull_eclass_indexes - EquivalenceClasses that have a member that
+ *					is a column of this rel that cannot be NULL (filled along
+ *					with uniquekeys, but only if the rel is nulled by a full
+ *					join)
  *		own_eclass_indexes - EquivalenceClasses that have a member belonging
  *					to this rel alone (filled when first needed)
  *
@@ -1146,6 +1150,8 @@ typedef struct RelOptInfo
 	 */
 	/* sets of ECs that no two rows of this rel agree on */
 	List	   *uniquekeys;
+	/* indexes in root->eq_classes of ECs with a non-NULL column of this rel */
+	Bitmapset  *notnull_eclass_indexes;
 	/* indexes in root->eq_classes of ECs with a member of this rel alone */
 	Bitmapset  *own_eclass_indexes;
 
