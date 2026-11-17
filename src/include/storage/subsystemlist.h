@@ -78,6 +78,7 @@ PG_SHMEM_SUBSYSTEM(BTreeShmemCallbacks)
 PG_SHMEM_SUBSYSTEM(SyncScanShmemCallbacks)
 PG_SHMEM_SUBSYSTEM(AsyncShmemCallbacks)
 PG_SHMEM_SUBSYSTEM(StatsShmemCallbacks)
+PG_SHMEM_SUBSYSTEM(LogQueryPlanShmemCallbacks)
 PG_SHMEM_SUBSYSTEM(WaitEventCustomShmemCallbacks)
 #ifdef USE_INJECTION_POINTS
 PG_SHMEM_SUBSYSTEM(InjectionPointShmemCallbacks)
