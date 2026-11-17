@@ -223,6 +223,7 @@ update_controlfile(const char *DataDir,
 	if ((fd = BasicOpenFile(ControlFilePath, O_RDWR | PG_BINARY)) < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not open file \"%s\": %m",
 						ControlFilePath)));
 #else
@@ -244,6 +245,7 @@ update_controlfile(const char *DataDir,
 #ifndef FRONTEND
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not write file \"%s\": %m",
 						ControlFilePath)));
 #else
@@ -261,6 +263,7 @@ update_controlfile(const char *DataDir,
 		if (pg_fsync(fd) != 0)
 			ereport(PANIC,
 					(errcode_for_file_access(),
+					 errnocoredump_on_errno(ENOSPC),
 					 errmsg("could not fsync file \"%s\": %m",
 							ControlFilePath)));
 		pgstat_report_wait_end();
@@ -275,6 +278,7 @@ update_controlfile(const char *DataDir,
 #ifndef FRONTEND
 		ereport(PANIC,
 				(errcode_for_file_access(),
+				 errnocoredump_on_errno(ENOSPC),
 				 errmsg("could not close file \"%s\": %m",
 						ControlFilePath)));
 #else
