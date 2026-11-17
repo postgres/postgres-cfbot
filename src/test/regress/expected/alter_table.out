@@ -888,6 +888,81 @@ select convalidated from pg_constraint where conrelid = 'parent_noinh_convalid':
 
 -- cleanup
 drop table parent_noinh_convalid, child_noinh_convalid;
+-- VALIDATE CONSTRAINT via index scan, for simple comparisons on NOT NULL
+-- indexed columns
+CREATE TABLE validate_via_index (id bigint PRIMARY KEY, val text);
+INSERT INTO validate_via_index SELECT g, 'v'||g FROM generate_series(1, 1000) g;
+-- Should use index (simple < on PK)
+ALTER TABLE validate_via_index ADD CONSTRAINT chk_lt CHECK (id < 2000) NOT VALID;
+ALTER TABLE validate_via_index VALIDATE CONSTRAINT chk_lt;
+SELECT convalidated FROM pg_constraint WHERE conname = 'chk_lt';
+ convalidated 
+--------------
+ t
+(1 row)
+
+-- Should use index (simple > on PK)
+ALTER TABLE validate_via_index ADD CONSTRAINT chk_gt CHECK (id > 0) NOT VALID;
+ALTER TABLE validate_via_index VALIDATE CONSTRAINT chk_gt;
+SELECT convalidated FROM pg_constraint WHERE conname = 'chk_gt';
+ convalidated 
+--------------
+ t
+(1 row)
+
+-- Should use index (reversed form: constant OP column)
+ALTER TABLE validate_via_index ADD CONSTRAINT chk_rev CHECK (0 < id) NOT VALID;
+ALTER TABLE validate_via_index VALIDATE CONSTRAINT chk_rev;
+SELECT convalidated FROM pg_constraint WHERE conname = 'chk_rev';
+ convalidated 
+--------------
+ t
+(1 row)
+
+-- Should fail (constraint is violated)
+ALTER TABLE validate_via_index ADD CONSTRAINT chk_fail CHECK (id < 500) NOT VALID;
+ALTER TABLE validate_via_index VALIDATE CONSTRAINT chk_fail;
+ERROR:  check constraint "chk_fail" of relation "validate_via_index" is violated by some row
+ALTER TABLE validate_via_index DROP CONSTRAINT chk_fail;
+-- Should fall through to full scan (AND expression)
+ALTER TABLE validate_via_index ADD CONSTRAINT chk_and CHECK (id > 0 AND id < 2000) NOT VALID;
+ALTER TABLE validate_via_index VALIDATE CONSTRAINT chk_and;
+SELECT convalidated FROM pg_constraint WHERE conname = 'chk_and';
+ convalidated 
+--------------
+ t
+(1 row)
+
+-- Should fall through to full scan (nullable column)
+ALTER TABLE validate_via_index ADD COLUMN nullable_col int;
+CREATE INDEX ON validate_via_index(nullable_col);
+UPDATE validate_via_index SET nullable_col = id;
+ALTER TABLE validate_via_index ADD CONSTRAINT chk_nullable CHECK (nullable_col < 2000) NOT VALID;
+ALTER TABLE validate_via_index VALIDATE CONSTRAINT chk_nullable;
+SELECT convalidated FROM pg_constraint WHERE conname = 'chk_nullable';
+ convalidated 
+--------------
+ t
+(1 row)
+
+-- Should fall through to full scan (index collation != constraint collation)
+ALTER TABLE validate_via_index ADD COLUMN label text NOT NULL DEFAULT '';
+UPDATE validate_via_index SET label = 'B' WHERE id <= 10;
+UPDATE validate_via_index SET label = 'a' WHERE id > 10;
+CREATE INDEX ON validate_via_index (label COLLATE "C");
+ALTER TABLE validate_via_index ADD CONSTRAINT chk_coll CHECK (label < 'b') NOT VALID;
+ALTER TABLE validate_via_index VALIDATE CONSTRAINT chk_coll;
+ERROR:  check constraint "chk_coll" of relation "validate_via_index" is violated by some row
+DROP TABLE validate_via_index;
+-- Should fail (constant is outside the column's own type's range, forcing a
+-- cross-type comparison operator; the scan key's subtype must be set to the
+-- constant's type for that case, not just for same-type comparisons)
+CREATE TABLE validate_via_index_crosstype (id int PRIMARY KEY);
+INSERT INTO validate_via_index_crosstype VALUES (1), (2), (3);
+ALTER TABLE validate_via_index_crosstype ADD CONSTRAINT chk_crosstype CHECK (id < -3000000000) NOT VALID;
+ALTER TABLE validate_via_index_crosstype VALIDATE CONSTRAINT chk_crosstype;
+ERROR:  check constraint "chk_crosstype" of relation "validate_via_index_crosstype" is violated by some row
+DROP TABLE validate_via_index_crosstype;
 -- Try (and fail) to create constraint from attmp5(a) to attmp4(a) - unique constraint on
 -- attmp4 is a,b
 ALTER TABLE attmp5 add constraint attmpconstr foreign key(a) references attmp4(a) match full;
