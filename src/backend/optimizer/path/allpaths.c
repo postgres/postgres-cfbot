@@ -2471,6 +2471,17 @@ find_window_run_conditions(Query *subquery, AttrNumber attno,
 	wclause = (WindowClause *) list_nth(subquery->windowClause,
 										wfunc->winref - 1);
 
+	/*
+	 * If this is a row pattern recognition window, we cannot push down a run
+	 * condition. In the case, a window partition (or frame) is divided into
+	 * multiple reduced frames and each frame should be evaluated to the end
+	 * of the partition (or full frame end). This means we cannot apply the
+	 * run condition optimization because it stops evaluation window functions
+	 * in certain cases.
+	 */
+	if (wclause->rpPattern != NULL)
+		return false;
+
 	req.type = T_SupportRequestWFuncMonotonic;
 	req.window_func = wfunc;
 	req.window_clause = wclause;
