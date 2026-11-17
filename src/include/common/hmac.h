@@ -21,6 +21,12 @@
 typedef struct pg_hmac_ctx pg_hmac_ctx;
 
 extern pg_hmac_ctx *pg_hmac_create(pg_cryptohash_type type);
+/*
+ * pg_hmac_init() with a NULL key reuses the key given to the previous call
+ * on the same context, and only resets the running hash.  This avoids
+ * setting up the key again when computing many MACs with the same key, as
+ * in PBKDF2.
+ */
 extern int	pg_hmac_init(pg_hmac_ctx *ctx, const uint8 *key, size_t len);
 extern int	pg_hmac_update(pg_hmac_ctx *ctx, const uint8 *data, size_t len);
 extern int	pg_hmac_final(pg_hmac_ctx *ctx, uint8 *dest, size_t len);

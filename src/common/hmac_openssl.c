@@ -59,6 +59,7 @@ typedef enum pg_hmac_errno
 	PG_HMAC_ERROR_NONE = 0,
 	PG_HMAC_ERROR_DEST_LEN,
 	PG_HMAC_ERROR_OPENSSL,
+	PG_HMAC_ERROR_NO_KEY,
 } pg_hmac_errno;
 
 /* Internal pg_hmac_ctx structure */
@@ -73,6 +74,7 @@ struct pg_hmac_ctx
 	pg_cryptohash_type type;
 	pg_hmac_errno error;
 	const char *errreason;
+	bool		keyed;			/* has a key been set? */
 
 #ifdef USE_RESOWNER_FOR_HMAC
 	ResourceOwner resowner;
@@ -203,6 +205,37 @@ pg_hmac_init(pg_hmac_ctx *ctx, const uint8 *key, size_t len)
 	if (ctx == NULL)
 		return -1;
 
+	/*
+	 * A NULL key reuses the key of the previous call.  OpenSSL keeps the key
+	 * schedule in the context and only resets the digest, so this skips the
+	 * key setup and the lookup of the digest algorithm that come with
+	 * setting a key.  The lookup takes locks shared by all the threads of a
+	 * process, which matters for PBKDF2, where the same key is set once per
+	 * iteration.
+	 */
+	if (key == NULL)
+	{
+		if (!ctx->keyed)
+		{
+			ctx->error = PG_HMAC_ERROR_NO_KEY;
+			return -1;
+		}
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+		status = EVP_MAC_init(ctx->hmacctx, NULL, 0, NULL);
+#else
+		status = HMAC_Init_ex(ctx->hmacctx, NULL, 0, NULL, NULL);
+#endif
+		if (status <= 0)
+		{
+			ctx->errreason = SSLerrmessage(ERR_get_error());
+			ctx->error = PG_HMAC_ERROR_OPENSSL;
+			return -1;
+		}
+
+		return 0;
+	}
+
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 	switch (ctx->type)
 	{
@@ -263,6 +296,7 @@ pg_hmac_init(pg_hmac_ctx *ctx, const uint8 *key, size_t len)
 		return -1;
 	}
 
+	ctx->keyed = true;
 	return 0;
 }
 
@@ -429,6 +463,8 @@ pg_hmac_error(pg_hmac_ctx *ctx)
 			return _("destination buffer too small");
 		case PG_HMAC_ERROR_OPENSSL:
 			return _("OpenSSL failure");
+		case PG_HMAC_ERROR_NO_KEY:
+			return _("no key set");
 	}
 
 	Assert(false);				/* cannot be reached */
