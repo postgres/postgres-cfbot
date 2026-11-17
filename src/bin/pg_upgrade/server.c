@@ -216,6 +216,19 @@ start_postmaster(ClusterInfo *cluster, bool report_and_exit_on_error)
 		appendPQExpBufferStr(&pgoptions, " -c synchronous_commit=off -c fsync=off -c full_page_writes=off");
 
 	/*
+	 * Before PG17, -b does not disable the logical replication launcher, so
+	 * prevent logical replication workers from starting on the old cluster
+	 * explicitly.  Otherwise apply and tablesync workers could run while the
+	 * old cluster is being checked and dumped: a tablesync worker could move
+	 * a relation out of the 'i' state, or create a tablesync replication
+	 * origin after check_old_cluster_subscription_state() has passed, which
+	 * would then be migrated and never dropped.
+	 */
+	if (cluster == &old_cluster &&
+		GET_MAJOR_VERSION(cluster->major_version) < 1700)
+		appendPQExpBufferStr(&pgoptions, " -c max_logical_replication_workers=0");
+
+	/*
 	 * Use -b to disable autovacuum and logical replication launcher
 	 * (effective in PG17 or later for the latter).
 	 */
