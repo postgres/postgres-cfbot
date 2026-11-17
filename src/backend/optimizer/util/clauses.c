@@ -117,6 +117,8 @@ typedef struct
 static bool contain_agg_clause_walker(Node *node, void *context);
 static bool find_window_functions_walker(Node *node, WindowFuncLists *lists);
 static bool contain_subplans_walker(Node *node, void *context);
+static bool expr_contains_walker(Node *node, void *context);
+static Node *strip_nullingrels_mutator(Node *node, void *context);
 static bool contain_mutable_functions_walker(Node *node, void *context);
 static bool xmlexpr_is_immutable(XmlExpr *xexpr);
 static bool contain_volatile_functions_walker(Node *node, void *context);
@@ -376,6 +378,71 @@ contain_subplans_walker(Node *node, void *context)
 	return expression_tree_walker(node, contain_subplans_walker, context);
 }
 
+
+/*
+ * expr_contains
+ *	  Is 'expr', or some subexpression of it, equal() to 'sub'?
+ */
+bool
+expr_contains(Node *expr, Node *sub)
+{
+	return expr_contains_walker(expr, sub);
+}
+
+static bool
+expr_contains_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (equal(node, context))
+		return true;
+	return expression_tree_walker(node, expr_contains_walker, context);
+}
+
+/*
+ * strip_nullingrels
+ *	  A copy of 'node' with every Var's and PlaceHolderVar's nullingrels
+ *	  cleared.
+ *
+ * Used to compare an expression read below an outer join with the query's
+ * copy above it (see query_tlist_exprs() in pathnode.c and
+ * search_indexed_tlist_for_nulled_expr() in setrefs.c).
+ * remove_nulling_relids() can't do this: it tests each Var's varno with
+ * bms_is_member(), which errors out on the negative special varnos, such as
+ * the ROWID_VAR a MERGE's targetlist contains.
+ */
+Node *
+strip_nullingrels(Node *node)
+{
+	return strip_nullingrels_mutator(node, NULL);
+}
+
+static Node *
+strip_nullingrels_mutator(Node *node, void *context)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		if (bms_is_empty(var->varnullingrels))
+			return node;
+		var = copyObject(var);
+		var->varnullingrels = NULL;
+		return (Node *) var;
+	}
+	if (IsA(node, PlaceHolderVar))
+	{
+		PlaceHolderVar *phv;
+
+		phv = (PlaceHolderVar *)
+			expression_tree_mutator(node, strip_nullingrels_mutator, context);
+		phv->phnullingrels = NULL;
+		return (Node *) phv;
+	}
+	return expression_tree_mutator(node, strip_nullingrels_mutator, context);
+}
 
 /*****************************************************************************
  *		Check clauses for mutable functions

@@ -702,6 +702,37 @@ FROM tenk1 t1 WHERE t1.ten = (SELECT (random() * 10)::integer);
     happen without the sub-<literal>SELECT</literal> construct.
    </para>
 
+   <para>
+    A <quote>nearest-neighbor</quote> index scan (see
+    <xref linkend="indexes-types"/>) computes each row's distance in order to
+    return the rows in distance order.  When the query also selects that
+    distance, the scan can return the value it computed instead of
+    evaluating the ordering operator again:
+
+<screen>
+EXPLAIN (VERBOSE, COSTS OFF) SELECT id, location &lt;-&gt; point '(101,456)' AS dist
+FROM places ORDER BY location &lt;-&gt; point '(101,456)' LIMIT 10;
+
+                         QUERY PLAN
+-------------------------------------------------------------
+ Limit
+   Output: id, ((location &lt;-&gt; '(101,456)'::point))
+   -&gt;  Index Scan using places_location_idx on public.places
+         Output: id, ((location &lt;-&gt; '(101,456)'::point))
+         Order By: (places.location &lt;-&gt; '(101,456)'::point)
+         Order By Values Used: 1
+</screen>
+
+    The <literal>Order By Values Used</literal> line counts the
+    <literal>ORDER BY</literal> keys whose values the scan returns this way.
+    It appears only in <command>EXPLAIN VERBOSE</command> output, and only
+    when the count is not zero.  In the index scan's
+    <literal>Output</literal> line, the extra parentheses around the
+    distance show that the scan supplies the value rather than computing it.
+    This happens only for operator classes whose distances are exactly the
+    operator's result.
+   </para>
+
   </sect2>
 
   <sect2 id="using-explain-analyze">

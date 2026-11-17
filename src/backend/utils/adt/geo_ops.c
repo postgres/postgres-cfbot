@@ -2951,64 +2951,81 @@ close_lseg(PG_FUNCTION_ARGS)
 
 
 /*
- * Closest point on or in box to specified point.
+ * The closest point of 'box' to 'pt': 'pt' itself clamped to the box.
  *
- * If *result is not NULL, set it to the closest point on the box to the
- * given point, and return the distance of the two points.
+ * Return the distance between them.  If *result is not NULL, set it to the
+ * closest point.  A box's edges are parallel to the axes, so this needs no
+ * line arithmetic, and the result is exact up to hypot()'s rounding.  The
+ * GiST and SP-GiST support functions use it through point_box_distance(),
+ * so the distances an index scan orders by are the operator's.
  */
 static float8
 box_closept_point(Point *result, BOX *box, Point *pt)
 {
-	float8		dist,
-				d;
-	Point		point,
-				closept;
-	LSEG		lseg;
+	Point		closept;
+	float8		dx,
+				dy;
 
-	if (box_contain_point(box, pt))
+	if (isnan(pt->x) || isnan(pt->y) ||
+		isnan(box->low.x) || isnan(box->low.y) ||
+		isnan(box->high.x) || isnan(box->high.y))
 	{
 		if (result != NULL)
 			*result = *pt;
-
-		return 0.0;
+		return get_float8_nan();
 	}
 
-	/* pairwise check lseg distances */
-	point.x = box->low.x;
-	point.y = box->high.y;
-	statlseg_construct(&lseg, &box->low, &point);
-	dist = lseg_closept_point(result, &lseg, pt);
-
-	statlseg_construct(&lseg, &box->high, &point);
-	d = lseg_closept_point(&closept, &lseg, pt);
-	if (float8_lt(d, dist))
+	/*
+	 * Take the distance along each axis directly rather than subtracting the
+	 * clamped point: a coordinate within the box's range, even an infinite
+	 * one, contributes nothing, where Infinity - Infinity would be NaN.
+	 */
+	if (pt->x < box->low.x)
 	{
-		dist = d;
-		if (result != NULL)
-			*result = closept;
+		closept.x = box->low.x;
+		dx = float8_mi(box->low.x, pt->x);
 	}
-
-	point.x = box->high.x;
-	point.y = box->low.y;
-	statlseg_construct(&lseg, &box->low, &point);
-	d = lseg_closept_point(&closept, &lseg, pt);
-	if (float8_lt(d, dist))
+	else if (pt->x > box->high.x)
 	{
-		dist = d;
-		if (result != NULL)
-			*result = closept;
+		closept.x = box->high.x;
+		dx = float8_mi(pt->x, box->high.x);
 	}
-
-	statlseg_construct(&lseg, &box->high, &point);
-	d = lseg_closept_point(&closept, &lseg, pt);
-	if (float8_lt(d, dist))
+	else
 	{
-		dist = d;
-		if (result != NULL)
-			*result = closept;
+		closept.x = pt->x;
+		dx = 0.0;
 	}
 
-	return dist;
+	if (pt->y < box->low.y)
+	{
+		closept.y = box->low.y;
+		dy = float8_mi(box->low.y, pt->y);
+	}
+	else if (pt->y > box->high.y)
+	{
+		closept.y = box->high.y;
+		dy = float8_mi(pt->y, box->high.y);
+	}
+	else
+	{
+		closept.y = pt->y;
+		dy = 0.0;
+	}
+
+	if (result != NULL)
+		*result = closept;
+
+	return hypot(dx, dy);
+}
+
+/*
+ * Distance from 'pt' to the nearest point of 'box', for the index support
+ * functions; see box_closept_point().
+ */
+float8
+point_box_distance(Point *pt, BOX *box)
+{
+	return box_closept_point(NULL, box, pt);
 }
 
 Datum
