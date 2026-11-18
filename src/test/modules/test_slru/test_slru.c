@@ -237,12 +237,6 @@ test_slru_shmem_request(void *arg)
 					 .name = "TestSLRU",
 					 .Dir = TestSlruDir,
 
-	/*
-	 * Short segments names are well tested elsewhere so in this test we are
-	 * focusing on long names.
-	 */
-					 .long_segment_names = true,
-
 					 .nslots = NUM_TEST_BUFFERS,
 					 .nlsns = 0,
 

@@ -551,8 +551,6 @@ CommitTsShmemRequest(void *arg)
 	SimpleLruRequest(.desc = &CommitTsSlruDesc,
 					 .name = "commit_timestamp",
 					 .Dir = "pg_commit_ts",
-					 .long_segment_names = false,
-
 					 .nslots = CommitTsShmemBuffers(),
 
 					 .PagePrecedes = CommitTsPagePrecedes,
