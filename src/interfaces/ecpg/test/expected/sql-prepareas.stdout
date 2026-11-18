@@ -64,3 +64,5 @@ execute ident_name(:ivar1,:ivar2)
 prepare "include_ _name" from :v_query
 execute "include_ _name"(:ivar1,:ivar2)
 1 2
++++++ Test for a NULL value in EXECUTE(exprlist) +++++
+rows with NULL c1 (must be 1) = 1

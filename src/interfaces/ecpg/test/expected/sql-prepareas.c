@@ -54,15 +54,19 @@ int main(void)
 {
 	/* exec sql begin declare section */
 	      
+	   
 	    
 	
 #line 22 "prepareas.pgc"
  int ivar1 = 1 , ivar2 = 2 ;
  
 #line 23 "prepareas.pgc"
+ short v_ind = - 1 ;
+ 
+#line 24 "prepareas.pgc"
  char v_include_dq_name [ 16 ] , v_include_ws_name [ 16 ] , v_normal_name [ 16 ] , v_query [ 64 ] ;
 /* exec sql end declare section */
-#line 24 "prepareas.pgc"
+#line 25 "prepareas.pgc"
 
 
 	strcpy(v_normal_name, "normal_name");
@@ -74,44 +78,44 @@ int main(void)
 	 * preparing for test
 	 */
 	{ ECPGconnect(__LINE__, 0, "ecpg1_regression" , NULL, NULL , NULL, 0); 
-#line 34 "prepareas.pgc"
+#line 35 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 34 "prepareas.pgc"
+#line 35 "prepareas.pgc"
 
 	{ ECPGtrans(__LINE__, NULL, "begin");
-#line 35 "prepareas.pgc"
+#line 36 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 35 "prepareas.pgc"
+#line 36 "prepareas.pgc"
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create table test ( c1 int , c2 int )", ECPGt_EOIT, ECPGt_EORT);
-#line 36 "prepareas.pgc"
+#line 37 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 36 "prepareas.pgc"
+#line 37 "prepareas.pgc"
 
 	{ ECPGtrans(__LINE__, NULL, "commit work");
-#line 37 "prepareas.pgc"
+#line 38 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 37 "prepareas.pgc"
+#line 38 "prepareas.pgc"
 
 	{ ECPGtrans(__LINE__, NULL, "begin");
-#line 38 "prepareas.pgc"
+#line 39 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 38 "prepareas.pgc"
+#line 39 "prepareas.pgc"
 
 
 	/*
 	 * Non dynamic statement
 	 */
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 43 "prepareas.pgc"
+#line 44 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 43 "prepareas.pgc"
+#line 44 "prepareas.pgc"
 
 	printf("+++++ Test for prepnormal +++++\n");
 	printf("insert into test values(:ivar1,:ivar2)\n");
@@ -120,26 +124,26 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 46 "prepareas.pgc"
+#line 47 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 46 "prepareas.pgc"
+#line 47 "prepareas.pgc"
 
 	check_result_of_insert();
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 49 "prepareas.pgc"
+#line 50 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 49 "prepareas.pgc"
+#line 50 "prepareas.pgc"
 
 	printf("+++++ Test for execute immediate +++++\n");
 	printf("execute immediate \"insert into test values(1,2)\"\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_immediate, "insert into test values(1,2)", ECPGt_EOIT, ECPGt_EORT);
-#line 52 "prepareas.pgc"
+#line 53 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 52 "prepareas.pgc"
+#line 53 "prepareas.pgc"
 
 	check_result_of_insert();
 
@@ -147,18 +151,18 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	 * PREPARE FROM
 	 */
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 58 "prepareas.pgc"
+#line 59 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 58 "prepareas.pgc"
+#line 59 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE ident FROM CString +++++\n");
 	printf("prepare ident_name from \"insert into test values(?,?)\"\n");
 	{ ECPGprepare(__LINE__, NULL, 0, "ident_name", "insert into test values(?,?)");
-#line 61 "prepareas.pgc"
+#line 62 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 61 "prepareas.pgc"
+#line 62 "prepareas.pgc"
 
 	printf("execute ident_name using :ivar1,:ivar2\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_execute, "ident_name", 
@@ -166,26 +170,26 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 63 "prepareas.pgc"
+#line 64 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 63 "prepareas.pgc"
+#line 64 "prepareas.pgc"
 
 	check_result_of_insert();
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 66 "prepareas.pgc"
+#line 67 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 66 "prepareas.pgc"
+#line 67 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE char_variable_normal_name FROM char_variable +++++\n");
 	printf("prepare :v_normal_name from :v_query\n");
 	{ ECPGprepare(__LINE__, NULL, 0, v_normal_name, v_query);
-#line 69 "prepareas.pgc"
+#line 70 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 69 "prepareas.pgc"
+#line 70 "prepareas.pgc"
 
 	printf("execute :v_normal_name using :ivar1,:ivar2\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_execute, v_normal_name, 
@@ -193,26 +197,26 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 71 "prepareas.pgc"
+#line 72 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 71 "prepareas.pgc"
+#line 72 "prepareas.pgc"
 
 	check_result_of_insert();
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 74 "prepareas.pgc"
+#line 75 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 74 "prepareas.pgc"
+#line 75 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE char_variable_inc_dq_name FROM char_variable +++++\n");
 	printf("prepare :v_include_dq_name from :v_query\n");
 	{ ECPGprepare(__LINE__, NULL, 0, v_include_dq_name, v_query);
-#line 77 "prepareas.pgc"
+#line 78 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 77 "prepareas.pgc"
+#line 78 "prepareas.pgc"
 
 	printf("execute :v_include_dq_name using :ivar1,:ivar2\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_execute, v_include_dq_name, 
@@ -220,26 +224,26 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 79 "prepareas.pgc"
+#line 80 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 79 "prepareas.pgc"
+#line 80 "prepareas.pgc"
 
 	check_result_of_insert();
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 82 "prepareas.pgc"
+#line 83 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 82 "prepareas.pgc"
+#line 83 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE char_variable_inc_ws_name FROM char_variable +++++\n");
 	printf("prepare :v_include_ws_name from :v_query\n");
 	{ ECPGprepare(__LINE__, NULL, 0, v_include_ws_name, v_query);
-#line 85 "prepareas.pgc"
+#line 86 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 85 "prepareas.pgc"
+#line 86 "prepareas.pgc"
 
 	printf("execute :v_include_ws_name using :ivar1,:ivar2\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_execute, v_include_ws_name, 
@@ -247,26 +251,26 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 87 "prepareas.pgc"
+#line 88 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 87 "prepareas.pgc"
+#line 88 "prepareas.pgc"
 
 	check_result_of_insert();
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 90 "prepareas.pgc"
+#line 91 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 90 "prepareas.pgc"
+#line 91 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE CString_inc_ws_name FROM char_variable +++++\n");
 	printf("prepare \"include_ _name\" from :v_query\n");
 	{ ECPGprepare(__LINE__, NULL, 0, "include_ _name", v_query);
-#line 93 "prepareas.pgc"
+#line 94 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 93 "prepareas.pgc"
+#line 94 "prepareas.pgc"
 
 	printf("exec sql execute \"include_ _name\" using :ivar1,:ivar2\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_execute, "include_ _name", 
@@ -274,26 +278,26 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 95 "prepareas.pgc"
+#line 96 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 95 "prepareas.pgc"
+#line 96 "prepareas.pgc"
 
 	check_result_of_insert();
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 98 "prepareas.pgc"
+#line 99 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 98 "prepareas.pgc"
+#line 99 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE CString_normal_name FROM char_variable +++++\n");
 	printf("prepare \"norma_name\" from :v_query\n");
 	{ ECPGprepare(__LINE__, NULL, 0, "normal_name", v_query);
-#line 101 "prepareas.pgc"
+#line 102 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 101 "prepareas.pgc"
+#line 102 "prepareas.pgc"
 
 	printf("exec sql execute \"normal_name\" using :ivar1,:ivar2\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_execute, "normal_name", 
@@ -301,10 +305,10 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 103 "prepareas.pgc"
+#line 104 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 103 "prepareas.pgc"
+#line 104 "prepareas.pgc"
 
 	check_result_of_insert();
 
@@ -312,39 +316,39 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	 * PREPARE AS
 	 */
 	{ ECPGdeallocate(__LINE__, 0, NULL, "ident_name");
-#line 109 "prepareas.pgc"
+#line 110 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 109 "prepareas.pgc"
+#line 110 "prepareas.pgc"
 
 	{ ECPGdeallocate(__LINE__, 0, NULL, "normal_name");
-#line 110 "prepareas.pgc"
+#line 111 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 110 "prepareas.pgc"
+#line 111 "prepareas.pgc"
 
 	{ ECPGdeallocate(__LINE__, 0, NULL, "include_ _name");
-#line 111 "prepareas.pgc"
+#line 112 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 111 "prepareas.pgc"
+#line 112 "prepareas.pgc"
 
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 113 "prepareas.pgc"
+#line 114 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 113 "prepareas.pgc"
+#line 114 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE ident(typelist) AS +++++\n");
 	printf("prepare ident_name(int,int) as insert into test values($1,$2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_prepare, "prepare $0 ( int , int ) as insert into test values ( $1 , $2 )", 
 	ECPGt_const,"ident_name",(long)10,(long)1,strlen("ident_name"), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 116 "prepareas.pgc"
+#line 117 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 116 "prepareas.pgc"
+#line 117 "prepareas.pgc"
 
 	printf("execute ident_name(:ivar1,:ivar2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
@@ -354,34 +358,34 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 118 "prepareas.pgc"
+#line 119 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 118 "prepareas.pgc"
+#line 119 "prepareas.pgc"
 
 	check_result_of_insert();
 	{ ECPGdeallocate(__LINE__, 0, NULL, "ident_name");
-#line 120 "prepareas.pgc"
+#line 121 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 120 "prepareas.pgc"
+#line 121 "prepareas.pgc"
 
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 122 "prepareas.pgc"
+#line 123 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 122 "prepareas.pgc"
+#line 123 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE CString_normal_name(typelist) AS +++++\n");
 	printf("prepare \"normal_name\"(int,int) as insert into test values($1,$2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_prepare, "prepare $0 ( int , int ) as insert into test values ( $1 , $2 )", 
 	ECPGt_const,"normal_name",(long)11,(long)1,strlen("normal_name"), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 125 "prepareas.pgc"
+#line 126 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 125 "prepareas.pgc"
+#line 126 "prepareas.pgc"
 
 	printf("execute \"normal_name\"(:ivar1,:ivar2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
@@ -391,34 +395,34 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 127 "prepareas.pgc"
+#line 128 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 127 "prepareas.pgc"
+#line 128 "prepareas.pgc"
 
 	check_result_of_insert();
 	{ ECPGdeallocate(__LINE__, 0, NULL, "normal_name");
-#line 129 "prepareas.pgc"
+#line 130 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 129 "prepareas.pgc"
+#line 130 "prepareas.pgc"
 
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 131 "prepareas.pgc"
+#line 132 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 131 "prepareas.pgc"
+#line 132 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE CString_include_ws_name(typelist) AS +++++\n");
 	printf("prepare \"include_ _name\"(int,int) as insert into test values($1,$2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_prepare, "prepare $0 ( int , int ) as insert into test values ( $1 , $2 )", 
 	ECPGt_const,"include_ _name",(long)14,(long)1,strlen("include_ _name"), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 134 "prepareas.pgc"
+#line 135 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 134 "prepareas.pgc"
+#line 135 "prepareas.pgc"
 
 	printf("execute \"include_ _name\"(:ivar1,:ivar2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
@@ -428,34 +432,34 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 136 "prepareas.pgc"
+#line 137 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 136 "prepareas.pgc"
+#line 137 "prepareas.pgc"
 
 	check_result_of_insert();
 	{ ECPGdeallocate(__LINE__, 0, NULL, "include_ _name");
-#line 138 "prepareas.pgc"
+#line 139 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 138 "prepareas.pgc"
+#line 139 "prepareas.pgc"
 
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 140 "prepareas.pgc"
+#line 141 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 140 "prepareas.pgc"
+#line 141 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE char_variable_normal_name(typelist) AS +++++\n");
 	printf("prepare :v_normal_name(int,int) as insert into test values($1,$2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_prepare, "prepare $0 ( int , int ) as insert into test values ( $1 , $2 )", 
 	ECPGt_char,(v_normal_name),(long)16,(long)1,(16)*sizeof(char), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 143 "prepareas.pgc"
+#line 144 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 143 "prepareas.pgc"
+#line 144 "prepareas.pgc"
 
 	printf("execute :v_normal_name(:ivar1,:ivar2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
@@ -465,34 +469,34 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 145 "prepareas.pgc"
+#line 146 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 145 "prepareas.pgc"
+#line 146 "prepareas.pgc"
 
 	check_result_of_insert();
 	{ ECPGdeallocate(__LINE__, 0, NULL, "normal_name");
-#line 147 "prepareas.pgc"
+#line 148 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 147 "prepareas.pgc"
+#line 148 "prepareas.pgc"
 
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 149 "prepareas.pgc"
+#line 150 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 149 "prepareas.pgc"
+#line 150 "prepareas.pgc"
 
 	printf("+++++ Test for PREPARE char_variable_include_ws_name(typelist) AS +++++\n");
 	printf("prepare :v_include_ws_name(int,int) as insert into test values($1,$2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_prepare, "prepare $0 ( int , int ) as insert into test values ( $1 , $2 )", 
 	ECPGt_char,(v_include_ws_name),(long)16,(long)1,(16)*sizeof(char), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 152 "prepareas.pgc"
+#line 153 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 152 "prepareas.pgc"
+#line 153 "prepareas.pgc"
 
 	printf("execute :v_include_ws_name(:ivar1,:ivar2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
@@ -502,94 +506,94 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 154 "prepareas.pgc"
+#line 155 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 154 "prepareas.pgc"
+#line 155 "prepareas.pgc"
 
 	check_result_of_insert();
 	{ ECPGdeallocate(__LINE__, 0, NULL, "include_ _name");
-#line 156 "prepareas.pgc"
+#line 157 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 156 "prepareas.pgc"
+#line 157 "prepareas.pgc"
 
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 158 "prepareas.pgc"
+#line 159 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 158 "prepareas.pgc"
+#line 159 "prepareas.pgc"
 
 	printf("+++++ Test for EXECUTE :v_normal_name(const,const) +++++\n");
 	printf("prepare :v_normal_name from :v_query\n");
 	{ ECPGprepare(__LINE__, NULL, 0, v_normal_name, v_query);
-#line 161 "prepareas.pgc"
+#line 162 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 161 "prepareas.pgc"
+#line 162 "prepareas.pgc"
 
 	printf("execute :v_normal_name(1,2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( 1 , 2 )", 
 	ECPGt_char,(v_normal_name),(long)16,(long)1,(16)*sizeof(char), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 163 "prepareas.pgc"
+#line 164 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 163 "prepareas.pgc"
+#line 164 "prepareas.pgc"
 
 	check_result_of_insert();
 	{ ECPGdeallocate(__LINE__, 0, NULL, "normal_name");
-#line 165 "prepareas.pgc"
+#line 166 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 165 "prepareas.pgc"
+#line 166 "prepareas.pgc"
 
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 167 "prepareas.pgc"
+#line 168 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 167 "prepareas.pgc"
+#line 168 "prepareas.pgc"
 
 	printf("+++++ Test for EXECUTE :v_normal_name(expr,expr) +++++\n");
 	printf("prepare :v_normal_name from :v_query\n");
 	{ ECPGprepare(__LINE__, NULL, 0, v_normal_name, v_query);
-#line 170 "prepareas.pgc"
+#line 171 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 170 "prepareas.pgc"
+#line 171 "prepareas.pgc"
 
 	printf("execute :v_normal_name(0+1,1+1)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( 0 + 1 , 1 + 1 )", 
 	ECPGt_char,(v_normal_name),(long)16,(long)1,(16)*sizeof(char), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 172 "prepareas.pgc"
+#line 173 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 172 "prepareas.pgc"
+#line 173 "prepareas.pgc"
 
 	check_result_of_insert();
 	{ ECPGdeallocate(__LINE__, 0, NULL, "normal_name");
-#line 174 "prepareas.pgc"
+#line 175 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 174 "prepareas.pgc"
+#line 175 "prepareas.pgc"
 
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 176 "prepareas.pgc"
+#line 177 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 176 "prepareas.pgc"
+#line 177 "prepareas.pgc"
 
 	printf("+++++ Test for combination PREPARE FROM and EXECUTE ident(typelist) +++++\n");
 	printf("prepare ident_name from :v_query\n");
 	{ ECPGprepare(__LINE__, NULL, 0, "ident_name", v_query);
-#line 179 "prepareas.pgc"
+#line 180 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 179 "prepareas.pgc"
+#line 180 "prepareas.pgc"
 
 	printf("execute ident_name(:ivar1,:ivar2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
@@ -599,32 +603,32 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 181 "prepareas.pgc"
+#line 182 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 181 "prepareas.pgc"
+#line 182 "prepareas.pgc"
 
 	check_result_of_insert();
 	{ ECPGdeallocate(__LINE__, 0, NULL, "ident_name");
-#line 183 "prepareas.pgc"
+#line 184 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 183 "prepareas.pgc"
+#line 184 "prepareas.pgc"
 
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
-#line 185 "prepareas.pgc"
+#line 186 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 185 "prepareas.pgc"
+#line 186 "prepareas.pgc"
 
 	printf("+++++ Test for combination PREPARE FROM and EXECUTE CString_include_ws_name(typelist) +++++\n");
 	printf("prepare \"include_ _name\" from :v_query\n");
 	{ ECPGprepare(__LINE__, NULL, 0, "include_ _name", v_query);
-#line 188 "prepareas.pgc"
+#line 189 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 188 "prepareas.pgc"
+#line 189 "prepareas.pgc"
 
 	printf("execute \"include_ _name\"(:ivar1,:ivar2)\n");
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
@@ -634,30 +638,78 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 190 "prepareas.pgc"
+#line 191 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 190 "prepareas.pgc"
+#line 191 "prepareas.pgc"
 
 	check_result_of_insert();
 	{ ECPGdeallocate(__LINE__, 0, NULL, "include_ _name");
-#line 192 "prepareas.pgc"
+#line 193 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 192 "prepareas.pgc"
+#line 193 "prepareas.pgc"
+
+
+	/*
+	 * A NULL host-variable value (negative indicator) passed to
+	 * EXECUTE(exprlist) must be inserted as the SQL keyword NULL, not
+	 * dereferenced as a null pointer.
+	 */
+	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "truncate test", ECPGt_EOIT, ECPGt_EORT);
+#line 200 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 200 "prepareas.pgc"
+
+	printf("+++++ Test for a NULL value in EXECUTE(exprlist) +++++\n");
+	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_prepare, "prepare $0 ( int , int ) as insert into test values ( $1 , $2 )", 
+	ECPGt_const,"stmt_null",(long)9,(long)1,strlen("stmt_null"), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
+#line 202 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 202 "prepareas.pgc"
+
+	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
+	ECPGt_const,"stmt_null",(long)9,(long)1,strlen("stmt_null"), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
+	ECPGt_int,&(ivar1),(long)1,(long)1,sizeof(int), 
+	ECPGt_short,&(v_ind),(long)1,(long)1,sizeof(short), 
+	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
+#line 203 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 203 "prepareas.pgc"
+
+	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select count ( * ) from test where c1 is null", ECPGt_EOIT, 
+	ECPGt_int,&(ivar1),(long)1,(long)1,sizeof(int), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
+#line 204 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 204 "prepareas.pgc"
+
+	printf("rows with NULL c1 (must be 1) = %d\n", ivar1);
+	{ ECPGdeallocate(__LINE__, 0, NULL, "stmt_null");
+#line 206 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 206 "prepareas.pgc"
 
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "drop table test", ECPGt_EOIT, ECPGt_EORT);
-#line 194 "prepareas.pgc"
+#line 208 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 194 "prepareas.pgc"
+#line 208 "prepareas.pgc"
 
 	{ ECPGtrans(__LINE__, NULL, "commit work");
-#line 195 "prepareas.pgc"
+#line 209 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 195 "prepareas.pgc"
+#line 209 "prepareas.pgc"
 
 
 	return 0;
