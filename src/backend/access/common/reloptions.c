@@ -27,6 +27,7 @@
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
+#include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "storage/lock.h"
@@ -36,6 +37,7 @@
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/tuplestore.h"
 
 /*
  * Contents of pg_class.reloptions
@@ -2533,4 +2535,120 @@ AlterTableGetRelOptionsLockLevel(List *defList)
 	}
 
 	return lockmode;
+}
+
+/*
+ * pg_available_tablespace_options
+ *		List the tablespace options known to this backend, built-in ones and
+ *		those registered by extensions.
+ */
+Datum
+pg_available_tablespace_options(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (need_initialization)
+		initialize_reloptions();
+
+	for (int i = 0; relOpts[i]; i++)
+	{
+		relopt_gen *gen = relOpts[i];
+		Datum		values[6] = {0};
+		bool		nulls[6] = {0};
+
+		if ((gen->kinds & RELOPT_KIND_TABLESPACE) == 0)
+			continue;
+
+		values[0] = CStringGetTextDatum(gen->name);
+		nulls[2] = nulls[3] = nulls[4] = true;
+
+		switch (gen->type)
+		{
+			case RELOPT_TYPE_BOOL:
+				values[1] = CStringGetTextDatum("bool");
+				values[2] = CStringGetTextDatum(((relopt_bool *) gen)->default_val ?
+												"true" : "false");
+				nulls[2] = false;
+				break;
+			case RELOPT_TYPE_TERNARY:
+				values[1] = CStringGetTextDatum("ternary");
+				break;
+			case RELOPT_TYPE_INT:
+				{
+					relopt_int *opt = (relopt_int *) gen;
+
+					values[1] = CStringGetTextDatum("integer");
+					values[2] = CStringGetTextDatum(psprintf("%d", opt->default_val));
+					values[3] = CStringGetTextDatum(psprintf("%d", opt->min));
+					values[4] = CStringGetTextDatum(psprintf("%d", opt->max));
+					nulls[2] = nulls[3] = nulls[4] = false;
+				}
+				break;
+			case RELOPT_TYPE_REAL:
+				{
+					relopt_real *opt = (relopt_real *) gen;
+
+					values[1] = CStringGetTextDatum("real");
+					values[2] = CStringGetTextDatum(psprintf("%g", opt->default_val));
+					values[3] = CStringGetTextDatum(psprintf("%g", opt->min));
+					values[4] = CStringGetTextDatum(psprintf("%g", opt->max));
+					nulls[2] = nulls[3] = nulls[4] = false;
+				}
+				break;
+			case RELOPT_TYPE_ENUM:
+				{
+					relopt_enum *opt = (relopt_enum *) gen;
+
+					values[1] = CStringGetTextDatum("enum");
+					for (relopt_enum_elt_def *elt = opt->members;
+						 elt->string_val; elt++)
+					{
+						if (elt->symbol_val == opt->default_val)
+						{
+							values[2] = CStringGetTextDatum(elt->string_val);
+							nulls[2] = false;
+							break;
+						}
+					}
+				}
+				break;
+			case RELOPT_TYPE_STRING:
+				{
+					relopt_string *opt = (relopt_string *) gen;
+
+					values[1] = CStringGetTextDatum("string");
+					if (!opt->default_isnull)
+					{
+						values[2] = CStringGetTextDatum(opt->default_val);
+						nulls[2] = false;
+					}
+				}
+				break;
+		}
+
+		if (gen->desc)
+			values[5] = CStringGetTextDatum(gen->desc);
+		else
+			nulls[5] = true;
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	return (Datum) 0;
+}
+
+/*
+ * pg_validate_tablespace_options
+ *		Check a tablespace options array the way CREATE and ALTER TABLESPACE
+ *		would, without touching any tablespace.
+ */
+Datum
+pg_validate_tablespace_options(PG_FUNCTION_ARGS)
+{
+	(void) tablespace_reloptions(PG_GETARG_DATUM(0), true);
+
+	PG_RETURN_VOID();
 }

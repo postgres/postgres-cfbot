@@ -103,6 +103,8 @@ ALTER TABLESPACE <replaceable>name</replaceable> RESET ( <replaceable class="par
       prefix chosen by the extension, as in
       <literal>my_extension.my_option</literal>, and can be written without
       quotes.  See the documentation of the extension for their meaning.
+      <function>pg_available_tablespace_options()</function> lists all
+      parameters the server accepts.
      </para>
      <para>
       While the extension that defined a parameter is not loaded, the

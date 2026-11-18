@@ -707,6 +707,13 @@ check_new_cluster(void)
 
 	check_new_cluster_is_empty();
 
+	/*
+	 * Check tablespace options first.  A library that defines them fails to
+	 * load unless preloaded, which check_loadable_libraries() would report
+	 * less clearly.
+	 */
+	check_tablespace_options();
+
 	check_loadable_libraries();
 
 	switch (user_opts.transfer_mode)

@@ -1412,6 +1412,29 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>pg_available_tablespace_options</primary>
+        </indexterm>
+        <function>pg_available_tablespace_options</function> ()
+        <returnvalue>setof record</returnvalue>
+        ( <parameter>name</parameter> <type>text</type>,
+        <parameter>type</parameter> <type>text</type>,
+        <parameter>default_value</parameter> <type>text</type>,
+        <parameter>min_value</parameter> <type>text</type>,
+        <parameter>max_value</parameter> <type>text</type>,
+        <parameter>description</parameter> <type>text</type> )
+       </para>
+       <para>
+        Returns the options that can be set on a tablespace, including those
+        defined by extensions loaded via
+        <xref linkend="guc-shared-preload-libraries"/>.
+        <parameter>min_value</parameter> and <parameter>max_value</parameter>
+        are null for options that are not numeric.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>pg_basetype</primary>
         </indexterm>
         <function>pg_basetype</function> ( <type>regtype</type> )
@@ -1951,6 +1974,22 @@ SELECT currval(pg_get_serial_sequence('sometable', 'id'));
        <para>
         <literal>pg_typeof(33)</literal>
         <returnvalue>integer</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_validate_tablespace_options</primary>
+        </indexterm>
+        <function>pg_validate_tablespace_options</function> ( <parameter>options_array</parameter> <type>text[]</type> )
+        <returnvalue>void</returnvalue>
+       </para>
+       <para>
+        Checks a value of the form stored in
+        <structname>pg_tablespace</structname>.<structfield>spcoptions</structfield>
+        the way <command>CREATE TABLESPACE</command> would, and raises an
+        error if an option is not recognized or has an invalid value.
        </para></entry>
       </row>
 

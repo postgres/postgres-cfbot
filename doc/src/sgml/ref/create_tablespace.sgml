@@ -125,6 +125,8 @@ CREATE TABLESPACE <replaceable class="parameter">tablespace_name</replaceable>
         prefix chosen by the extension, as in
         <literal>my_extension.my_option</literal>, and can be written without
         quotes.  See the documentation of the extension for their meaning.
+        <function>pg_available_tablespace_options()</function> lists all
+        parameters the server accepts.
        </para>
       </listitem>
      </varlistentry>

@@ -12,13 +12,21 @@
 #include "pg_upgrade.h"
 
 static void get_tablespace_paths(void);
+static void get_tablespace_options(void);
 static void set_tablespace_directory_suffix(ClusterInfo *cluster);
+
+/* user tablespaces of the old cluster that have options set */
+static char **old_spcnames = NULL;
+static char **old_spcoptions = NULL;
+static int	num_old_spcoptions = 0;
+static int	old_spcoptions_encoding;
 
 
 void
 init_tablespaces(void)
 {
 	get_tablespace_paths();
+	get_tablespace_options();
 
 	set_tablespace_directory_suffix(&old_cluster);
 	set_tablespace_directory_suffix(&new_cluster);
@@ -137,6 +145,113 @@ get_tablespace_paths(void)
 	PQfinish(conn);
 }
 
+
+/*
+ * get_tablespace_options()
+ *
+ * Remember the options of the old cluster's user tablespaces, so that
+ * check_tablespace_options() can try them on the new cluster.  Only
+ * tablespaces pg_dumpall dumps are of interest.
+ */
+static void
+get_tablespace_options(void)
+{
+	PGconn	   *conn = connectToServer(&old_cluster, "template1");
+	PGresult   *res;
+
+	res = executeQueryOrDie(conn,
+							"SELECT spcname, spcoptions "
+							"FROM pg_catalog.pg_tablespace "
+							"WHERE spcname !~ '^pg_' AND "
+							"      spcoptions IS NOT NULL");
+
+	old_spcoptions_encoding = PQclientEncoding(conn);
+	num_old_spcoptions = PQntuples(res);
+	if (num_old_spcoptions > 0)
+	{
+		old_spcnames = pg_malloc_array(char *, num_old_spcoptions);
+		old_spcoptions = pg_malloc_array(char *, num_old_spcoptions);
+	}
+
+	for (int i = 0; i < num_old_spcoptions; i++)
+	{
+		old_spcnames[i] = pg_strdup(PQgetvalue(res, i, 0));
+		old_spcoptions[i] = pg_strdup(PQgetvalue(res, i, 1));
+	}
+
+	PQclear(res);
+	PQfinish(conn);
+}
+
+/*
+ * check_tablespace_options()
+ *
+ * Verify that the new cluster accepts the options of the old cluster's
+ * tablespaces.  Options registered by an extension are only known when the
+ * extension is in the new cluster's shared_preload_libraries, otherwise
+ * restoring the tablespaces would fail.
+ */
+void
+check_tablespace_options(void)
+{
+	PGconn	   *conn;
+	FILE	   *script = NULL;
+	char		output_path[MAXPGPATH];
+
+	prep_status("Checking for tablespace options");
+
+	if (num_old_spcoptions == 0)
+	{
+		check_ok();
+		return;
+	}
+
+	snprintf(output_path, sizeof(output_path), "%s/%s",
+			 log_opts.basedir, "tablespace_options.txt");
+
+	conn = connectToServer(&new_cluster, "template1");
+
+	/* send the options in the encoding we fetched them in */
+	if (PQsetClientEncoding(conn,
+							pg_encoding_to_char(old_spcoptions_encoding)) != 0)
+		pg_fatal("could not set client encoding: %s", PQerrorMessage(conn));
+
+	for (int i = 0; i < num_old_spcoptions; i++)
+	{
+		const char *params[1];
+		PGresult   *res;
+
+		params[0] = old_spcoptions[i];
+		res = PQexecParams(conn,
+						   "SELECT pg_catalog.pg_validate_tablespace_options($1::pg_catalog.text[])",
+						   1, NULL, params, NULL, NULL, 0);
+
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		{
+			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
+				pg_fatal("could not open file \"%s\": %m", output_path);
+			fprintf(script, "tablespace \"%s\": %s",
+					old_spcnames[i], PQerrorMessage(conn));
+		}
+
+		PQclear(res);
+	}
+
+	PQfinish(conn);
+
+	if (script)
+	{
+		fclose(script);
+		pg_log(PG_REPORT, "fatal");
+		pg_fatal("Your installation contains tablespaces with options the new cluster does\n"
+				 "not accept.  Options defined by an extension require that extension in\n"
+				 "\"shared_preload_libraries\" of the new cluster.  A list of problem\n"
+				 "tablespaces is in the file:\n"
+				 "    %s", output_path);
+	}
+	else
+		check_ok();
+}
 
 static void
 set_tablespace_directory_suffix(ClusterInfo *cluster)

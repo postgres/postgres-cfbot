@@ -479,6 +479,13 @@ make prefix=/usr/local/pgsql.new install
      <application>pg_upgrade</application> will report this and create
      a script that can be run later to update them.
     </para>
+
+    <para>
+     If tablespaces of the old cluster use options defined by an extension,
+     add that extension to <xref linkend="guc-shared-preload-libraries"/>
+     of the new cluster, or <application>pg_upgrade</application> will
+     refuse to upgrade.
+    </para>
    </step>
 
    <step>

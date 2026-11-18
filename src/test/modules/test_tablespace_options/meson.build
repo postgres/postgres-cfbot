@@ -23,6 +23,7 @@ tests += {
   'tap': {
     'tests': [
       't/001_tablespace_options.pl',
+      't/002_pg_upgrade.pl',
     ],
   },
 }

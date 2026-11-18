@@ -49,6 +49,27 @@ is( spcoptions('regress_ts1'),
 	'{test_tablespace_options.mode=safe,random_page_cost=2,test_tablespace_options.level=4}',
 	'ALTER TABLESPACE RESET with an unquoted name');
 
+# The options are listed and can be validated without a tablespace
+is( $node->safe_psql('postgres',
+		"SELECT name, type, default_value, min_value, max_value FROM pg_available_tablespace_options() WHERE name LIKE 'test_tablespace_options.%' ORDER BY name"
+	),
+	'test_tablespace_options.flag|bool|false||
+test_tablespace_options.label|string|||
+test_tablespace_options.level|integer|1|0|10
+test_tablespace_options.mode|enum|fast||',
+	'pg_available_tablespace_options lists extension options');
+
+$node->safe_psql('postgres',
+	"SELECT pg_validate_tablespace_options('{test_tablespace_options.level=5,test_tablespace_options.mode=fast}')"
+);
+($ret, $stdout, $stderr) = $node->psql('postgres',
+	"SELECT pg_validate_tablespace_options('{test_tablespace_options.level=50}')"
+);
+like(
+	$stderr,
+	qr/value 50 out of bounds for option "test_tablespace_options.level"/,
+	'pg_validate_tablespace_options rejects invalid value');
+
 # Values are validated
 ($ret, $stdout, $stderr) = $node->psql('postgres',
 	"ALTER TABLESPACE regress_ts1 SET (test_tablespace_options.level = 11)");
@@ -121,6 +142,20 @@ $node->restart;
 
 is($node->safe_psql('postgres', 'SELECT count(*) FROM regress_tab'),
 	'0', 'table in tablespace with unknown options is usable');
+
+is( $node->safe_psql('postgres',
+		"SELECT count(*) FROM pg_available_tablespace_options() WHERE name LIKE 'test_tablespace_options.%'"
+	),
+	'0',
+	'extension options are not listed without the extension');
+
+($ret, $stdout, $stderr) = $node->psql('postgres',
+	"SELECT pg_validate_tablespace_options('{test_tablespace_options.level=5}')"
+);
+like(
+	$stderr,
+	qr/unrecognized parameter "test_tablespace_options.level"/,
+	'pg_validate_tablespace_options rejects unknown option');
 
 ($ret, $stdout, $stderr) = $node->psql('postgres',
 	"ALTER TABLESPACE regress_ts1 SET (seq_page_cost = 2)");
