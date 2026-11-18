@@ -927,7 +927,7 @@ EXPLAIN ANALYZE SELECT four, unique1 FROM tenk1 WHERE four BETWEEN 1 AND 3 AND u
 -------------------------------------------------------------------&zwsp;---------------------------------------------------------------
  Index Only Scan using tenk1_four_unique1_idx on tenk1  (cost=0.29..6.90 rows=1 width=8) (actual time=0.006..0.007 rows=1.00 loops=1)
    Index Cond: ((four &gt;= 1) AND (four &lt;= 3) AND (unique1 = 42))
-   Heap Fetches: 0
+   Table Block Fetches: 0
    Index Searches: 3
    Buffers: shared hit=7
  Planning Time: 0.029 ms
