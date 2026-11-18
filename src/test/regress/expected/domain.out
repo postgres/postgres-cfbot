@@ -168,9 +168,9 @@ select * from pg_input_error_info('junk', 'positiveint');
 (1 row)
 
 select * from pg_input_error_info('-1', 'positiveint');
-                                  message                                   | detail | hint | sql_error_code 
-----------------------------------------------------------------------------+--------+------+----------------
- value for domain positiveint violates check constraint "positiveint_check" |        |      | 23514
+                                  message                                   |                  detail                   | hint | sql_error_code 
+----------------------------------------------------------------------------+-------------------------------------------+------+----------------
+ value for domain positiveint violates check constraint "positiveint_check" | Check constraint expression: (VALUE > 0). |      | 23514
 (1 row)
 
 select * from pg_input_error_info('junk', 'weirdfloat');
@@ -180,9 +180,9 @@ select * from pg_input_error_info('junk', 'weirdfloat');
 (1 row)
 
 select * from pg_input_error_info('0.01', 'weirdfloat');
-                                 message                                  | detail | hint | sql_error_code 
---------------------------------------------------------------------------+--------+------+----------------
- value for domain weirdfloat violates check constraint "weirdfloat_check" |        |      | 23514
+                                 message                                  |                                          detail                                          | hint | sql_error_code 
+--------------------------------------------------------------------------+------------------------------------------------------------------------------------------+------+----------------
+ value for domain weirdfloat violates check constraint "weirdfloat_check" | Check constraint expression: (((1)::double precision / VALUE) < (10)::double precision). |      | 23514
 (1 row)
 
 -- We currently can't trap errors raised in the CHECK expression itself
@@ -335,15 +335,19 @@ alter domain dcomptype add constraint c2 check ((value).r > (value).i);  -- fail
 ERROR:  column "d1" of table "dcomptable" contains values that violate the new constraint
 select row(2,1)::dcomptype;  -- fail
 ERROR:  value for domain dcomptype violates check constraint "c1"
+DETAIL:  Check constraint expression: ((VALUE).r <= (VALUE).i).
 insert into dcomptable values (row(1,2)::comptype);
 insert into dcomptable values (row(2,1)::comptype);  -- fail
 ERROR:  value for domain dcomptype violates check constraint "c1"
+DETAIL:  Check constraint expression: ((VALUE).r <= (VALUE).i).
 insert into dcomptable (d1.r) values(99);
 insert into dcomptable (d1.r, d1.i) values(99, 100);
 insert into dcomptable (d1.r, d1.i) values(100, 99);  -- fail
 ERROR:  value for domain dcomptype violates check constraint "c1"
+DETAIL:  Check constraint expression: ((VALUE).r <= (VALUE).i).
 update dcomptable set d1.r = (d1).r + 1 where (d1).i > 0;  -- fail
 ERROR:  value for domain dcomptype violates check constraint "c1"
+DETAIL:  Check constraint expression: ((VALUE).r <= (VALUE).i).
 update dcomptable set d1.r = (d1).r - 1, d1.i = (d1).i + 1 where (d1).i > 0;
 select * from dcomptable;
     d1    
@@ -390,6 +394,7 @@ select makedcomp(1,2);
 
 select makedcomp(2,1);  -- fail
 ERROR:  value for domain dcomptype violates check constraint "c1"
+DETAIL:  Check constraint expression: ((VALUE).r <= (VALUE).i).
 select * from makedcomp(1,2) m;
  r | i 
 ---+---
@@ -413,6 +418,7 @@ alter domain dcomptype add constraint c1 check ((value).r > 0);
 comment on constraint c1 on domain dcomptype is 'random commentary';
 select row(0,1)::dcomptype;  -- fail
 ERROR:  value for domain dcomptype violates check constraint "c1"
+DETAIL:  Check constraint expression: ((VALUE).r > (0)::double precision).
 alter type comptype alter attribute r type varchar;  -- fail
 ERROR:  operator does not exist: character varying > double precision
 DETAIL:  No operator of that name accepts the given argument types.
@@ -491,15 +497,19 @@ alter domain dcomptypea add constraint c2 check (value[1].r > value[1].i);  -- f
 ERROR:  column "d1" of table "dcomptable" contains values that violate the new constraint
 select array[row(2,1)]::dcomptypea;  -- fail
 ERROR:  value for domain dcomptypea violates check constraint "c1"
+DETAIL:  Check constraint expression: ((VALUE)[1].r <= (VALUE)[1].i).
 insert into dcomptable values (array[row(1,2)]::comptype[]);
 insert into dcomptable values (array[row(2,1)]::comptype[]);  -- fail
 ERROR:  value for domain dcomptypea violates check constraint "c1"
+DETAIL:  Check constraint expression: ((VALUE)[1].r <= (VALUE)[1].i).
 insert into dcomptable (d1[1].r) values(99);
 insert into dcomptable (d1[1].r, d1[1].i) values(99, 100);
 insert into dcomptable (d1[1].r, d1[1].i) values(100, 99);  -- fail
 ERROR:  value for domain dcomptypea violates check constraint "c1"
+DETAIL:  Check constraint expression: ((VALUE)[1].r <= (VALUE)[1].i).
 update dcomptable set d1[1].r = d1[1].r + 1 where d1[1].i > 0;  -- fail
 ERROR:  value for domain dcomptypea violates check constraint "c1"
+DETAIL:  Check constraint expression: ((VALUE)[1].r <= (VALUE)[1].i).
 update dcomptable set d1[1].r = d1[1].r - 1, d1[1].i = d1[1].i + 1
   where d1[1].i > 0;
 select * from dcomptable;
@@ -550,13 +560,16 @@ create table pitable (f1 posint[]);
 insert into pitable values(array[42]);
 insert into pitable values(array[-1]);  -- fail
 ERROR:  value for domain posint violates check constraint "posint_check"
+DETAIL:  Check constraint expression: (VALUE > 0).
 insert into pitable values('{0}');  -- fail
 ERROR:  value for domain posint violates check constraint "posint_check"
 LINE 1: insert into pitable values('{0}');
                                    ^
+DETAIL:  Check constraint expression: (VALUE > 0).
 update pitable set f1[1] = f1[1] + 1;
 update pitable set f1[1] = 0;  -- fail
 ERROR:  value for domain posint violates check constraint "posint_check"
+DETAIL:  Check constraint expression: (VALUE > 0).
 select * from pitable;
   f1  
 ------
@@ -653,6 +666,7 @@ table dcomptable;
 
 update dcomptable set f1[1].cf1 = -1;  -- fail
 ERROR:  value for domain dcomptype violates check constraint "dcomptype_check"
+DETAIL:  Check constraint expression: ((VALUE).cf1 > 0).
 update dcomptable set f1[1].cf1 = 1;
 table dcomptable;
     f1     
@@ -690,7 +704,7 @@ insert into nulltest values ('a', 'b', 'c', 'd', NULL);
 ERROR:  domain dcheck does not allow null values
 insert into nulltest values ('a', 'b', 'c', 'd', 'a');
 ERROR:  new row for relation "nulltest" violates check constraint "nulltest_col5_check"
-DETAIL:  Failing row contains (a, b, c, d, a).
+DETAIL:  Failing row contains (a, b, c, d, a). Check constraint expression: ((col5)::text = ANY ((ARRAY['c'::character varying, 'd'::character varying])::text[])).
 INSERT INTO nulltest values (NULL, 'b', 'c', 'd', 'd');
 ERROR:  domain dnotnull does not allow null values
 INSERT INTO nulltest values ('a', NULL, 'c', 'd', 'c');
@@ -710,7 +724,7 @@ CONTEXT:  COPY nulltest, line 1, column col5: null input
 -- Last row is bad
 COPY nulltest FROM stdin;
 ERROR:  new row for relation "nulltest" violates check constraint "nulltest_col5_check"
-DETAIL:  Failing row contains (a, b, c, null, a).
+DETAIL:  Failing row contains (a, b, c, null, a). Check constraint expression: ((col5)::text = ANY ((ARRAY['c'::character varying, 'd'::character varying])::text[])).
 CONTEXT:  COPY nulltest, line 3: "a	b	c	\N	a"
 select * from nulltest;
  col1 | col2 | col3 | col4 | col5 
@@ -862,12 +876,15 @@ alter domain con add check (VALUE > 0);
 
 insert into domcontest values (-5); -- fails
 ERROR:  value for domain con violates check constraint "con_check"
+DETAIL:  Check constraint expression: (VALUE > 0).
 insert into domcontest values (42); -- fails
 ERROR:  value for domain con violates check constraint "t"
+DETAIL:  Check constraint expression: (VALUE < 34).
 insert into domcontest values (5);
 alter domain con drop constraint t;
 insert into domcontest values (-5); --fails
 ERROR:  value for domain con violates check constraint "con_check"
+DETAIL:  Check constraint expression: (VALUE > 0).
 insert into domcontest values (42);
 alter domain con drop constraint nonexistent;
 ERROR:  constraint "nonexistent" of domain "con" does not exist
@@ -954,6 +971,7 @@ select * from domview;
 alter domain dom add constraint domchkgt6 check(value > 6);
 select * from domview; --fail
 ERROR:  value for domain dom violates check constraint "domchkgt6"
+DETAIL:  Check constraint expression: (VALUE > 6).
 alter domain dom drop constraint domchkgt6 restrict;
 select * from domview;
  col1 
@@ -987,12 +1005,16 @@ select 'x1234'::dtop; -- explicit coercion should truncate
 
 select 'y1234'::dtop; -- fail
 ERROR:  value for domain dtop violates check constraint "dinter_check"
+DETAIL:  Check constraint expression: ("substring"((VALUE)::text, 1, 1) = 'x'::text).
 select 'y123'::dtop; -- fail
 ERROR:  value for domain dtop violates check constraint "dinter_check"
+DETAIL:  Check constraint expression: ("substring"((VALUE)::text, 1, 1) = 'x'::text).
 select 'yz23'::dtop; -- fail
 ERROR:  value for domain dtop violates check constraint "dinter_check"
+DETAIL:  Check constraint expression: ("substring"((VALUE)::text, 1, 1) = 'x'::text).
 select 'xz23'::dtop; -- fail
 ERROR:  value for domain dtop violates check constraint "dtop_check"
+DETAIL:  Check constraint expression: ("substring"((VALUE)::text, 2, 1) = '1'::text).
 create temp table dtest(f1 dtop);
 insert into dtest values('x123');
 insert into dtest values('x1234'); -- fail, implicit coercion
@@ -1001,10 +1023,13 @@ insert into dtest values('y1234'); -- fail, implicit coercion
 ERROR:  value too long for type character varying(4)
 insert into dtest values('y123'); -- fail
 ERROR:  value for domain dtop violates check constraint "dinter_check"
+DETAIL:  Check constraint expression: ("substring"((VALUE)::text, 1, 1) = 'x'::text).
 insert into dtest values('yz23'); -- fail
 ERROR:  value for domain dtop violates check constraint "dinter_check"
+DETAIL:  Check constraint expression: ("substring"((VALUE)::text, 1, 1) = 'x'::text).
 insert into dtest values('xz23'); -- fail
 ERROR:  value for domain dtop violates check constraint "dtop_check"
+DETAIL:  Check constraint expression: ("substring"((VALUE)::text, 2, 1) = '1'::text).
 drop table dtest;
 drop domain vchar4 cascade;
 NOTICE:  drop cascades to 2 other objects
@@ -1029,6 +1054,7 @@ create domain str_domain2 as text check (value <> 'foo') default 'foo';
 -- should fail
 alter table domain_test add column d str_domain2;
 ERROR:  value for domain str_domain2 violates check constraint "str_domain2_check"
+DETAIL:  Check constraint expression: (VALUE <> 'foo'::text).
 -- Check that domain constraints on prepared statement parameters of
 -- unknown type are enforced correctly.
 create domain pos_int as int4 check (value > 0) not null;
@@ -1041,6 +1067,7 @@ execute s1(10);
 
 execute s1(0); -- should fail
 ERROR:  value for domain pos_int violates check constraint "pos_int_check"
+DETAIL:  Check constraint expression: (VALUE > 0).
 execute s1(NULL); -- should fail
 ERROR:  domain pos_int does not allow null values
 -- Check that domain constraints on plpgsql function parameters, results,
@@ -1060,6 +1087,7 @@ begin
 end$$ language plpgsql;
 select doubledecrement(3); -- fail at initialization assignment
 ERROR:  value for domain pos_int violates check constraint "pos_int_check"
+DETAIL:  Check constraint expression: (VALUE > 0).
 CONTEXT:  PL/pgSQL function doubledecrement(pos_int) line 2 during statement block local variable initialization
 create or replace function doubledecrement(p1 pos_int) returns pos_int as $$
 declare v pos_int := 1;
@@ -1071,11 +1099,14 @@ select doubledecrement(null); -- fail before call
 ERROR:  domain pos_int does not allow null values
 select doubledecrement(0); -- fail before call
 ERROR:  value for domain pos_int violates check constraint "pos_int_check"
+DETAIL:  Check constraint expression: (VALUE > 0).
 select doubledecrement(1); -- fail at assignment to v
 ERROR:  value for domain pos_int violates check constraint "pos_int_check"
+DETAIL:  Check constraint expression: (VALUE > 0).
 CONTEXT:  PL/pgSQL function doubledecrement(pos_int) line 4 at assignment
 select doubledecrement(2); -- fail at return
 ERROR:  value for domain pos_int violates check constraint "pos_int_check"
+DETAIL:  Check constraint expression: (VALUE > 0).
 CONTEXT:  PL/pgSQL function doubledecrement(pos_int) while casting return value to function's return type
 select doubledecrement(3); -- good
  doubledecrement 
@@ -1127,8 +1158,10 @@ create domain posint2 as posint check (value % 2 = 0);
 create table ddtest2(f1 posint2);
 insert into ddtest2 values(11); -- fail
 ERROR:  value for domain posint2 violates check constraint "posint2_check"
+DETAIL:  Check constraint expression: (((VALUE)::integer % 2) = 0).
 insert into ddtest2 values(-2); -- fail
 ERROR:  value for domain posint2 violates check constraint "c1"
+DETAIL:  Check constraint expression: (VALUE >= 0).
 insert into ddtest2 values(2);
 alter domain posint add constraint c2 check(value >= 10); -- fail
 ERROR:  column "f1" of table "ddtest2" contains values that violate the new constraint
@@ -1206,13 +1239,16 @@ select array[1,2]::orderedpair;
 
 select array[2,1]::orderedpair;  -- fail
 ERROR:  value for domain orderedpair violates check constraint "orderedpair_check"
+DETAIL:  Check constraint expression: ((VALUE)[1] < (VALUE)[2]).
 create temp table op (f1 orderedpair);
 insert into op values (array[1,2]);
 insert into op values (array[2,1]);  -- fail
 ERROR:  value for domain orderedpair violates check constraint "orderedpair_check"
+DETAIL:  Check constraint expression: ((VALUE)[1] < (VALUE)[2]).
 update op set f1[2] = 3;
 update op set f1[2] = 0;  -- fail
 ERROR:  value for domain orderedpair violates check constraint "orderedpair_check"
+DETAIL:  Check constraint expression: ((VALUE)[1] < (VALUE)[2]).
 select * from op;
   f1   
 -------
@@ -1234,6 +1270,7 @@ select array_elem_check(3);
 
 select array_elem_check(-1);
 ERROR:  value for domain orderedpair violates check constraint "orderedpair_check"
+DETAIL:  Check constraint expression: ((VALUE)[1] < (VALUE)[2]).
 CONTEXT:  PL/pgSQL function array_elem_check(integer) line 5 at assignment
 drop function array_elem_check(int);
 --
@@ -1256,6 +1293,7 @@ select dom_check(0);
 alter domain di add constraint pos check (value > 0);
 select dom_check(0); -- fail
 ERROR:  value for domain di violates check constraint "pos"
+DETAIL:  Check constraint expression: (VALUE > 0).
 CONTEXT:  PL/pgSQL function dom_check(integer) line 4 at assignment
 alter domain di drop constraint pos;
 select dom_check(0);
@@ -1281,6 +1319,7 @@ select dom_check(0);
 alter domain di add constraint pos check (value > 0);
 select dom_check(0); -- fail
 ERROR:  value for domain di violates check constraint "pos"
+DETAIL:  Check constraint expression: (VALUE > 0).
 CONTEXT:  PL/pgSQL function dom_check(integer) line 4 at assignment
 alter domain di drop constraint pos;
 select dom_check(0);
@@ -1308,11 +1347,13 @@ select 1::inotnull;
 
 select null::inotnull;
 ERROR:  value for domain inotnull violates check constraint "inotnull_check"
+DETAIL:  Check constraint expression: sql_is_distinct_from(VALUE, NULL::integer).
 create table dom_table (x inotnull);
 insert into dom_table values ('1');
 insert into dom_table values (1);
 insert into dom_table values (null);
 ERROR:  value for domain inotnull violates check constraint "inotnull_check"
+DETAIL:  Check constraint expression: sql_is_distinct_from(VALUE, NULL::integer).
 drop table dom_table;
 drop domain inotnull;
 drop function sql_is_distinct_from(anyelement, anyelement);

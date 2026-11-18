@@ -1070,6 +1070,7 @@ typedef struct DomainConstraintState
 	NodeTag		type;
 	DomainConstraintType constrainttype;	/* constraint type */
 	char	   *name;			/* name of constraint (for error msgs) */
+	char	   *check_expr_bin; /* serialized original CHECK expression */
 	Expr	   *check_expr;		/* for CHECK, a boolean expression */
 	ExprState  *check_exprstate;	/* check_expr's eval state, or NULL */
 } DomainConstraintState;

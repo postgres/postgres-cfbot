@@ -7543,11 +7543,11 @@ INSERT INTO ft1(c1, c2) VALUES(11, 12) ON CONFLICT (c1, c2) DO UPDATE SET c3 = '
 ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
 INSERT INTO ft1(c1, c2) VALUES(1111, -2);  -- c2positive
 ERROR:  new row for relation "T 1" violates check constraint "c2positive"
-DETAIL:  Failing row contains (1111, -2, null, null, null, null, ft1       , null).
+DETAIL:  Failing row contains (1111, -2, null, null, null, null, ft1       , null). Check constraint expression: (c2 >= 0).
 CONTEXT:  remote SQL command: INSERT INTO "S 1"."T 1"("C 1", c2, c3, c4, c5, c6, c7, c8) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 UPDATE ft1 SET c2 = -c2 WHERE c1 = 1;  -- c2positive
 ERROR:  new row for relation "T 1" violates check constraint "c2positive"
-DETAIL:  Failing row contains (1, -1, 00001_trig_update, 1970-01-02 08:00:00+00, 1970-01-02 00:00:00, 1, 1         , foo).
+DETAIL:  Failing row contains (1, -1, 00001_trig_update, 1970-01-02 08:00:00+00, 1970-01-02 00:00:00, 1, 1         , foo). Check constraint expression: (c2 >= 0).
 CONTEXT:  remote SQL command: UPDATE "S 1"."T 1" SET c2 = (- c2) WHERE (("C 1" = 1))
 -- Test savepoint/rollback behavior
 select c2, count(*) from ft2 where c2 < 500 group by 1 order by 1;
@@ -7706,7 +7706,7 @@ select c2, count(*) from ft2 where c2 < 500 group by 1 order by 1;
 savepoint s3;
 update ft2 set c2 = -2 where c2 = 42 and c1 = 10; -- fail on remote side
 ERROR:  new row for relation "T 1" violates check constraint "c2positive"
-DETAIL:  Failing row contains (10, -2, 00010_trig_update_trig_update, 1970-01-11 08:00:00+00, 1970-01-11 00:00:00, 0, 0         , foo).
+DETAIL:  Failing row contains (10, -2, 00010_trig_update_trig_update, 1970-01-11 08:00:00+00, 1970-01-11 00:00:00, 0, 0         , foo). Check constraint expression: (c2 >= 0).
 CONTEXT:  remote SQL command: UPDATE "S 1"."T 1" SET c2 = (-2) WHERE ((c2 = 42)) AND (("C 1" = 10))
 rollback to savepoint s3;
 select c2, count(*) from ft2 where c2 < 500 group by 1 order by 1;
@@ -8027,11 +8027,11 @@ RESET constraint_exclusion;
 -- check constraint is enforced on the remote side, not locally
 INSERT INTO ft1(c1, c2) VALUES(1111, -2);  -- c2positive
 ERROR:  new row for relation "T 1" violates check constraint "c2positive"
-DETAIL:  Failing row contains (1111, -2, null, null, null, null, ft1       , null).
+DETAIL:  Failing row contains (1111, -2, null, null, null, null, ft1       , null). Check constraint expression: (c2 >= 0).
 CONTEXT:  remote SQL command: INSERT INTO "S 1"."T 1"("C 1", c2, c3, c4, c5, c6, c7, c8) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 UPDATE ft1 SET c2 = -c2 WHERE c1 = 1;  -- c2positive
 ERROR:  new row for relation "T 1" violates check constraint "c2positive"
-DETAIL:  Failing row contains (1, -1, 00001_trig_update, 1970-01-02 08:00:00+00, 1970-01-02 00:00:00, 1, 1         , foo).
+DETAIL:  Failing row contains (1, -1, 00001_trig_update, 1970-01-02 08:00:00+00, 1970-01-02 00:00:00, 1, 1         , foo). Check constraint expression: (c2 >= 0).
 CONTEXT:  remote SQL command: UPDATE "S 1"."T 1" SET c2 = (- c2) WHERE (("C 1" = 1))
 ALTER FOREIGN TABLE ft1 DROP CONSTRAINT ft1_c2positive;
 -- But inconsistent check constraints provide inconsistent results
@@ -10100,7 +10100,7 @@ select tableoid::regclass, * FROM locp;
 -- It's not allowed to move a row from a partition that is foreign to another
 update utrtest set a = 2 where b = 'foo' returning *;
 ERROR:  new row for relation "loct" violates check constraint "loct_a_check"
-DETAIL:  Failing row contains (2, foo).
+DETAIL:  Failing row contains (2, foo). Check constraint expression: (a = 1).
 CONTEXT:  remote SQL command: UPDATE public.loct SET a = 2 WHERE ((b = 'foo')) RETURNING a, b
 -- But the reverse is allowed
 update utrtest set a = 1 where b = 'qux' returning *;
@@ -10383,7 +10383,7 @@ alter foreign table rem2 add constraint rem2_f1positive check (f1 >= 0);
 copy rem2 from stdin;
 copy rem2 from stdin; -- ERROR
 ERROR:  new row for relation "loc2" violates check constraint "loc2_f1positive"
-DETAIL:  Failing row contains (-1, xyzzy).
+DETAIL:  Failing row contains (-1, xyzzy). Check constraint expression: (f1 >= 0).
 CONTEXT:  remote SQL command: INSERT INTO public.loc2(f1, f2) VALUES ($1, $2)
 COPY rem2, line 1: "-1	xyzzy"
 select * from rem2;
@@ -10540,7 +10540,7 @@ alter foreign table rem2 add constraint rem2_f1positive check (f1 >= 0);
 copy rem2 from stdin;
 copy rem2 from stdin; -- ERROR
 ERROR:  new row for relation "loc2" violates check constraint "loc2_f1positive"
-DETAIL:  Failing row contains (-1, xyzzy).
+DETAIL:  Failing row contains (-1, xyzzy). Check constraint expression: (f1 >= 0).
 CONTEXT:  remote SQL command: INSERT INTO public.loc2(f1, f2) VALUES ($1, $2)
 COPY rem2
 select * from rem2;

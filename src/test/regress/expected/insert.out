@@ -205,10 +205,13 @@ LINE 1: insert into inserttesta (f2[1], f2[2]) values (1,default);
                                         ^
 insert into inserttesta (f2[1], f2[2]) values (0,2);
 ERROR:  value for domain insert_pos_ints violates check constraint "insert_pos_ints_check"
+DETAIL:  Check constraint expression: ((VALUE)[1] > 0).
 insert into inserttesta (f2[1], f2[2]) values (3,4), (0,6);
 ERROR:  value for domain insert_pos_ints violates check constraint "insert_pos_ints_check"
+DETAIL:  Check constraint expression: ((VALUE)[1] > 0).
 insert into inserttesta (f2[1], f2[2]) select 0,8;
 ERROR:  value for domain insert_pos_ints violates check constraint "insert_pos_ints_check"
+DETAIL:  Check constraint expression: ((VALUE)[1] > 0).
 insert into inserttestb (f3.if1, f3.if2) values (1,array['foo']);
 insert into inserttestb (f3.if1, f3.if2) values (1,'{foo}'), (2,'{bar}');
 insert into inserttestb (f3.if1, f3.if2) select 3, '{baz,quux}';
@@ -218,10 +221,13 @@ LINE 1: insert into inserttestb (f3.if1, f3.if2) values (1,default);
                                          ^
 insert into inserttestb (f3.if1, f3.if2) values (1,array[null]);
 ERROR:  value for domain insert_test_domain violates check constraint "insert_test_domain_check"
+DETAIL:  Check constraint expression: ((VALUE).if2[1] IS NOT NULL).
 insert into inserttestb (f3.if1, f3.if2) values (1,'{null}'), (2,'{bar}');
 ERROR:  value for domain insert_test_domain violates check constraint "insert_test_domain_check"
+DETAIL:  Check constraint expression: ((VALUE).if2[1] IS NOT NULL).
 insert into inserttestb (f3.if1, f3.if2) select 3, '{null,quux}';
 ERROR:  value for domain insert_test_domain violates check constraint "insert_test_domain_check"
+DETAIL:  Check constraint expression: ((VALUE).if2[1] IS NOT NULL).
 insert into inserttestb (f3.if2[1], f3.if2[2]) values ('foo', 'bar');
 insert into inserttestb (f3.if2[1], f3.if2[2]) values ('foo', 'bar'), ('baz', 'quux');
 insert into inserttestb (f3.if2[1], f3.if2[2]) select 'bear', 'beer';
@@ -295,10 +301,12 @@ create domain insert_test_domain as insert_test_type
 create table inserttesta (f1 insert_nnarray);
 insert into inserttesta (f1[1]) values (1);  -- fail
 ERROR:  value for domain insert_nnarray violates check constraint "insert_nnarray_check"
+DETAIL:  Check constraint expression: (((VALUE)[1] IS NOT NULL) AND ((VALUE)[2] IS NOT NULL)).
 insert into inserttesta (f1[1], f1[2]) values (1, 2);
 create table inserttestb (f1 insert_test_domain);
 insert into inserttestb (f1.if1) values (1);  -- fail
 ERROR:  value for domain insert_test_domain violates check constraint "insert_test_domain_check"
+DETAIL:  Check constraint expression: (((VALUE).if1 IS NOT NULL) AND ((VALUE).if2 IS NOT NULL)).
 insert into inserttestb (f1.if1, f1.if2) values (1, '{foo}');
 drop table inserttesta;
 drop table inserttestb;
@@ -670,7 +678,7 @@ create trigger mlparted11_trig before insert ON mlparted11
 -- to the BR trigger mlparted11_trig_fn)
 insert into mlparted values (1, 2);
 ERROR:  new row for relation "mlparted11" violates check constraint "check_b"
-DETAIL:  Failing row contains (1, 4).
+DETAIL:  Failing row contains (1, 4). Check constraint expression: (b = 3).
 drop trigger mlparted11_trig on mlparted11;
 drop function mlparted11_trig_fn();
 -- check that inserting into an internal partition successfully results in
@@ -716,7 +724,7 @@ alter table mlparted attach partition mlparted5 for values from (1, 40) to (1, 5
 alter table mlparted add constraint check_b check (a = 1 and b < 45);
 insert into mlparted values (1, 45, 'a');
 ERROR:  new row for relation "mlparted5a" violates check constraint "check_b"
-DETAIL:  Failing row contains (1, 45, a).
+DETAIL:  Failing row contains (1, 45, a). Check constraint expression: ((a = 1) AND (b < 45)).
 create function mlparted5abrtrig_func() returns trigger as $$ begin new.c = 'b'; return new; end; $$ language plpgsql;
 create trigger mlparted5abrtrig before insert on mlparted5a for each row execute procedure mlparted5abrtrig_func();
 insert into mlparted5 (a, b, c) values (1, 40, 'a');

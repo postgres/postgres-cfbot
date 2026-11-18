@@ -438,8 +438,10 @@ SELECT 'red'::rgb;
 
 SELECT 'purple'::rgb;
 ERROR:  value for domain rgb violates check constraint "rgb_check"
+DETAIL:  Check constraint expression: (VALUE = ANY (ARRAY['red'::rainbow, 'green'::rainbow, 'blue'::rainbow])).
 SELECT 'purple'::rainbow::rgb;
 ERROR:  value for domain rgb violates check constraint "rgb_check"
+DETAIL:  Check constraint expression: (VALUE = ANY (ARRAY['red'::rainbow, 'green'::rainbow, 'blue'::rainbow])).
 DROP DOMAIN rgb;
 --
 -- Arrays

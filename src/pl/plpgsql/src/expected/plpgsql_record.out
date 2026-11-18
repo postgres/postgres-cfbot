@@ -1095,6 +1095,7 @@ select read_ordered_int8s(row(1, 2));
 
 select read_ordered_int8s(row(2, 1));  -- fail
 ERROR:  value for domain ordered_int8s violates check constraint "ordered_int8s_check"
+DETAIL:  Check constraint expression: ((VALUE).q1 <= (VALUE).q2).
 create function build_ordered_int8s(i int8, j int8) returns ordered_int8s as $$
 begin return row(i,j); end
 $$ language plpgsql;
@@ -1106,6 +1107,7 @@ select build_ordered_int8s(1,2);
 
 select build_ordered_int8s(2,1);  -- fail
 ERROR:  value for domain ordered_int8s violates check constraint "ordered_int8s_check"
+DETAIL:  Check constraint expression: ((VALUE).q1 <= (VALUE).q2).
 CONTEXT:  PL/pgSQL function build_ordered_int8s(bigint,bigint) while casting return value to function's return type
 create function build_ordered_int8s_2(i int8, j int8) returns ordered_int8s as $$
 declare r record; begin r := row(i,j); return r; end
@@ -1118,6 +1120,7 @@ select build_ordered_int8s_2(1,2);
 
 select build_ordered_int8s_2(2,1);  -- fail
 ERROR:  value for domain ordered_int8s violates check constraint "ordered_int8s_check"
+DETAIL:  Check constraint expression: ((VALUE).q1 <= (VALUE).q2).
 CONTEXT:  PL/pgSQL function build_ordered_int8s_2(bigint,bigint) while casting return value to function's return type
 create function build_ordered_int8s_3(i int8, j int8) returns ordered_int8s as $$
 declare r two_int8s; begin r := row(i,j); return r; end
@@ -1130,6 +1133,7 @@ select build_ordered_int8s_3(1,2);
 
 select build_ordered_int8s_3(2,1);  -- fail
 ERROR:  value for domain ordered_int8s violates check constraint "ordered_int8s_check"
+DETAIL:  Check constraint expression: ((VALUE).q1 <= (VALUE).q2).
 CONTEXT:  PL/pgSQL function build_ordered_int8s_3(bigint,bigint) while casting return value to function's return type
 create function build_ordered_int8s_4(i int8, j int8) returns ordered_int8s as $$
 declare r ordered_int8s; begin r := row(i,j); return r; end
@@ -1142,6 +1146,7 @@ select build_ordered_int8s_4(1,2);
 
 select build_ordered_int8s_4(2,1);  -- fail
 ERROR:  value for domain ordered_int8s violates check constraint "ordered_int8s_check"
+DETAIL:  Check constraint expression: ((VALUE).q1 <= (VALUE).q2).
 CONTEXT:  PL/pgSQL function build_ordered_int8s_4(bigint,bigint) line 2 at assignment
 create function build_ordered_int8s_a(i int8, j int8) returns ordered_int8s[] as $$
 begin return array[row(i,j), row(i,j+1)]; end
@@ -1154,6 +1159,7 @@ select build_ordered_int8s_a(1,2);
 
 select build_ordered_int8s_a(2,1);  -- fail
 ERROR:  value for domain ordered_int8s violates check constraint "ordered_int8s_check"
+DETAIL:  Check constraint expression: ((VALUE).q1 <= (VALUE).q2).
 CONTEXT:  PL/pgSQL function build_ordered_int8s_a(bigint,bigint) while casting return value to function's return type
 -- check field assignment
 do $$
@@ -1165,6 +1171,7 @@ begin
   r.q2 := 41;  -- fail
 end$$;
 ERROR:  value for domain ordered_int8s violates check constraint "ordered_int8s_check"
+DETAIL:  Check constraint expression: ((VALUE).q1 <= (VALUE).q2).
 CONTEXT:  PL/pgSQL function inline_code_block line 7 at assignment
 -- check whole-row assignment
 do $$
@@ -1176,6 +1183,7 @@ begin
   r := row(2,1);  -- fail
 end$$;
 ERROR:  value for domain ordered_int8s violates check constraint "ordered_int8s_check"
+DETAIL:  Check constraint expression: ((VALUE).q1 <= (VALUE).q2).
 CONTEXT:  PL/pgSQL function inline_code_block line 7 at assignment
 -- check assignment in for-loop
 do $$
@@ -1188,6 +1196,7 @@ end$$;
 NOTICE:  r = (1,2)
 NOTICE:  r = (3,4)
 ERROR:  value for domain ordered_int8s violates check constraint "ordered_int8s_check"
+DETAIL:  Check constraint expression: ((VALUE).q1 <= (VALUE).q2).
 CONTEXT:  PL/pgSQL function inline_code_block line 4 at FOR over SELECT rows
 -- check behavior with toastable fields, too
 create type two_texts as (f1 text, f2 text);
@@ -1209,6 +1218,7 @@ end$$;
 NOTICE:  succeeded at "a"
 NOTICE:  succeeded at "a"
 ERROR:  value for domain ordered_texts violates check constraint "ordered_texts_check"
+DETAIL:  Check constraint expression: ((VALUE).f1 <= (VALUE).f2).
 CONTEXT:  PL/pgSQL function inline_code_block line 4 at FOR over SELECT rows
 do $$
 declare r record; d ordered_texts;
@@ -1222,6 +1232,7 @@ NOTICE:  processing row 1
 NOTICE:  processing row 2
 NOTICE:  processing row 3
 ERROR:  value for domain ordered_texts violates check constraint "ordered_texts_check"
+DETAIL:  Check constraint expression: ((VALUE).f1 <= (VALUE).f2).
 CONTEXT:  PL/pgSQL function inline_code_block line 6 at assignment
 do $$
 declare r record; d ordered_texts;
@@ -1237,6 +1248,7 @@ NOTICE:  processing row 1
 NOTICE:  processing row 2
 NOTICE:  processing row 3
 ERROR:  value for domain ordered_texts violates check constraint "ordered_texts_check"
+DETAIL:  Check constraint expression: ((VALUE).f1 <= (VALUE).f2).
 CONTEXT:  PL/pgSQL function inline_code_block line 8 at assignment
 -- check coercion of a record result to named-composite function output type
 create function compresult(int8) returns two_int8s language plpgsql as

@@ -404,6 +404,7 @@ CREATE OR REPLACE FUNCTION foo_ordered() RETURNS orderedfootype AS $$
 $$ LANGUAGE plperl;
 SELECT * FROM foo_ordered();  -- fail
 ERROR:  value for domain orderedfootype violates check constraint "orderedfootype_check"
+DETAIL:  Check constraint expression: ((VALUE).x <= (VALUE).y).
 CONTEXT:  PL/Perl function "foo_ordered"
 CREATE OR REPLACE FUNCTION foo_ordered_set() RETURNS SETOF orderedfootype AS $$
 return [
@@ -426,6 +427,7 @@ return [
 $$ LANGUAGE plperl;
 SELECT * FROM foo_ordered_set();  -- fail
 ERROR:  value for domain orderedfootype violates check constraint "orderedfootype_check"
+DETAIL:  Check constraint expression: ((VALUE).x <= (VALUE).y).
 CONTEXT:  PL/Perl function "foo_ordered_set"
 --
 -- Check passing a tuple argument
@@ -468,6 +470,7 @@ SELECT perl_get_cfield((11,12), 'y');
 
 SELECT perl_get_cfield((12,11), 'x');  -- fail
 ERROR:  value for domain orderedfootype violates check constraint "orderedfootype_check"
+DETAIL:  Check constraint expression: ((VALUE).x <= (VALUE).y).
 CREATE OR REPLACE FUNCTION perl_get_rfield(record, text) RETURNS integer AS $$
     return $_[0]->{$_[1]};
 $$ LANGUAGE plperl;
@@ -491,6 +494,7 @@ SELECT perl_get_rfield((11,12)::orderedfootype, 'x');
 
 SELECT perl_get_rfield((12,11)::orderedfootype, 'x');  -- fail
 ERROR:  value for domain orderedfootype violates check constraint "orderedfootype_check"
+DETAIL:  Check constraint expression: ((VALUE).x <= (VALUE).y).
 --
 -- Test return_next
 --

@@ -263,6 +263,7 @@ begin
   raise notice 'x = %', x;
 end$$;
 ERROR:  value for domain var_record_colnn violates check constraint "var_record_colnn_check"
+DETAIL:  Check constraint expression: ((VALUE).f2 IS NOT NULL).
 CONTEXT:  PL/pgSQL function inline_code_block line 2 during statement block local variable initialization
 do $$
 declare x var_record_colnn := null;  -- fail
@@ -270,6 +271,7 @@ begin
   raise notice 'x = %', x;
 end$$;
 ERROR:  value for domain var_record_colnn violates check constraint "var_record_colnn_check"
+DETAIL:  Check constraint expression: ((VALUE).f2 IS NOT NULL).
 CONTEXT:  PL/pgSQL function inline_code_block line 2 during statement block local variable initialization
 do $$
 declare x var_record_colnn := row(1,null);  -- fail
@@ -277,6 +279,7 @@ begin
   raise notice 'x = %', x;
 end$$;
 ERROR:  value for domain var_record_colnn violates check constraint "var_record_colnn_check"
+DETAIL:  Check constraint expression: ((VALUE).f2 IS NOT NULL).
 CONTEXT:  PL/pgSQL function inline_code_block line 2 during statement block local variable initialization
 do $$
 declare x var_record_colnn := row(1,2);
@@ -286,6 +289,7 @@ begin
 end$$;
 NOTICE:  x = (1,2)
 ERROR:  value for domain var_record_colnn violates check constraint "var_record_colnn_check"
+DETAIL:  Check constraint expression: ((VALUE).f2 IS NOT NULL).
 CONTEXT:  PL/pgSQL function inline_code_block line 5 at assignment
 do $$
 declare x var_record_colnn := row(1,2);
@@ -295,4 +299,5 @@ begin
 end$$;
 NOTICE:  x = (1,2)
 ERROR:  value for domain var_record_colnn violates check constraint "var_record_colnn_check"
+DETAIL:  Check constraint expression: ((VALUE).f2 IS NOT NULL).
 CONTEXT:  PL/pgSQL function inline_code_block line 5 at assignment
