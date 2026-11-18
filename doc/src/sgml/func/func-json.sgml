@@ -3326,6 +3326,8 @@ $.* ? (@ like_regex "^\\d+$")
    <replaceable>path_expression</replaceable> can also reference variables,
    whose values are specified with their respective names in the
    <literal>PASSING</literal> clause that is supported by each function.
+   The names of the variables in the <literal>PASSING</literal> clause must
+   be unique.
    <replaceable>context_item</replaceable> can be a <type>jsonb</type> value
    or a character string that can be successfully cast to <type>jsonb</type>.
   </para>
@@ -3713,6 +3715,8 @@ where <replaceable class="parameter">json_table_column</replaceable> is:
      is an optional name for the <replaceable>path_expression</replaceable>.
      The optional <literal>PASSING</literal> clause provides data values for
      the variables mentioned in the <replaceable>path_expression</replaceable>.
+     The names of the variables in the <literal>PASSING</literal> clause must
+     be unique.
      The result of the input data evaluation using the aforementioned elements
      is called the <firstterm>row pattern</firstterm>, which is used as the
      source for row values in the constructed view.

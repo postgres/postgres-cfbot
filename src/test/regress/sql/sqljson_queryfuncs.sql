@@ -517,6 +517,12 @@ SELECT JSON_QUERY(jsonb 'null', '$Xyz' PASSING 1 AS Xyz);
 SELECT JSON_QUERY(jsonb 'null', '$Xyz' PASSING 1 AS "Xyz");
 SELECT JSON_QUERY(jsonb 'null', '$"Xyz"' PASSING 1 AS "Xyz");
 
+-- Duplicate PASSING argument names are not allowed
+SELECT JSON_QUERY(jsonb 'null', '$x' PASSING 1 AS x, 2 AS x);
+SELECT JSON_QUERY(jsonb 'null', '$x' PASSING 1 AS x, 2 AS "x");
+SELECT JSON_EXISTS(jsonb 'null', '$x' PASSING 1 AS x, 2 AS x);
+SELECT JSON_VALUE(jsonb 'null', '$x' PASSING 1 AS x, 2 AS "x");
+
 -- Test PASSING and toasted values
 CREATE TABLE test_passing_toast (t text);
 ALTER TABLE test_passing_toast ALTER COLUMN t SET STORAGE EXTENDED;

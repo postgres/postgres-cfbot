@@ -755,6 +755,17 @@ FROM JSON_TABLE(
  2
 (2 rows)
 
+-- Duplicate PASSING argument names are not allowed
+SELECT *
+FROM JSON_TABLE(
+	'{ "favorites":[{ "kind":"comedy" },{ "kind":"drama" }] }',
+	'$.favorites[*]?(@.kind == $k1)'
+		PASSING 'comedy' AS k1, 'drama' AS k1
+		COLUMNS (kind text PATH '$.kind')
+	) jt;
+ERROR:  PASSING argument name "k1" is not unique
+LINE 5:   PASSING 'comedy' AS k1, 'drama' AS k1
+                                  ^
 -- PASSING arguments are also passed to column paths
 SELECT *
 FROM JSON_TABLE(
