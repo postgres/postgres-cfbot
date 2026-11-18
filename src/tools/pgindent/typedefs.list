@@ -2267,6 +2267,7 @@ PgAioTargetData
 PgAioTargetID
 PgAioTargetInfo
 PgAioUringCaps
+PgAioUringCleanup
 PgAioUringContext
 PgAioWaitRef
 PgAioWorkerControl
