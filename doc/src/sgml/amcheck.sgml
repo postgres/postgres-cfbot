@@ -136,7 +136,8 @@ ORDER BY c.relpages DESC LIMIT 10;
       <parameter>indexallkeysmatch</parameter> is <literal>false</literal>.
       This can detect a lost relation segment.  The check is skipped if the
       table's main relation fork is absent, allowing indexes to be checked
-      independently of heap verification.
+      independently of heap verification.  It is also skipped for tables
+      that do not use the <literal>heap</literal> table access method.
      </para>
     </listitem>
    </varlistentry>
