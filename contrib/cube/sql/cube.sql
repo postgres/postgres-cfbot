@@ -428,7 +428,7 @@ RESET extra_float_digits;
 SELECT *, c <=> '(100, 100),(500, 500)'::cube as dist FROM test_cube ORDER BY c <=> '(100, 100),(500, 500)'::cube LIMIT 5;
 SELECT *, c <#> '(100, 100),(500, 500)'::cube as dist FROM test_cube ORDER BY c <#> '(100, 100),(500, 500)'::cube LIMIT 5;
 SELECT c~>1, c FROM test_cube ORDER BY c~>1 LIMIT 15; -- ascending by left bound
-SELECT c~>2, c FROM test_cube ORDER BY c~>2 LIMIT 15; -- ascending by right bound
+SELECT c~>2, c FROM test_cube ORDER BY c~>2, c~>4 LIMIT 15; -- ascending by right bound (c~>4 breaks the tie at 270)
 SELECT c~>3, c FROM test_cube ORDER BY c~>3 LIMIT 15; -- ascending by lower bound
 SELECT c~>4, c FROM test_cube ORDER BY c~>4 LIMIT 15; -- ascending by upper bound
 SELECT c~>(-1), c FROM test_cube ORDER BY c~>(-1) LIMIT 15; -- descending by left bound
