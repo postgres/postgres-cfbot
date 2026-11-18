@@ -58,5 +58,6 @@ extern TupleDesc FetchPreparedStatementResultDesc(PreparedStatement *stmt);
 extern List *FetchPreparedStatementTargetList(PreparedStatement *stmt);
 
 extern void DropAllPreparedStatements(void);
+extern bool HasActivePreparedStatements(void);
 
 #endif							/* PREPARE_H */

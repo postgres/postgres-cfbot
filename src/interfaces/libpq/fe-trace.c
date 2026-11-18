@@ -612,10 +612,24 @@ pqTraceOutput_CopyBothResponse(FILE *f, const char *message, int *cursor, int le
 }
 
 static void
-pqTraceOutput_ReadyForQuery(FILE *f, const char *message, int *cursor)
+pqTraceOutput_ReadyForQuery(FILE *f, const char *message, int *cursor, int length)
 {
 	fprintf(f, "ReadyForQuery\t");
 	pqTraceOutputByte1(f, message, cursor);
+
+	while (*cursor - 1 < length)
+	{
+		int			klen = (unsigned char) message[(*cursor)++];
+
+		pqTraceOutputNchar(f, klen, message, cursor, false);
+		if (*cursor - 1 < length)
+		{
+			int			vlen = (unsigned char) message[(*cursor)++];
+
+			if (vlen > 0)
+				pqTraceOutputNchar(f, vlen, message, cursor, false);
+		}
+	}
 }
 
 /*
@@ -815,7 +829,7 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			/* No message content */
 			break;
 		case PqMsg_ReadyForQuery:
-			pqTraceOutput_ReadyForQuery(conn->Pfdebug, message, &logCursor);
+			pqTraceOutput_ReadyForQuery(conn->Pfdebug, message, &logCursor, length);
 			break;
 		default:
 			fprintf(conn->Pfdebug, "Unknown message: %02x", id);
