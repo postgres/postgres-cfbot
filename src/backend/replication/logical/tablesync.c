@@ -756,15 +756,15 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 	if (res->status != WALRCV_OK_TUPLES)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not fetch table info for table \"%s.%s\" from publisher: %s",
-						nspname, relname, res->err)));
+				 errmsg("could not fetch table info for table \"%s\" from publisher: %s",
+						MsgQualifiedRelName(nspname, relname), res->err)));
 
 	slot = MakeSingleTupleTableSlot(res->tupledesc, &TTSOpsMinimalTuple);
 	if (!tuplestore_gettupleslot(res->tuplestore, true, false, slot))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("table \"%s.%s\" not found on publisher",
-						nspname, relname)));
+				 errmsg("table \"%s\" not found on publisher",
+						MsgQualifiedRelName(nspname, relname))));
 
 	lrel->remoteid = DatumGetObjectId(slot_getattr(slot, 1, &isnull));
 	Assert(!isnull);
@@ -834,8 +834,8 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 		if (pubres->status != WALRCV_OK_TUPLES)
 			ereport(ERROR,
 					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not fetch column list info for table \"%s.%s\" from publisher: %s",
-							nspname, relname, pubres->err)));
+					 errmsg("could not fetch column list info for table \"%s\" from publisher: %s",
+							MsgQualifiedRelName(nspname, relname), pubres->err)));
 
 		/*
 		 * We don't support the case where the column list is different for
@@ -848,8 +848,8 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 		if (tuplestore_tuple_count(pubres->tuplestore) > 1)
 			ereport(ERROR,
 					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("cannot use different column lists for table \"%s.%s\" in different publications",
-						   nspname, relname));
+					errmsg("cannot use different column lists for table \"%s\" in different publications",
+						   MsgQualifiedRelName(nspname, relname)));
 
 		/*
 		 * Get the column list and build a single bitmap with the attnums.
@@ -915,8 +915,8 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 	if (res->status != WALRCV_OK_TUPLES)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not fetch table info for table \"%s.%s\" from publisher: %s",
-						nspname, relname, res->err)));
+				 errmsg("could not fetch table info for table \"%s\" from publisher: %s",
+						MsgQualifiedRelName(nspname, relname), res->err)));
 
 	/* We don't know the number of rows coming, so allocate enough space. */
 	lrel->attnames = palloc0_array(char *, MaxTupleAttributeNumber);
@@ -963,8 +963,8 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 
 		/* Should never happen. */
 		if (++natt >= MaxTupleAttributeNumber)
-			elog(ERROR, "too many columns in remote table \"%s.%s\"",
-				 nspname, relname);
+			elog(ERROR, "too many columns in remote table \"%s\"",
+				 MsgQualifiedRelName(nspname, relname));
 
 		ExecClearTuple(slot);
 	}
@@ -1027,8 +1027,8 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 
 		if (res->status != WALRCV_OK_TUPLES)
 			ereport(ERROR,
-					(errmsg("could not fetch table WHERE clause info for table \"%s.%s\" from publisher: %s",
-							nspname, relname, res->err)));
+					(errmsg("could not fetch table WHERE clause info for table \"%s\" from publisher: %s",
+							MsgQualifiedRelName(nspname, relname), res->err)));
 
 		/*
 		 * Multiple row filter expressions for the same table will be combined
@@ -1200,8 +1200,8 @@ copy_table(Relation rel)
 	if (res->status != WALRCV_OK_COPY_OUT)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not start initial contents copy for table \"%s.%s\": %s",
-						lrel.nspname, lrel.relname, res->err)));
+				 errmsg("could not start initial contents copy for table \"%s\": %s",
+						MsgQualifiedRelName(lrel.nspname, lrel.relname), res->err)));
 	walrcv_clear_result(res);
 
 	copybuf = makeStringInfo();
@@ -1478,7 +1478,7 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("user \"%s\" cannot replicate into relation with row-level security enabled: \"%s\"",
 						GetUserNameFromId(GetUserId(), true),
-						RelationGetRelationName(rel))));
+						MsgQualifiedRelNameByRel(rel))));
 
 	/* Now do the initial data copy */
 	PushActiveSnapshot(GetTransactionSnapshot());

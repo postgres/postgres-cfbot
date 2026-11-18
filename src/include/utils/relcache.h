@@ -102,6 +102,14 @@ extern int	errtablecolname(Relation rel, const char *colname);
 extern int	errtableconstraint(Relation rel, const char *conname);
 
 /*
+ * Routines to get a schema-qualified name of a relation suitable for
+ * substitution to a log message.
+ */
+extern char *MsgQualifiedRelName(const char *nspname, const char *relname);
+extern char *MsgQualifiedRelNameByRel(Relation rel);
+extern char *MsgQualifiedRelNameByRelId(Oid relid);
+
+/*
  * Routines for backend startup
  */
 extern void RelationCacheInitialize(void);

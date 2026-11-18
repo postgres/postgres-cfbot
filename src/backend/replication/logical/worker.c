@@ -2663,7 +2663,7 @@ TargetPrivilegesCheck(Relation rel, AclMode mode)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("user \"%s\" cannot replicate into relation with row-level security enabled: \"%s\"",
 						GetUserNameFromId(GetUserId(), true),
-						RelationGetRelationName(rel))));
+						MsgQualifiedRelNameByRel(rel))));
 }
 
 /*
@@ -2806,17 +2806,17 @@ check_relation_updatable(LogicalRepRelMapEntry *rel)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("publisher did not send replica identity column "
-						"expected by the logical replication target relation \"%s.%s\"",
-						rel->remoterel.nspname, rel->remoterel.relname)));
+						"expected by the logical replication target relation \"%s\"",
+						MsgQualifiedRelName(rel->remoterel.nspname, rel->remoterel.relname))));
 	}
 
 	ereport(ERROR,
 			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-			 errmsg("logical replication target relation \"%s.%s\" has "
+			 errmsg("logical replication target relation \"%s\" has "
 					"neither REPLICA IDENTITY index nor PRIMARY "
 					"KEY and published relation does not have "
 					"REPLICA IDENTITY FULL",
-					rel->remoterel.nspname, rel->remoterel.relname)));
+					MsgQualifiedRelName(rel->remoterel.nspname, rel->remoterel.relname))));
 }
 
 /*
@@ -6011,7 +6011,7 @@ InitializeLogRepWorker(void)
 		ereport(LOG,
 				errmsg("logical replication table synchronization worker for subscription \"%s\", table \"%s\" has started",
 					   MySubscription->name,
-					   get_rel_name(MyLogicalRepWorker->relid)));
+					   MsgQualifiedRelNameByRelId(MyLogicalRepWorker->relid)));
 	else if (am_sequencesync_worker())
 		ereport(LOG,
 				errmsg("logical replication sequence synchronization worker for subscription \"%s\" has started",
@@ -6364,40 +6364,39 @@ apply_error_callback(void *arg)
 	}
 	else
 	{
+		const char *target_relname = MsgQualifiedRelName(ctx->rel->remoterel.nspname,
+														 ctx->rel->remoterel.relname);
+
 		if (ctx->remote_attnum < 0)
 		{
 			if (!XLogRecPtrIsValid(ctx->finish_lsn))
-				errcontext("processing remote data for replication origin \"%s\" during message type \"%s\" for replication target relation \"%s.%s\" in transaction %u",
+				errcontext("processing remote data for replication origin \"%s\" during message type \"%s\" for replication target relation \"%s\" in transaction %u",
 						   ctx->origin_name,
 						   logicalrep_message_type(ctx->command),
-						   ctx->rel->remoterel.nspname,
-						   ctx->rel->remoterel.relname,
+						   target_relname,
 						   ctx->remote_xid);
 			else
-				errcontext("processing remote data for replication origin \"%s\" during message type \"%s\" for replication target relation \"%s.%s\" in transaction %u, finished at %X/%08X",
+				errcontext("processing remote data for replication origin \"%s\" during message type \"%s\" for replication target relation \"%s\" in transaction %u, finished at %X/%08X",
 						   ctx->origin_name,
 						   logicalrep_message_type(ctx->command),
-						   ctx->rel->remoterel.nspname,
-						   ctx->rel->remoterel.relname,
+						   target_relname,
 						   ctx->remote_xid,
 						   LSN_FORMAT_ARGS(ctx->finish_lsn));
 		}
 		else
 		{
 			if (!XLogRecPtrIsValid(ctx->finish_lsn))
-				errcontext("processing remote data for replication origin \"%s\" during message type \"%s\" for replication target relation \"%s.%s\" column \"%s\" in transaction %u",
+				errcontext("processing remote data for replication origin \"%s\" during message type \"%s\" for replication target relation \"%s\" column \"%s\" in transaction %u",
 						   ctx->origin_name,
 						   logicalrep_message_type(ctx->command),
-						   ctx->rel->remoterel.nspname,
-						   ctx->rel->remoterel.relname,
+						   target_relname,
 						   ctx->rel->remoterel.attnames[ctx->remote_attnum],
 						   ctx->remote_xid);
 			else
-				errcontext("processing remote data for replication origin \"%s\" during message type \"%s\" for replication target relation \"%s.%s\" column \"%s\" in transaction %u, finished at %X/%08X",
+				errcontext("processing remote data for replication origin \"%s\" during message type \"%s\" for replication target relation \"%s\" column \"%s\" in transaction %u, finished at %X/%08X",
 						   ctx->origin_name,
 						   logicalrep_message_type(ctx->command),
-						   ctx->rel->remoterel.nspname,
-						   ctx->rel->remoterel.relname,
+						   target_relname,
 						   ctx->rel->remoterel.attnames[ctx->remote_attnum],
 						   ctx->remote_xid,
 						   LSN_FORMAT_ARGS(ctx->finish_lsn));

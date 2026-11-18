@@ -2287,7 +2287,7 @@ DETAIL:  <replaceable class="parameter">detailed_explanation</replaceable>[: <re
 <screen>
 ERROR:  conflict detected on relation "public.test": conflict=insert_exists
 DETAIL:  Could not apply remote change: remote row (1, 'remote').
-Key already exists in unique index "test_pkey", modified locally in transaction 800 at 2026-01-16 18:15:25.652759+09: key (c)=(1), local row (1, 'local').
+Key already exists in unique index "public.test_pkey", modified locally in transaction 800 at 2026-01-16 18:15:25.652759+09: key (c)=(1), local row (1, 'local').
 CONTEXT:  processing remote data for replication origin "pg_16395" during "INSERT" for replication target relation "public.test" in transaction 725 finished at 0/014C0378
 </screen>
    The LSN of the transaction that contains the change violating the constraint and

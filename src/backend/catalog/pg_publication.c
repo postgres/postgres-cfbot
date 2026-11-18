@@ -60,22 +60,11 @@ check_publication_add_relation(PublicationRelInfo *pri)
 	const char *relname;
 	const char *errormsg;
 
+	relname = MsgQualifiedRelNameByRel(targetrel);
 	if (pri->except)
-	{
-		/*
-		 * The name parts must not be quoted here, because the message already
-		 * encloses the whole name in double quotes.
-		 */
-		relname = psprintf("%s.%s",
-						   get_namespace_name(RelationGetNamespace(targetrel)),
-						   RelationGetRelationName(targetrel));
 		errormsg = gettext_noop("cannot specify relation \"%s\" in the publication EXCEPT clause");
-	}
 	else
-	{
-		relname = RelationGetRelationName(targetrel);
 		errormsg = gettext_noop("cannot add relation \"%s\" to publication");
-	}
 
 	/* If in EXCEPT clause, must be root partitioned table */
 	if (pri->except && targetrel->rd_rel->relispartition)
@@ -582,7 +571,7 @@ publication_add_relation(Oid pubid, PublicationRelInfo *pri,
 		ereport(ERROR,
 				(errcode(ERRCODE_DUPLICATE_OBJECT),
 				 errmsg("relation \"%s\" is already a member of publication \"%s\"",
-						RelationGetRelationName(targetrel), pub->name)));
+						MsgQualifiedRelNameByRel(targetrel), pub->name)));
 	}
 
 	check_publication_add_relation(pri);
@@ -716,7 +705,7 @@ pub_collist_validate(Relation targetrel, List *columns)
 			ereport(ERROR,
 					errcode(ERRCODE_UNDEFINED_COLUMN),
 					errmsg("column \"%s\" of relation \"%s\" does not exist",
-						   colname, RelationGetRelationName(targetrel)));
+						   colname, MsgQualifiedRelNameByRel(targetrel)));
 
 		if (!AttrNumberIsForUserDefinedAttr(attnum))
 			ereport(ERROR,
