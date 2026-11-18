@@ -183,6 +183,25 @@ SELECT relname, spcname FROM pg_catalog.pg_tablespace t, pg_catalog.pg_class c
 \d testschema.foo
 \d testschema.foo_idx
 
+-- constraint definitions must not mention the index tablespace; pg_dump and
+-- psql handle it separately
+CREATE TABLE testschema.excl (a int,
+    CONSTRAINT excl_a EXCLUDE USING btree (a WITH =)
+        USING INDEX TABLESPACE regress_tblspace,
+    CONSTRAINT excl_u UNIQUE (a) WITH (fillfactor = 70)
+        USING INDEX TABLESPACE regress_tblspace);
+SELECT conname, pg_get_constraintdef(oid), pg_get_constraintdef(oid, true)
+  FROM pg_constraint WHERE conrelid = 'testschema.excl'::regclass
+  ORDER BY conname;
+\d testschema.excl
+-- a rebuilt constraint index keeps its tablespace on ALTER TABLE
+ALTER TABLE testschema.excl ALTER COLUMN a TYPE bigint;
+SELECT conname, spcname FROM pg_constraint c
+  JOIN pg_class i ON i.oid = c.conindid
+  JOIN pg_tablespace t ON t.oid = i.reltablespace
+  WHERE c.conrelid = 'testschema.excl'::regclass ORDER BY conname;
+DROP TABLE testschema.excl;
+
 --
 -- partitioned table
 --

@@ -92,6 +92,7 @@ extern void check_of_type(HeapTuple typetuple);
 
 extern void register_on_commit_action(Oid relid, OnCommitAction action);
 extern void remove_on_commit_action(Oid relid);
+extern OnCommitAction get_on_commit_action(Oid relid);
 
 extern void PreCommit_on_commit_actions(void);
 extern void AtEOXact_on_commit_actions(bool isCommit);
@@ -107,5 +108,7 @@ extern void RangeVarCallbackOwnsRelation(const RangeVar *relation,
 										 Oid relId, Oid oldRelId, void *arg);
 extern bool PartConstraintImpliedByRelConstraint(Relation scanrel,
 												 List *partConstraint);
+
+extern const char *storage_name(char c);
 
 #endif							/* TABLECMDS_H */
