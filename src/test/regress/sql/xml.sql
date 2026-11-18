@@ -718,6 +718,13 @@ SELECT * FROM XMLTABLE('*' PASSING '<e>pre<!--c1--><?pi arg?><![CDATA[&ent1]]><n
 
 SELECT * FROM XMLTABLE('.' PASSING XMLELEMENT(NAME a) columns a varchar(20) PATH '"<foo/>"', b xml PATH '"<foo/>"');
 
+-- a column of a domain over xml behaves like an xml column
+CREATE DOMAIN xmldomain AS xml;
+SELECT * FROM XMLTABLE('/r' PASSING '<r><a>x</a><a>&lt;y&gt;</a></r>'
+                       COLUMNS x xml PATH 'a', dx xmldomain PATH 'a',
+                               s xml PATH 'string(a[2])', ds xmldomain PATH 'string(a[2])');
+DROP DOMAIN xmldomain;
+
 SELECT xmltext(NULL);
 SELECT xmltext('');
 SELECT xmltext('  ');
