@@ -110,6 +110,10 @@ struct Tuplestorestate
 	bool		truncated;		/* tuplestore_trim has removed tuples? */
 	bool		usedDisk;		/* used by tuplestore_get_stats() */
 	int64		maxSpace;		/* used by tuplestore_get_stats() */
+	bool		usedDiskSinceClear; /* used by
+									 * tuplestore_get_stats_since_clear() */
+	int64		maxSpaceSinceClear; /* used by
+									 * tuplestore_get_stats_since_clear() */
 	int64		availMem;		/* remaining memory available, in bytes */
 	int64		allowedMem;		/* total memory allowed, in bytes */
 	int64		tuples;			/* number of tuples added */
@@ -266,6 +270,8 @@ tuplestore_begin_common(int eflags, bool interXact, int maxKBytes)
 	state->truncated = false;
 	state->usedDisk = false;
 	state->maxSpace = 0;
+	state->usedDiskSinceClear = false;
+	state->maxSpaceSinceClear = 0;
 	state->allowedMem = maxKBytes * (int64) 1024;
 	state->availMem = state->allowedMem;
 	state->myfile = NULL;
@@ -433,6 +439,8 @@ tuplestore_clear(Tuplestorestate *state)
 
 	/* update the maxSpace before doing any USEMEM/FREEMEM adjustments */
 	tuplestore_updatemax(state);
+	state->usedDiskSinceClear = false;
+	state->maxSpaceSinceClear = 0;
 
 	if (state->myfile)
 		BufFileClose(state->myfile);
@@ -1552,20 +1560,24 @@ tuplestore_trim(Tuplestorestate *state)
 static void
 tuplestore_updatemax(Tuplestorestate *state)
 {
+	int64		spaceUsed;
+
 	if (state->status == TSS_INMEM)
-		state->maxSpace = Max(state->maxSpace,
-							  state->allowedMem - state->availMem);
+		spaceUsed = state->allowedMem - state->availMem;
 	else
 	{
-		state->maxSpace = Max(state->maxSpace,
-							  BufFileSize(state->myfile));
+		spaceUsed = BufFileSize(state->myfile);
 
 		/*
 		 * usedDisk never gets set to false again after spilling to disk, even
 		 * if tuplestore_clear() is called and new tuples go to memory again.
 		 */
 		state->usedDisk = true;
+		state->usedDiskSinceClear = true;
 	}
+
+	state->maxSpace = Max(state->maxSpace, spaceUsed);
+	state->maxSpaceSinceClear = Max(state->maxSpaceSinceClear, spaceUsed);
 }
 
 /*
@@ -1581,6 +1593,21 @@ tuplestore_get_stats(Tuplestorestate *state, bool *used_disk, int64 *max_space)
 
 	*used_disk = state->usedDisk;
 	*max_space = state->maxSpace;
+}
+
+/*
+ * tuplestore_get_stats_since_clear
+ *		Like tuplestore_get_stats(), but the statistics only cover the period
+ *		since the tuplestore was created or last cleared by tuplestore_clear().
+ */
+void
+tuplestore_get_stats_since_clear(Tuplestorestate *state, bool *used_disk,
+								 int64 *max_space)
+{
+	tuplestore_updatemax(state);
+
+	*used_disk = state->usedDiskSinceClear;
+	*max_space = state->maxSpaceSinceClear;
 }
 
 /*

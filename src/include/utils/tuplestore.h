@@ -68,6 +68,8 @@ extern void tuplestore_trim(Tuplestorestate *state);
 
 extern void tuplestore_get_stats(Tuplestorestate *state, bool *used_disk,
 								 int64 *max_space);
+extern void tuplestore_get_stats_since_clear(Tuplestorestate *state,
+											 bool *used_disk, int64 *max_space);
 
 extern bool tuplestore_in_memory(Tuplestorestate *state);
 
