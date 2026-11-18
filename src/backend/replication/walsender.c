@@ -1090,10 +1090,6 @@ StartReplication(StartReplicationCmd *cmd)
 /*
  * XLogReaderRoutine->page_read callback for logical decoding contexts, as a
  * walsender process.
- *
- * Inside the walsender we can do better than read_local_xlog_page,
- * which has to do a plain sleep/busy loop, because the walsender's latch gets
- * set every time WAL is flushed.
  */
 static int
 logical_read_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
