@@ -521,7 +521,7 @@ COMMIT;
 CREATE FUNCTION predicate_stable() RETURNS bool IMMUTABLE
 LANGUAGE plpgsql AS $$
 BEGIN
-  EXECUTE 'SELECT txid_current()';
+  EXECUTE 'SELECT pg_current_xact_id()';
   RETURN true;
 END; $$;
 CREATE INDEX CONCURRENTLY concur_index8 ON concur_heap (f1)
