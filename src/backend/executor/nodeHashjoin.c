@@ -1406,6 +1406,9 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 			ExecHashTableInsert(hashtable, slot, hashvalue);
 		}
 
+		/* link any tuples still queued by ExecHashTableInsert */
+		ExecHashFlushDeferredInserts(hashtable);
+
 		/*
 		 * after we build the hash table, the inner batch file is no longer
 		 * needed
@@ -1509,6 +1512,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 						ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
 																hashvalue);
 					}
+					ExecHashFlushDeferredInserts(hashtable);
 					sts_end_parallel_scan(inner_tuples);
 					BarrierArriveAndWait(batch_barrier,
 										 WAIT_EVENT_HASH_BATCH_LOAD);
