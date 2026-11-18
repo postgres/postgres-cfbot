@@ -46,6 +46,7 @@
 #include "storage/subsystems.h"
 #include "storage/sync.h"
 #include "utils/guc_hooks.h"
+#include "utils/injection_point.h"
 #include "utils/wait_event.h"
 
 /*
@@ -1015,6 +1016,8 @@ TruncateCLOG(TransactionId oldestXact, Oid oldestxid_datoid)
 
 	/* Now we can remove the old CLOG segment(s) */
 	SimpleLruTruncate(XactCtl, cutoffPage);
+
+	INJECTION_POINT("clog-truncate-after-unlink", NULL);
 }
 
 

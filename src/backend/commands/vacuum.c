@@ -2013,6 +2013,16 @@ vac_truncate_clog(TransactionId frozenXID,
 	AdvanceOldestCommitTsXid(frozenXID);
 
 	/*
+	 * Update the wrap limit for GetNewTransactionId.  Do this before
+	 * truncating CLOG, so that a checkpoint starting after the truncation
+	 * record sees the new oldestXid.  Crash recovery from such a checkpoint
+	 * does not replay the truncation, and sets oldestClogXid from the
+	 * checkpoint's oldestXid.  Note: this function will also signal the
+	 * postmaster for an autovac cycle if needed.
+	 */
+	SetTransactionIdLimit(frozenXID, oldestxid_datoid);
+
+	/*
 	 * Truncate CLOG, multixact and CommitTs to the oldest computed value.
 	 */
 	TruncateCLOG(frozenXID, oldestxid_datoid);
@@ -2020,12 +2030,10 @@ vac_truncate_clog(TransactionId frozenXID,
 	TruncateMultiXact(minMulti, minmulti_datoid);
 
 	/*
-	 * Update the wrap limit for GetNewTransactionId and creation of new
-	 * MultiXactIds.  Note: these functions will also signal the postmaster
-	 * for an(other) autovac cycle if needed.   XXX should we avoid possibly
-	 * signaling twice?
+	 * Update the wrap limit for creation of new MultiXactIds.  Note: this
+	 * function will also signal the postmaster for an(other) autovac cycle if
+	 * needed.  XXX should we avoid possibly signaling twice?
 	 */
-	SetTransactionIdLimit(frozenXID, oldestxid_datoid);
 	SetMultiXactIdLimit(minMulti, minmulti_datoid);
 
 	LWLockRelease(WrapLimitsVacuumLock);

@@ -69,6 +69,9 @@ tests += {
       't/058_shutdown_crash_restart.pl',
       't/059_remote_apply_status_interval.pl',
       't/060_multixact_crashed_updater.pl',
+      't/061_clog_truncate_checkpoint.pl',
+      't/062_hash_alloc_buckets_checkpoint.pl',
+      't/063_multixact_truncate_checkpoint.pl',
     ],
   },
 }

@@ -635,6 +635,8 @@ _hash_expandtable(Relation rel, Buffer metabuf)
 
 restart_expand:
 
+	INJECTION_POINT("hash-expandtable-start", NULL);
+
 	/*
 	 * Write-lock the meta page.  It used to be necessary to acquire a
 	 * heavyweight lock to begin a split, but that is no longer required.
@@ -1025,16 +1027,30 @@ _hash_alloc_buckets(Relation rel, BlockNumber firstblock, uint32 nblocks)
 	ovflopaque->hasho_flag = LH_UNUSED_PAGE;
 	ovflopaque->hasho_page_id = HASHO_PAGE_ID;
 
+	/*
+	 * Extend the file before writing the WAL record.  If a checkpoint sets
+	 * its redo pointer before the record, recovery replays the record and
+	 * extends the file again.  If it sets it after the record, the extension
+	 * is already done, and smgrextend() has already registered the fsync
+	 * request.  The checkpoint then syncs the new block, and a base backup
+	 * started by it sees the block.  So we must not skip the fsync here.
+	 *
+	 * Nothing uses the new page yet, so it is fine to write it before its WAL
+	 * record.  If we crash in between, the file is longer than the metapage
+	 * says, which is allowed; see the README.
+	 */
+	PageSetChecksum(page, lastblock);
+	smgrextend(RelationGetSmgr(rel), MAIN_FORKNUM, lastblock, zerobuf.data,
+			   false);
+
+	INJECTION_POINT("hash-alloc-buckets-before-wal", NULL);
+
 	if (RelationNeedsWAL(rel))
 		log_newpage(&rel->rd_locator,
 					MAIN_FORKNUM,
 					lastblock,
 					zerobuf.data,
 					true);
-
-	PageSetChecksum(page, lastblock);
-	smgrextend(RelationGetSmgr(rel), MAIN_FORKNUM, lastblock, zerobuf.data,
-			   false);
 
 	return true;
 }
