@@ -498,6 +498,19 @@ LockDatabaseFrozenIds(LOCKMODE lockmode)
 }
 
 /*
+ * Acquire the database frozen-ID lock without waiting for another updater.
+ */
+bool
+ConditionalLockDatabaseFrozenIds(LOCKMODE lockmode)
+{
+	LOCKTAG		tag;
+
+	SET_LOCKTAG_DATABASE_FROZEN_IDS(tag, MyDatabaseId);
+
+	return (LockAcquire(&tag, lockmode, false, true) != LOCKACQUIRE_NOT_AVAIL);
+}
+
+/*
  *		LockPage
  *
  * Obtain a page-level lock.  This is currently used by some index access
