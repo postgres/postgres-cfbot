@@ -76,6 +76,15 @@ SELECT unnest(reloptions) FROM pg_class WHERE relname = 'dummy_test_idx';
 --------
 (0 rows)
 
+-- A value too long to be an identifier must be quoted when deparsed
+ALTER INDEX dummy_test_idx SET (option_string_null = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+SELECT pg_get_indexdef('dummy_test_idx'::regclass);
+                                                                              pg_get_indexdef                                                                               
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ CREATE INDEX dummy_test_idx ON public.dummy_test_tab USING dummy_index_am (i) WITH (option_string_null='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+(1 row)
+
+ALTER INDEX dummy_test_idx RESET (option_string_null);
 -- Cross-type checks for reloption values
 -- Integer
 ALTER INDEX dummy_test_idx SET (option_int = 3.3); -- ok
