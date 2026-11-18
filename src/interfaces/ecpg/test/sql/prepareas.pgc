@@ -20,6 +20,7 @@ int main(void)
 {
 	exec sql begin declare section;
 	int ivar1 = 1, ivar2 = 2;
+	short v_ind = -1;
 	char v_include_dq_name[16], v_include_ws_name[16], v_normal_name[16], v_query[64];
 	exec sql end declare section;
 
@@ -190,6 +191,19 @@ int main(void)
 	exec sql execute "include_ _name"(:ivar1,:ivar2);
 	check_result_of_insert();
 	exec sql deallocate "include_ _name";
+
+	/*
+	 * A NULL host-variable value (negative indicator) passed to
+	 * EXECUTE(exprlist) must be inserted as the SQL keyword NULL, not
+	 * dereferenced as a null pointer.
+	 */
+	exec sql truncate test;
+	printf("+++++ Test for a NULL value in EXECUTE(exprlist) +++++\n");
+	exec sql prepare stmt_null(int,int) as insert into test values($1,$2);
+	exec sql execute stmt_null(:ivar1:v_ind, :ivar2);
+	exec sql select count(*) into :ivar1 from test where c1 is null;
+	printf("rows with NULL c1 (must be 1) = %d\n", ivar1);
+	exec sql deallocate stmt_null;
 
 	exec sql drop table test;
 	exec sql commit work;
