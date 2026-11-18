@@ -432,6 +432,13 @@ static const struct config_enum_entry plan_cache_mode_options[] = {
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry goo_greedy_strategy_options[] = {
+	{"result_size", GOO_GREEDY_STRATEGY_RESULT_SIZE, false},
+	{"cost", GOO_GREEDY_STRATEGY_COST, false},
+	{"combined", GOO_GREEDY_STRATEGY_COMBINED, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry password_encryption_options[] = {
 	{"md5", PASSWORD_TYPE_MD5, false},
 	{"scram-sha-256", PASSWORD_TYPE_SCRAM_SHA_256, false},

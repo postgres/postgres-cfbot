@@ -5,6 +5,7 @@ backend_sources += files(
   'clausesel.c',
   'costsize.c',
   'equivclass.c',
+  'goo.c',
   'indxpath.c',
   'joinpath.c',
   'joinrels.c',

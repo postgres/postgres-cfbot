@@ -480,6 +480,7 @@
 # - Genetic Query Optimizer -
 
 #geqo = on
+#enable_goo_join_search = off
 #geqo_threshold = 12
 #geqo_effort = 5                        # range 1-10
 #geqo_pool_size = 0                     # selects default based on effort
