@@ -16,6 +16,7 @@
 
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "executor/instrument.h"
 #include "storage/bufmgr.h"
 #include "utils/pgstat_internal.h"
@@ -166,7 +167,7 @@ pgstat_fetch_stat_io(void)
 void
 pgstat_flush_io(bool nowait)
 {
-	(void) pgstat_io_flush_cb(nowait);
+	(void) pgstat_io_flush_cb(nowait, !IsTransactionOrTransactionBlock());
 }
 
 /*
@@ -178,7 +179,7 @@ pgstat_flush_io(bool nowait)
  * acquired. Otherwise, return false.
  */
 bool
-pgstat_io_flush_cb(bool nowait)
+pgstat_io_flush_cb(bool nowait, bool xact_boundary)
 {
 	LWLock	   *bktype_lock;
 	PgStat_BktypeIO *bktype_shstats;
