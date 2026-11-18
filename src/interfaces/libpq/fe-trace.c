@@ -101,33 +101,69 @@ pqTraceFormatTimestamp(char *timestr, size_t ts_len)
 }
 
 /*
- *   pqTraceOutputByte1: output a 1-char message to the log
+ * The functions below print one field of a message and advance the cursor
+ * past it.  'end' is the cursor position just past the end of the message.
+ * The counts and lengths inside a message come from the other side of the
+ * connection and can't be trusted, so they never read at or past 'end': if
+ * the message is too short for a field, they print as much of it as there is
+ * and move the cursor to end + 1.  That marks the message as truncated, so
+ * that they read nothing more from it, and the caller can report it.
  */
-static void
-pqTraceOutputByte1(FILE *pfdebug, const char *data, int *cursor)
+
+/*
+ *   pqTraceCheckLength: check that the next n bytes are within the message
+ *
+ * If they aren't, mark the message as truncated and return false.
+ */
+static bool
+pqTraceCheckLength(int n, int *cursor, int end)
 {
-	const char *v = data + *cursor;
+	if (*cursor <= end && n >= 0 && n <= end - *cursor)
+		return true;
+	*cursor = end + 1;
+	return false;
+}
+
+/*
+ *   pqTraceOutputByte1: output a 1-char message to the log
+ *
+ * Returns the byte, or \0 if the message is truncated.
+ */
+static char
+pqTraceOutputByte1(FILE *pfdebug, const char *data, int *cursor, int end)
+{
+	char		v;
+
+	if (!pqTraceCheckLength(1, cursor, end))
+		return '\0';
+	v = data[*cursor];
 
 	/*
 	 * Show non-printable data in hex format, including the terminating \0
 	 * that completes ErrorResponse and NoticeResponse messages.
 	 */
-	if (!isprint((unsigned char) *v))
-		fprintf(pfdebug, " \\x%02x", (unsigned char) *v);
+	if (!isprint((unsigned char) v))
+		fprintf(pfdebug, " \\x%02x", (unsigned char) v);
 	else
-		fprintf(pfdebug, " %c", *v);
+		fprintf(pfdebug, " %c", v);
 	*cursor += 1;
+
+	return v;
 }
 
 /*
  *   pqTraceOutputInt16: output a 2-byte integer message to the log
+ *
+ * Returns the integer, or 0 if the message is truncated.
  */
 static int
-pqTraceOutputInt16(FILE *pfdebug, const char *data, int *cursor)
+pqTraceOutputInt16(FILE *pfdebug, const char *data, int *cursor, int end)
 {
 	uint16		tmp;
 	int			result;
 
+	if (!pqTraceCheckLength(2, cursor, end))
+		return 0;
 	memcpy(&tmp, data + *cursor, 2);
 	*cursor += 2;
 	result = (int) pg_ntoh16(tmp);
@@ -140,12 +176,16 @@ pqTraceOutputInt16(FILE *pfdebug, const char *data, int *cursor)
  *   pqTraceOutputInt32: output a 4-byte integer message to the log
  *
  * If 'suppress' is true, print a literal NNNN instead of the actual number.
+ * Returns the integer, or 0 if the message is truncated.
  */
 static int
-pqTraceOutputInt32(FILE *pfdebug, const char *data, int *cursor, bool suppress)
+pqTraceOutputInt32(FILE *pfdebug, const char *data, int *cursor, int end,
+				   bool suppress)
 {
 	int			result;
 
+	if (!pqTraceCheckLength(4, cursor, end))
+		return 0;
 	memcpy(&result, data + *cursor, 4);
 	*cursor += 4;
 	result = (int) pg_ntoh32(result);
@@ -163,25 +203,28 @@ pqTraceOutputInt32(FILE *pfdebug, const char *data, int *cursor, bool suppress)
  * If 'suppress' is true, print a literal "SSSS" instead of the actual string.
  */
 static void
-pqTraceOutputString(FILE *pfdebug, const char *data, int *cursor, bool suppress)
+pqTraceOutputString(FILE *pfdebug, const char *data, int *cursor, int end,
+					bool suppress)
 {
+	const char *v;
+	const char *nul;
 	int			len;
 
-	if (suppress)
-	{
-		fprintf(pfdebug, " \"SSSS\"");
-		*cursor += strlen(data + *cursor) + 1;
-	}
-	else
-	{
-		len = fprintf(pfdebug, " \"%s\"", data + *cursor);
+	/* We need at least the terminating \0 */
+	if (!pqTraceCheckLength(1, cursor, end))
+		return;
+	v = data + *cursor;
+	nul = memchr(v, '\0', end - *cursor);
+	len = nul ? nul - v : end - *cursor;
 
-		/*
-		 * This is a null-terminated string. So add 1 after subtracting 3
-		 * which is the double quotes and space length from len.
-		 */
-		*cursor += (len - 3 + 1);
-	}
+	if (suppress)
+		fprintf(pfdebug, " \"SSSS\"");
+	else
+		fprintf(pfdebug, " \"%.*s\"", len, v);
+
+	/* An unterminated string means the message is truncated */
+	if (pqTraceCheckLength(len + 1, cursor, end))
+		*cursor += len + 1;
 }
 
 /*
@@ -190,22 +233,32 @@ pqTraceOutputString(FILE *pfdebug, const char *data, int *cursor, bool suppress)
  * If 'suppress' is true, print a literal 'BBBB' instead of the actual bytes.
  */
 static void
-pqTraceOutputNchar(FILE *pfdebug, int len, const char *data, int *cursor, bool suppress)
+pqTraceOutputNchar(FILE *pfdebug, int len, const char *data, int *cursor,
+				   int end, bool suppress)
 {
 	int			i,
+				n,				/* number of bytes to print */
 				next;			/* first char not yet printed */
-	const char *v = data + *cursor;
+	const char *v;
+
+	if (!pqTraceCheckLength(0, cursor, end))
+		return;
+	v = data + *cursor;
 
 	if (suppress)
 	{
 		fprintf(pfdebug, " 'BBBB'");
-		*cursor += len;
+		if (pqTraceCheckLength(len, cursor, end))
+			*cursor += len;
 		return;
 	}
 
+	/* If the message is shorter than that, print what there is of it */
+	n = Max(Min(len, end - *cursor), 0);
+
 	fprintf(pfdebug, " \'");
 
-	for (next = i = 0; i < len; ++i)
+	for (next = i = 0; i < n; ++i)
 	{
 		if (isprint((unsigned char) v[i]))
 			continue;
@@ -216,11 +269,12 @@ pqTraceOutputNchar(FILE *pfdebug, int len, const char *data, int *cursor, bool s
 			next = i + 1;
 		}
 	}
-	if (next < len)
-		fwrite(v + next, 1, len - next, pfdebug);
+	if (next < n)
+		fwrite(v + next, 1, n - next, pfdebug);
 
 	fprintf(pfdebug, "\'");
-	*cursor += len;
+	if (pqTraceCheckLength(len, cursor, end))
+		*cursor += len;
 }
 
 /*
@@ -228,97 +282,98 @@ pqTraceOutputNchar(FILE *pfdebug, int len, const char *data, int *cursor, bool s
  */
 
 static void
-pqTraceOutput_NotificationResponse(FILE *f, const char *message, int *cursor, bool regress)
+pqTraceOutput_NotificationResponse(FILE *f, const char *message, int *cursor, int end, bool regress)
 {
 	fprintf(f, "NotificationResponse\t");
-	pqTraceOutputInt32(f, message, cursor, regress);
-	pqTraceOutputString(f, message, cursor, false);
-	pqTraceOutputString(f, message, cursor, false);
+	pqTraceOutputInt32(f, message, cursor, end, regress);
+	pqTraceOutputString(f, message, cursor, end, false);
+	pqTraceOutputString(f, message, cursor, end, false);
 }
 
 static void
-pqTraceOutput_Bind(FILE *f, const char *message, int *cursor)
+pqTraceOutput_Bind(FILE *f, const char *message, int *cursor, int end)
 {
 	int			nparams;
 
 	fprintf(f, "Bind\t");
-	pqTraceOutputString(f, message, cursor, false);
-	pqTraceOutputString(f, message, cursor, false);
-	nparams = pqTraceOutputInt16(f, message, cursor);
+	pqTraceOutputString(f, message, cursor, end, false);
+	pqTraceOutputString(f, message, cursor, end, false);
+	nparams = pqTraceOutputInt16(f, message, cursor, end);
 
 	for (int i = 0; i < nparams; i++)
-		pqTraceOutputInt16(f, message, cursor);
+		pqTraceOutputInt16(f, message, cursor, end);
 
-	nparams = pqTraceOutputInt16(f, message, cursor);
+	nparams = pqTraceOutputInt16(f, message, cursor, end);
 
 	for (int i = 0; i < nparams; i++)
 	{
 		int			nbytes;
 
-		nbytes = pqTraceOutputInt32(f, message, cursor, false);
+		nbytes = pqTraceOutputInt32(f, message, cursor, end, false);
 		if (nbytes == -1)
 			continue;
-		pqTraceOutputNchar(f, nbytes, message, cursor, false);
+		pqTraceOutputNchar(f, nbytes, message, cursor, end, false);
 	}
 
-	nparams = pqTraceOutputInt16(f, message, cursor);
+	nparams = pqTraceOutputInt16(f, message, cursor, end);
 	for (int i = 0; i < nparams; i++)
-		pqTraceOutputInt16(f, message, cursor);
+		pqTraceOutputInt16(f, message, cursor, end);
 }
 
 static void
-pqTraceOutput_Close(FILE *f, const char *message, int *cursor)
+pqTraceOutput_Close(FILE *f, const char *message, int *cursor, int end)
 {
 	fprintf(f, "Close\t");
-	pqTraceOutputByte1(f, message, cursor);
-	pqTraceOutputString(f, message, cursor, false);
+	pqTraceOutputByte1(f, message, cursor, end);
+	pqTraceOutputString(f, message, cursor, end, false);
 }
 
 static void
-pqTraceOutput_CommandComplete(FILE *f, const char *message, int *cursor)
+pqTraceOutput_CommandComplete(FILE *f, const char *message, int *cursor, int end)
 {
 	fprintf(f, "CommandComplete\t");
-	pqTraceOutputString(f, message, cursor, false);
+	pqTraceOutputString(f, message, cursor, end, false);
 }
 
 static void
-pqTraceOutput_CopyData(FILE *f, const char *message, int *cursor, int length,
+pqTraceOutput_CopyData(FILE *f, const char *message, int *cursor, int end,
 					   bool suppress)
 {
 	fprintf(f, "CopyData\t");
-	pqTraceOutputNchar(f, length - *cursor + 1, message, cursor, suppress);
+	pqTraceOutputNchar(f, end - *cursor, message, cursor, end, suppress);
 }
 
 static void
-pqTraceOutput_DataRow(FILE *f, const char *message, int *cursor)
+pqTraceOutput_DataRow(FILE *f, const char *message, int *cursor, int end)
 {
 	int			nfields;
 	int			len;
 	int			i;
 
 	fprintf(f, "DataRow\t");
-	nfields = pqTraceOutputInt16(f, message, cursor);
+	nfields = pqTraceOutputInt16(f, message, cursor, end);
 	for (i = 0; i < nfields; i++)
 	{
-		len = pqTraceOutputInt32(f, message, cursor, false);
-		if (len == -1)
+		len = pqTraceOutputInt32(f, message, cursor, end, false);
+		/* libpq takes any negative length as NULL */
+		if (len < 0)
 			continue;
-		pqTraceOutputNchar(f, len, message, cursor, false);
+		pqTraceOutputNchar(f, len, message, cursor, end, false);
 	}
 }
 
 static void
-pqTraceOutput_Describe(FILE *f, const char *message, int *cursor)
+pqTraceOutput_Describe(FILE *f, const char *message, int *cursor, int end)
 {
 	fprintf(f, "Describe\t");
-	pqTraceOutputByte1(f, message, cursor);
-	pqTraceOutputString(f, message, cursor, false);
+	pqTraceOutputByte1(f, message, cursor, end);
+	pqTraceOutputString(f, message, cursor, end, false);
 }
 
 /* shared code NoticeResponse / ErrorResponse */
 static void
 pqTraceOutputNR(FILE *f, const char *type, const char *message, int *cursor,
-				bool regress)
+				int end, bool regress)
 {
 	fprintf(f, "%s\t", type);
 	for (;;)
@@ -326,167 +381,168 @@ pqTraceOutputNR(FILE *f, const char *type, const char *message, int *cursor,
 		char		field;
 		bool		suppress;
 
-		pqTraceOutputByte1(f, message, cursor);
-		field = message[*cursor - 1];
+		field = pqTraceOutputByte1(f, message, cursor, end);
 		if (field == '\0')
 			break;
 
 		suppress = regress && (field == 'L' || field == 'F' || field == 'R');
-		pqTraceOutputString(f, message, cursor, suppress);
+		pqTraceOutputString(f, message, cursor, end, suppress);
 	}
 }
 
 static void
-pqTraceOutput_ErrorResponse(FILE *f, const char *message, int *cursor, bool regress)
+pqTraceOutput_ErrorResponse(FILE *f, const char *message, int *cursor, int end, bool regress)
 {
-	pqTraceOutputNR(f, "ErrorResponse", message, cursor, regress);
+	pqTraceOutputNR(f, "ErrorResponse", message, cursor, end, regress);
 }
 
 static void
-pqTraceOutput_NoticeResponse(FILE *f, const char *message, int *cursor, bool regress)
+pqTraceOutput_NoticeResponse(FILE *f, const char *message, int *cursor, int end, bool regress)
 {
-	pqTraceOutputNR(f, "NoticeResponse", message, cursor, regress);
+	pqTraceOutputNR(f, "NoticeResponse", message, cursor, end, regress);
 }
 
 static void
-pqTraceOutput_Execute(FILE *f, const char *message, int *cursor, bool regress)
+pqTraceOutput_Execute(FILE *f, const char *message, int *cursor, int end, bool regress)
 {
 	fprintf(f, "Execute\t");
-	pqTraceOutputString(f, message, cursor, false);
-	pqTraceOutputInt32(f, message, cursor, false);
+	pqTraceOutputString(f, message, cursor, end, false);
+	pqTraceOutputInt32(f, message, cursor, end, false);
 }
 
 static void
-pqTraceOutput_CopyFail(FILE *f, const char *message, int *cursor)
+pqTraceOutput_CopyFail(FILE *f, const char *message, int *cursor, int end)
 {
 	fprintf(f, "CopyFail\t");
-	pqTraceOutputString(f, message, cursor, false);
+	pqTraceOutputString(f, message, cursor, end, false);
 }
 
 static void
 pqTraceOutput_GSSResponse(FILE *f, const char *message, int *cursor,
-						  int length, bool regress)
+						  int end, bool regress)
 {
 	fprintf(f, "GSSResponse\t");
-	pqTraceOutputNchar(f, length - *cursor + 1, message, cursor, regress);
+	pqTraceOutputNchar(f, end - *cursor, message, cursor, end, regress);
 }
 
 static void
-pqTraceOutput_PasswordMessage(FILE *f, const char *message, int *cursor)
+pqTraceOutput_PasswordMessage(FILE *f, const char *message, int *cursor, int end)
 {
 	fprintf(f, "PasswordMessage\t");
-	pqTraceOutputString(f, message, cursor, false);
+	pqTraceOutputString(f, message, cursor, end, false);
 }
 
 static void
-pqTraceOutput_SASLInitialResponse(FILE *f, const char *message, int *cursor,
+pqTraceOutput_SASLInitialResponse(FILE *f, const char *message, int *cursor, int end,
 								  bool regress)
 {
 	int			initialResponse;
 
 	fprintf(f, "SASLInitialResponse\t");
-	pqTraceOutputString(f, message, cursor, false);
-	initialResponse = pqTraceOutputInt32(f, message, cursor, false);
+	pqTraceOutputString(f, message, cursor, end, false);
+	initialResponse = pqTraceOutputInt32(f, message, cursor, end, false);
 	if (initialResponse != -1)
-		pqTraceOutputNchar(f, initialResponse, message, cursor, regress);
+		pqTraceOutputNchar(f, initialResponse, message, cursor, end, regress);
 }
 
 static void
 pqTraceOutput_SASLResponse(FILE *f, const char *message, int *cursor,
-						   int length, bool regress)
+						   int end, bool regress)
 {
 	fprintf(f, "SASLResponse\t");
-	pqTraceOutputNchar(f, length - *cursor + 1, message, cursor, regress);
+	pqTraceOutputNchar(f, end - *cursor, message, cursor, end, regress);
 }
 
 static void
-pqTraceOutput_FunctionCall(FILE *f, const char *message, int *cursor, bool regress)
+pqTraceOutput_FunctionCall(FILE *f, const char *message, int *cursor, int end, bool regress)
 {
 	int			nfields;
 	int			nbytes;
 
 	fprintf(f, "FunctionCall\t");
-	pqTraceOutputInt32(f, message, cursor, regress);
-	nfields = pqTraceOutputInt16(f, message, cursor);
+	pqTraceOutputInt32(f, message, cursor, end, regress);
+	nfields = pqTraceOutputInt16(f, message, cursor, end);
 
 	for (int i = 0; i < nfields; i++)
-		pqTraceOutputInt16(f, message, cursor);
+		pqTraceOutputInt16(f, message, cursor, end);
 
-	nfields = pqTraceOutputInt16(f, message, cursor);
+	nfields = pqTraceOutputInt16(f, message, cursor, end);
 
 	for (int i = 0; i < nfields; i++)
 	{
-		nbytes = pqTraceOutputInt32(f, message, cursor, false);
+		nbytes = pqTraceOutputInt32(f, message, cursor, end, false);
 		if (nbytes == -1)
 			continue;
-		pqTraceOutputNchar(f, nbytes, message, cursor, false);
+		pqTraceOutputNchar(f, nbytes, message, cursor, end, false);
 	}
 
-	pqTraceOutputInt16(f, message, cursor);
+	pqTraceOutputInt16(f, message, cursor, end);
 }
 
 static void
-pqTraceOutput_CopyInResponse(FILE *f, const char *message, int *cursor)
+pqTraceOutput_CopyInResponse(FILE *f, const char *message, int *cursor, int end)
 {
 	int			nfields;
 
 	fprintf(f, "CopyInResponse\t");
-	pqTraceOutputByte1(f, message, cursor);
-	nfields = pqTraceOutputInt16(f, message, cursor);
+	pqTraceOutputByte1(f, message, cursor, end);
+	nfields = pqTraceOutputInt16(f, message, cursor, end);
 
 	for (int i = 0; i < nfields; i++)
-		pqTraceOutputInt16(f, message, cursor);
+		pqTraceOutputInt16(f, message, cursor, end);
 }
 
 static void
-pqTraceOutput_CopyOutResponse(FILE *f, const char *message, int *cursor)
+pqTraceOutput_CopyOutResponse(FILE *f, const char *message, int *cursor, int end)
 {
 	int			nfields;
 
 	fprintf(f, "CopyOutResponse\t");
-	pqTraceOutputByte1(f, message, cursor);
-	nfields = pqTraceOutputInt16(f, message, cursor);
+	pqTraceOutputByte1(f, message, cursor, end);
+	nfields = pqTraceOutputInt16(f, message, cursor, end);
 
 	for (int i = 0; i < nfields; i++)
-		pqTraceOutputInt16(f, message, cursor);
+		pqTraceOutputInt16(f, message, cursor, end);
 }
 
 static void
-pqTraceOutput_BackendKeyData(FILE *f, const char *message, int *cursor, int length,
+pqTraceOutput_BackendKeyData(FILE *f, const char *message, int *cursor, int end,
 							 bool regress)
 {
 	fprintf(f, "BackendKeyData\t");
-	pqTraceOutputInt32(f, message, cursor, regress);
-	pqTraceOutputNchar(f, length - *cursor + 1, message, cursor, regress);
+	pqTraceOutputInt32(f, message, cursor, end, regress);
+	pqTraceOutputNchar(f, end - *cursor, message, cursor, end, regress);
 }
 
 static void
-pqTraceOutput_Parse(FILE *f, const char *message, int *cursor, bool regress)
+pqTraceOutput_Parse(FILE *f, const char *message, int *cursor, int end, bool regress)
 {
 	int			nparams;
 
 	fprintf(f, "Parse\t");
-	pqTraceOutputString(f, message, cursor, false);
-	pqTraceOutputString(f, message, cursor, false);
-	nparams = pqTraceOutputInt16(f, message, cursor);
+	pqTraceOutputString(f, message, cursor, end, false);
+	pqTraceOutputString(f, message, cursor, end, false);
+	nparams = pqTraceOutputInt16(f, message, cursor, end);
 
 	for (int i = 0; i < nparams; i++)
-		pqTraceOutputInt32(f, message, cursor, regress);
+		pqTraceOutputInt32(f, message, cursor, end, regress);
 }
 
 static void
-pqTraceOutput_Query(FILE *f, const char *message, int *cursor)
+pqTraceOutput_Query(FILE *f, const char *message, int *cursor, int end)
 {
 	fprintf(f, "Query\t");
-	pqTraceOutputString(f, message, cursor, false);
+	pqTraceOutputString(f, message, cursor, end, false);
 }
 
 static void
 pqTraceOutput_Authentication(FILE *f, const char *message, int *cursor,
-							 int length, bool suppress)
+							 int end, bool suppress)
 {
 	int			authType = 0;
 
+	if (!pqTraceCheckLength(4, cursor, end))
+		return;
 	memcpy(&authType, message + *cursor, 4);
 	authType = (int) pg_ntoh32(authType);
 	*cursor += 4;
@@ -509,7 +565,7 @@ pqTraceOutput_Authentication(FILE *f, const char *message, int *cursor,
 			break;
 		case AUTH_REQ_GSS_CONT:
 			fprintf(f, "AuthenticationGSSContinue\t");
-			pqTraceOutputNchar(f, length - *cursor + 1, message, cursor,
+			pqTraceOutputNchar(f, end - *cursor, message, cursor, end,
 							   suppress);
 			break;
 		case AUTH_REQ_SSPI:
@@ -517,18 +573,18 @@ pqTraceOutput_Authentication(FILE *f, const char *message, int *cursor,
 			break;
 		case AUTH_REQ_SASL:
 			fprintf(f, "AuthenticationSASL\t");
-			while (message[*cursor] != '\0')
-				pqTraceOutputString(f, message, cursor, false);
-			pqTraceOutputString(f, message, cursor, false);
+			while (*cursor < end && message[*cursor] != '\0')
+				pqTraceOutputString(f, message, cursor, end, false);
+			pqTraceOutputString(f, message, cursor, end, false);
 			break;
 		case AUTH_REQ_SASL_CONT:
 			fprintf(f, "AuthenticationSASLContinue\t");
-			pqTraceOutputNchar(f, length - *cursor + 1, message, cursor,
+			pqTraceOutputNchar(f, end - *cursor, message, cursor, end,
 							   suppress);
 			break;
 		case AUTH_REQ_SASL_FIN:
 			fprintf(f, "AuthenticationSASLFinal\t");
-			pqTraceOutputNchar(f, length - *cursor + 1, message, cursor,
+			pqTraceOutputNchar(f, end - *cursor, message, cursor, end,
 							   suppress);
 			break;
 		default:
@@ -537,95 +593,104 @@ pqTraceOutput_Authentication(FILE *f, const char *message, int *cursor,
 }
 
 static void
-pqTraceOutput_ParameterStatus(FILE *f, const char *message, int *cursor)
+pqTraceOutput_ParameterStatus(FILE *f, const char *message, int *cursor, int end)
 {
 	fprintf(f, "ParameterStatus\t");
-	pqTraceOutputString(f, message, cursor, false);
-	pqTraceOutputString(f, message, cursor, false);
+	pqTraceOutputString(f, message, cursor, end, false);
+	pqTraceOutputString(f, message, cursor, end, false);
 }
 
 static void
-pqTraceOutput_ParameterDescription(FILE *f, const char *message, int *cursor, bool regress)
+pqTraceOutput_ParameterDescription(FILE *f, const char *message, int *cursor, int end, bool regress)
 {
 	int			nfields;
 
 	fprintf(f, "ParameterDescription\t");
-	nfields = pqTraceOutputInt16(f, message, cursor);
+	nfields = pqTraceOutputInt16(f, message, cursor, end);
 
 	for (int i = 0; i < nfields; i++)
-		pqTraceOutputInt32(f, message, cursor, regress);
+		pqTraceOutputInt32(f, message, cursor, end, regress);
 }
 
 static void
-pqTraceOutput_RowDescription(FILE *f, const char *message, int *cursor, bool regress)
+pqTraceOutput_RowDescription(FILE *f, const char *message, int *cursor, int end, bool regress)
 {
 	int			nfields;
 
 	fprintf(f, "RowDescription\t");
-	nfields = pqTraceOutputInt16(f, message, cursor);
+	nfields = pqTraceOutputInt16(f, message, cursor, end);
 
 	for (int i = 0; i < nfields; i++)
 	{
-		pqTraceOutputString(f, message, cursor, false);
-		pqTraceOutputInt32(f, message, cursor, regress);
-		pqTraceOutputInt16(f, message, cursor);
-		pqTraceOutputInt32(f, message, cursor, regress);
-		pqTraceOutputInt16(f, message, cursor);
-		pqTraceOutputInt32(f, message, cursor, false);
-		pqTraceOutputInt16(f, message, cursor);
+		pqTraceOutputString(f, message, cursor, end, false);
+		pqTraceOutputInt32(f, message, cursor, end, regress);
+		pqTraceOutputInt16(f, message, cursor, end);
+		pqTraceOutputInt32(f, message, cursor, end, regress);
+		pqTraceOutputInt16(f, message, cursor, end);
+		pqTraceOutputInt32(f, message, cursor, end, false);
+		pqTraceOutputInt16(f, message, cursor, end);
 	}
 }
 
 static void
-pqTraceOutput_NegotiateProtocolVersion(FILE *f, const char *message, int *cursor)
+pqTraceOutput_NegotiateProtocolVersion(FILE *f, const char *message, int *cursor, int end)
 {
 	int			nparams;
 
 	fprintf(f, "NegotiateProtocolVersion\t");
-	pqTraceOutputInt32(f, message, cursor, false);
-	nparams = pqTraceOutputInt32(f, message, cursor, false);
-	for (int i = 0; i < nparams; i++)
+	pqTraceOutputInt32(f, message, cursor, end, false);
+	nparams = pqTraceOutputInt32(f, message, cursor, end, false);
+
+	/* The count is 32 bits wide, so stop once the message is truncated */
+	for (int i = 0; i < nparams && *cursor <= end; i++)
 	{
-		pqTraceOutputString(f, message, cursor, false);
+		pqTraceOutputString(f, message, cursor, end, false);
 	}
 }
 
 static void
-pqTraceOutput_FunctionCallResponse(FILE *f, const char *message, int *cursor)
+pqTraceOutput_FunctionCallResponse(FILE *f, const char *message, int *cursor, int end)
 {
 	int			len;
 
 	fprintf(f, "FunctionCallResponse\t");
-	len = pqTraceOutputInt32(f, message, cursor, false);
+	len = pqTraceOutputInt32(f, message, cursor, end, false);
 	if (len != -1)
-		pqTraceOutputNchar(f, len, message, cursor, false);
+		pqTraceOutputNchar(f, len, message, cursor, end, false);
 }
 
 static void
-pqTraceOutput_CopyBothResponse(FILE *f, const char *message, int *cursor, int length)
+pqTraceOutput_CopyBothResponse(FILE *f, const char *message, int *cursor, int end)
 {
-	fprintf(f, "CopyBothResponse\t");
-	pqTraceOutputByte1(f, message, cursor);
+	int			nfields;
 
-	while (length > *cursor)
-		pqTraceOutputInt16(f, message, cursor);
+	fprintf(f, "CopyBothResponse\t");
+	pqTraceOutputByte1(f, message, cursor, end);
+	nfields = pqTraceOutputInt16(f, message, cursor, end);
+
+	for (int i = 0; i < nfields; i++)
+		pqTraceOutputInt16(f, message, cursor, end);
 }
 
 static void
-pqTraceOutput_ReadyForQuery(FILE *f, const char *message, int *cursor)
+pqTraceOutput_ReadyForQuery(FILE *f, const char *message, int *cursor, int end)
 {
 	fprintf(f, "ReadyForQuery\t");
-	pqTraceOutputByte1(f, message, cursor);
+	pqTraceOutputByte1(f, message, cursor, end);
 }
 
 /*
  * Print the given message to the trace output stream.
+ *
+ * The caller must have checked that the whole message, as long as its length
+ * word says, is in the buffer.
  */
 void
 pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 {
 	char		id;
 	int			length;
+	int			end;
 	char	   *prefix = toServer ? "F" : "B";
 	int			logCursor = 0;
 	bool		regress;
@@ -644,6 +709,10 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 	memcpy(&length, message + logCursor, 4);
 	length = (int) pg_ntoh32(length);
 	logCursor += 4;
+
+	/* The length doesn't count the type byte, but the cursor does */
+	Assert(length >= 4);
+	end = length + 1;
 
 	/*
 	 * In regress mode, suppress the length of ErrorResponse and
@@ -671,10 +740,10 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			/* No message content */
 			break;
 		case PqMsg_NotificationResponse:
-			pqTraceOutput_NotificationResponse(conn->Pfdebug, message, &logCursor, regress);
+			pqTraceOutput_NotificationResponse(conn->Pfdebug, message, &logCursor, end, regress);
 			break;
 		case PqMsg_Bind:
-			pqTraceOutput_Bind(conn->Pfdebug, message, &logCursor);
+			pqTraceOutput_Bind(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_CopyDone:
 			fprintf(conn->Pfdebug, "CopyDone");
@@ -684,32 +753,32 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			/* Close(F) and CommandComplete(B) use the same identifier. */
 			Assert(PqMsg_Close == PqMsg_CommandComplete);
 			if (toServer)
-				pqTraceOutput_Close(conn->Pfdebug, message, &logCursor);
+				pqTraceOutput_Close(conn->Pfdebug, message, &logCursor, end);
 			else
-				pqTraceOutput_CommandComplete(conn->Pfdebug, message, &logCursor);
+				pqTraceOutput_CommandComplete(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_CopyData:
 			pqTraceOutput_CopyData(conn->Pfdebug, message, &logCursor,
-								   length, regress);
+								   end, regress);
 			break;
 		case PqMsg_Describe:
 			/* Describe(F) and DataRow(B) use the same identifier. */
 			Assert(PqMsg_Describe == PqMsg_DataRow);
 			if (toServer)
-				pqTraceOutput_Describe(conn->Pfdebug, message, &logCursor);
+				pqTraceOutput_Describe(conn->Pfdebug, message, &logCursor, end);
 			else
-				pqTraceOutput_DataRow(conn->Pfdebug, message, &logCursor);
+				pqTraceOutput_DataRow(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_Execute:
 			/* Execute(F) and ErrorResponse(B) use the same identifier. */
 			Assert(PqMsg_Execute == PqMsg_ErrorResponse);
 			if (toServer)
-				pqTraceOutput_Execute(conn->Pfdebug, message, &logCursor, regress);
+				pqTraceOutput_Execute(conn->Pfdebug, message, &logCursor, end, regress);
 			else
-				pqTraceOutput_ErrorResponse(conn->Pfdebug, message, &logCursor, regress);
+				pqTraceOutput_ErrorResponse(conn->Pfdebug, message, &logCursor, end, regress);
 			break;
 		case PqMsg_CopyFail:
-			pqTraceOutput_CopyFail(conn->Pfdebug, message, &logCursor);
+			pqTraceOutput_CopyFail(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_GSSResponse:
 			Assert(PqMsg_GSSResponse == PqMsg_PasswordMessage);
@@ -724,19 +793,19 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			{
 				case AUTH_RESPONSE_GSS:
 					pqTraceOutput_GSSResponse(conn->Pfdebug, message,
-											  &logCursor, length, regress);
+											  &logCursor, end, regress);
 					break;
 				case AUTH_RESPONSE_PASSWORD:
 					pqTraceOutput_PasswordMessage(conn->Pfdebug, message,
-												  &logCursor);
+												  &logCursor, end);
 					break;
 				case AUTH_RESPONSE_SASL_INITIAL:
 					pqTraceOutput_SASLInitialResponse(conn->Pfdebug, message,
-													  &logCursor, regress);
+													  &logCursor, end, regress);
 					break;
 				case AUTH_RESPONSE_SASL:
 					pqTraceOutput_SASLResponse(conn->Pfdebug, message,
-											   &logCursor, length, regress);
+											   &logCursor, end, regress);
 					break;
 				default:
 					fprintf(conn->Pfdebug, "UnknownAuthenticationResponse");
@@ -745,10 +814,10 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			conn->current_auth_response = '\0';
 			break;
 		case PqMsg_FunctionCall:
-			pqTraceOutput_FunctionCall(conn->Pfdebug, message, &logCursor, regress);
+			pqTraceOutput_FunctionCall(conn->Pfdebug, message, &logCursor, end, regress);
 			break;
 		case PqMsg_CopyInResponse:
-			pqTraceOutput_CopyInResponse(conn->Pfdebug, message, &logCursor);
+			pqTraceOutput_CopyInResponse(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_Flush:
 			/* Flush(F) and CopyOutResponse(B) use the same identifier */
@@ -756,7 +825,7 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			if (toServer)
 				fprintf(conn->Pfdebug, "Flush");	/* no message content */
 			else
-				pqTraceOutput_CopyOutResponse(conn->Pfdebug, message, &logCursor);
+				pqTraceOutput_CopyOutResponse(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_EmptyQueryResponse:
 			fprintf(conn->Pfdebug, "EmptyQueryResponse");
@@ -764,24 +833,24 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			break;
 		case PqMsg_BackendKeyData:
 			pqTraceOutput_BackendKeyData(conn->Pfdebug, message, &logCursor,
-										 length, regress);
+										 end, regress);
 			break;
 		case PqMsg_NoData:
 			fprintf(conn->Pfdebug, "NoData");
 			/* No message content */
 			break;
 		case PqMsg_NoticeResponse:
-			pqTraceOutput_NoticeResponse(conn->Pfdebug, message, &logCursor, regress);
+			pqTraceOutput_NoticeResponse(conn->Pfdebug, message, &logCursor, end, regress);
 			break;
 		case PqMsg_Parse:
-			pqTraceOutput_Parse(conn->Pfdebug, message, &logCursor, regress);
+			pqTraceOutput_Parse(conn->Pfdebug, message, &logCursor, end, regress);
 			break;
 		case PqMsg_Query:
-			pqTraceOutput_Query(conn->Pfdebug, message, &logCursor);
+			pqTraceOutput_Query(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_AuthenticationRequest:
 			pqTraceOutput_Authentication(conn->Pfdebug, message, &logCursor,
-										 length, regress);
+										 end, regress);
 			break;
 		case PqMsg_PortalSuspended:
 			fprintf(conn->Pfdebug, "PortalSuspended");
@@ -793,29 +862,29 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 			if (toServer)
 				fprintf(conn->Pfdebug, "Sync"); /* no message content */
 			else
-				pqTraceOutput_ParameterStatus(conn->Pfdebug, message, &logCursor);
+				pqTraceOutput_ParameterStatus(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_ParameterDescription:
-			pqTraceOutput_ParameterDescription(conn->Pfdebug, message, &logCursor, regress);
+			pqTraceOutput_ParameterDescription(conn->Pfdebug, message, &logCursor, end, regress);
 			break;
 		case PqMsg_RowDescription:
-			pqTraceOutput_RowDescription(conn->Pfdebug, message, &logCursor, regress);
+			pqTraceOutput_RowDescription(conn->Pfdebug, message, &logCursor, end, regress);
 			break;
 		case PqMsg_NegotiateProtocolVersion:
-			pqTraceOutput_NegotiateProtocolVersion(conn->Pfdebug, message, &logCursor);
+			pqTraceOutput_NegotiateProtocolVersion(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_FunctionCallResponse:
-			pqTraceOutput_FunctionCallResponse(conn->Pfdebug, message, &logCursor);
+			pqTraceOutput_FunctionCallResponse(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_CopyBothResponse:
-			pqTraceOutput_CopyBothResponse(conn->Pfdebug, message, &logCursor, length);
+			pqTraceOutput_CopyBothResponse(conn->Pfdebug, message, &logCursor, end);
 			break;
 		case PqMsg_Terminate:
 			fprintf(conn->Pfdebug, "Terminate");
 			/* No message content */
 			break;
 		case PqMsg_ReadyForQuery:
-			pqTraceOutput_ReadyForQuery(conn->Pfdebug, message, &logCursor);
+			pqTraceOutput_ReadyForQuery(conn->Pfdebug, message, &logCursor, end);
 			break;
 		default:
 			fprintf(conn->Pfdebug, "Unknown message: %02x", id);
@@ -827,9 +896,14 @@ pqTraceOutputMessage(PGconn *conn, const char *message, bool toServer)
 	/*
 	 * Verify the printing routine did it right.  Note that the one-byte
 	 * message identifier is not included in the length, but our cursor does
-	 * include it.
+	 * include it.  A cursor past the end means that the message's contents
+	 * didn't fit in its length, and printing stopped at the end.
 	 */
-	if (logCursor - 1 != length)
+	if (logCursor > end)
+		fprintf(conn->Pfdebug,
+				"mismatched message length: contents exceed length %d\n",
+				length);
+	else if (logCursor - 1 != length)
 		fprintf(conn->Pfdebug,
 				"mismatched message length: consumed %d, expected %d\n",
 				logCursor - 1, length);
@@ -875,34 +949,37 @@ pqTraceOutputNoTypeByteMessage(PGconn *conn, const char *message)
 	if (version == CANCEL_REQUEST_CODE && length >= 16)
 	{
 		fprintf(conn->Pfdebug, "CancelRequest\t");
-		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
-		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
-		pqTraceOutputInt32(conn->Pfdebug, message, &logCursor, regress);
+		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor, length);
+		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor, length);
+		pqTraceOutputInt32(conn->Pfdebug, message, &logCursor, length,
+						   regress);
 		pqTraceOutputNchar(conn->Pfdebug, length - logCursor, message,
-						   &logCursor, regress);
+						   &logCursor, length, regress);
 	}
 	else if (version == NEGOTIATE_SSL_CODE)
 	{
 		fprintf(conn->Pfdebug, "SSLRequest\t");
-		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
-		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
+		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor, length);
+		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor, length);
 	}
 	else if (version == NEGOTIATE_GSS_CODE)
 	{
 		fprintf(conn->Pfdebug, "GSSENCRequest\t");
-		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
-		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
+		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor, length);
+		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor, length);
 	}
 	else
 	{
 		fprintf(conn->Pfdebug, "StartupMessage\t");
-		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
-		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor);
-		while (message[logCursor] != '\0')
+		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor, length);
+		pqTraceOutputInt16(conn->Pfdebug, message, &logCursor, length);
+		while (logCursor < length && message[logCursor] != '\0')
 		{
 			/* XXX should we suppress anything in regress mode? */
-			pqTraceOutputString(conn->Pfdebug, message, &logCursor, false);
-			pqTraceOutputString(conn->Pfdebug, message, &logCursor, false);
+			pqTraceOutputString(conn->Pfdebug, message, &logCursor, length,
+								false);
+			pqTraceOutputString(conn->Pfdebug, message, &logCursor, length,
+								false);
 		}
 	}
 
