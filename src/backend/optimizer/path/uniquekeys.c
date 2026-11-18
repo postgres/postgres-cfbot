@@ -45,6 +45,8 @@
 static bool joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 										Bitmapset *known_ecs,
 										bool nulls_equal);
+static bool get_semijoin_rhs_relids(PlannerInfo *root, RelOptInfo *joinrel,
+									Relids *rhs_relids);
 static Bitmapset *get_left_join_ecs(PlannerInfo *root, RelOptInfo *joinrel);
 static Bitmapset *get_joined_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 								 Bitmapset *left_join_ecs);
@@ -82,6 +84,8 @@ static Bitmapset *get_own_eclass_indexes(PlannerInfo *root, RelOptInfo *rel);
 bool
 joinrel_supports_distinctness(PlannerInfo *root, RelOptInfo *joinrel)
 {
+	Relids		rhs_relids;
+
 	Assert(IS_JOIN_REL(joinrel));
 
 	/* A grouped join rel's rows are not combinations of base rel rows */
@@ -90,8 +94,17 @@ joinrel_supports_distinctness(PlannerInfo *root, RelOptInfo *joinrel)
 
 	build_base_rel_uniquekeys(root);
 
-	/* Every base rel in the join must have a UniqueKey */
-	return !bms_overlap(joinrel->relids, root->no_uniquekey_relids);
+	/* If every base rel in the join has a UniqueKey, we can go ahead */
+	if (!bms_overlap(joinrel->relids, root->no_uniquekey_relids))
+		return true;
+
+	/* Otherwise, those that don't must not need one */
+	if (!get_semijoin_rhs_relids(root, joinrel, &rhs_relids))
+		return false;
+
+	return bms_is_subset(bms_intersect(joinrel->relids,
+									   root->no_uniquekey_relids),
+						 rhs_relids);
 }
 
 /*
@@ -200,6 +213,11 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
  * the left-hand rels must still be fixed by other means: no EC has un-nulled
  * members on both sides of a left join.
  *
+ * A semijoin or antijoin emits each row of its left-hand side at most once,
+ * whatever its right-hand side holds.  So the relations on the right-hand
+ * side of such a join performed within the join relation need not be
+ * accounted for.  They are found by get_semijoin_rhs_relids.
+ *
  * The caller must have checked joinrel_supports_distinctness().
  */
 static bool
@@ -209,8 +227,12 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 	Bitmapset  *left_join_ecs;
 	Bitmapset  *joined_ecs = NULL;
 	Relids		full_join_relids = NULL;
+	Relids		rhs_relids;
 	Relids		remaining;
 	bool		found;
+
+	if (!get_semijoin_rhs_relids(root, joinrel, &rhs_relids))
+		return false;
 
 	left_join_ecs = get_left_join_ecs(root, joinrel);
 	known_ecs = bms_add_members(known_ecs, left_join_ecs);
@@ -239,8 +261,12 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 		}
 	}
 
-	/* The relids of outer joins are not relations to account for */
+	/*
+	 * The relids of outer joins are not relations to account for, and neither
+	 * are the right-hand relations of semijoins and antijoins.
+	 */
 	remaining = bms_difference(joinrel->relids, root->outer_join_rels);
+	remaining = bms_del_members(remaining, rhs_relids);
 
 	do
 	{
@@ -270,6 +296,46 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 	} while (found && remaining != NULL);
 
 	return remaining == NULL;
+}
+
+/*
+ * get_semijoin_rhs_relids
+ *		Find the relations that are on the right-hand side of a semijoin or
+ *		antijoin performed within the join relation.
+ *
+ * The relids are returned in *rhs_relids.  Returns false if the join
+ * relation is one that we cannot reason about: that is the case if it
+ * includes the right-hand side of a semijoin but only part of its left-hand
+ * side, which means the right-hand side has been unique-ified.
+ */
+static bool
+get_semijoin_rhs_relids(PlannerInfo *root, RelOptInfo *joinrel,
+						Relids *rhs_relids)
+{
+	*rhs_relids = NULL;
+
+	foreach_node(SpecialJoinInfo, sjinfo, root->join_info_list)
+	{
+		if (sjinfo->jointype != JOIN_SEMI && sjinfo->jointype != JOIN_ANTI)
+			continue;
+
+		/*
+		 * The join is of no concern if the join relation has nothing of its
+		 * right-hand side, or lies entirely within its right-hand side.
+		 */
+		if (!bms_overlap(sjinfo->syn_righthand, joinrel->relids) ||
+			bms_is_subset(joinrel->relids, sjinfo->syn_righthand))
+			continue;
+
+		/* Otherwise the whole join must be performed within the relation */
+		if (!bms_is_subset(sjinfo->syn_righthand, joinrel->relids) ||
+			!bms_is_subset(sjinfo->min_lefthand, joinrel->relids))
+			return false;
+
+		*rhs_relids = bms_add_members(*rhs_relids, sjinfo->syn_righthand);
+	}
+
+	return true;
 }
 
 /*
@@ -414,17 +480,10 @@ build_base_rel_uniquekeys(PlannerInfo *root)
 	if (root->outer_join_rels != NULL)
 		build_base_eclasses(root);
 
-	/*
-	 * We don't handle semijoins and antijoins.  Rather than checking for them
-	 * in each join relation, treat their right-hand relations as having no
-	 * UniqueKeys.  Also note the full joins, for use below.
-	 */
+	/* Note the full joins, for use below */
 	foreach_node(SpecialJoinInfo, sjinfo, root->join_info_list)
 	{
-		if (sjinfo->jointype == JOIN_SEMI || sjinfo->jointype == JOIN_ANTI)
-			no_uniquekey_relids = bms_add_members(no_uniquekey_relids,
-												  sjinfo->syn_righthand);
-		else if (sjinfo->jointype == JOIN_FULL)
+		if (sjinfo->jointype == JOIN_FULL)
 			full_join_relids = bms_add_member(full_join_relids,
 											  sjinfo->ojrelid);
 	}

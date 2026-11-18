@@ -1048,8 +1048,8 @@ so that a query that never needs them does not pay for them.
 UniqueKeys are used to detect unique inner sides of joins when the inner
 side is itself a join, and to skip DISTINCT and GROUP BY steps whose input
 is already distinct.  The following describes each of these in turn, and
-then how outer joins fit in.  For now only plain tables get UniqueKeys, and
-only joins that involve no semijoins or antijoins are handled.
+then how outer joins and semijoins fit in.  For now only plain tables get
+UniqueKeys.
 
 We do not keep UniqueKeys for join relations.  A join relation would
 typically have many of them, most of which would never be used.  And since
@@ -1173,6 +1173,15 @@ unmatched row of b whose b.v is NULL.  So the required EC must then have a
 column of the relation that cannot be NULL, due to a NOT NULL constraint or
 a strict restriction clause.  Such a column is NULL in the join's output
 only when the relation is null-extended, which tells the two cases apart.
+
+Semijoins and antijoins are simple: such a join emits each row of its
+left-hand side at most once, whatever its right-hand side holds.  So the
+relations on the right-hand side of a semijoin or antijoin performed within
+the join relation need not be shown to have only one possible row, nor do
+they need UniqueKeys at all.  The one case we do not try to handle is a
+join relation that includes the right-hand side of a semijoin but only part
+of its left-hand side, which can only be formed by making the right-hand
+side unique first.
 
 
 Order of processing for EquivalenceClasses and PathKeys

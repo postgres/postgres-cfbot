@@ -63,6 +63,23 @@ select * from uk_a a left join
 
 reset join_collapse_limit;
 
+-- the right-hand side of a semijoin or antijoin need not be unique
+explain (verbose, costs off)
+select * from uk_a a left join
+  (select * from uk_b b
+   where exists (select 1 from uk_c c where c.x = b.x)) s on a.x = s.id;
+
+explain (verbose, costs off)
+select * from uk_a a left join
+  (select * from uk_b b
+   where not exists (select 1 from uk_c c where c.x = b.x)) s on a.x = s.id;
+
+-- but its left-hand side must be
+explain (verbose, costs off)
+select * from uk_a a left join
+  (select * from uk_b b
+   where exists (select 1 from uk_c c where c.x = b.x)) s on a.x = s.x;
+
 reset enable_hashjoin;
 reset enable_mergejoin;
 
@@ -182,6 +199,19 @@ explain (costs off)
 select distinct n1.v, n2.v
 from (select * from uk_n where v > 0) n1 full join
   (select * from uk_n where v > 0) n2 on n1.w = n2.w;
+
+-- semijoins and antijoins
+explain (costs off)
+select distinct b.id from uk_b b
+where exists (select 1 from uk_c c where c.x = b.x);
+
+explain (costs off)
+select distinct b.id from uk_b b
+where not exists (select 1 from uk_c c where c.x = b.x);
+
+explain (costs off)
+select distinct b.x from uk_b b
+where exists (select 1 from uk_c c where c.x = b.x);
 
 -- GROUP BY without aggregates is handled likewise
 explain (costs off)

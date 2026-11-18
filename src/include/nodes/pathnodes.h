@@ -441,7 +441,7 @@ struct PlannerInfo
 	/* set true once the base relations' UniqueKeys have been built */
 	bool		uniquekeys_built;
 
-	/* base relations that keep a join relation from being proven distinct */
+	/* base relations that have no UniqueKeys */
 	Relids		no_uniquekey_relids;
 
 	/* list of "canonical" PathKeys */
