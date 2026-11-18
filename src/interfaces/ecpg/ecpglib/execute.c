@@ -1478,7 +1478,17 @@ ecpg_build_params(struct statement *stmt)
 		}
 		else if (stmt->statement_type == ECPGst_exec_with_exprlist)
 		{
-			if (binary_format)
+			if (tobeinserted == NULL)
+			{
+				/* A NULL value; insert the keyword NULL. */
+				tobeinserted = ecpg_strdup("NULL", stmt->lineno, NULL);
+				if (tobeinserted == NULL)
+				{
+					ecpg_free_params(stmt, false);
+					return false;
+				}
+			}
+			else if (binary_format)
 			{
 				char	   *p = convert_bytea_to_string(tobeinserted,
 														binary_length,
