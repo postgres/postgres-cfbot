@@ -422,6 +422,9 @@ _outBoolExpr(StringInfo str, const BoolExpr *node)
 		case NOT_EXPR:
 			opstr = "not";
 			break;
+		case IMPLIES_EXPR:
+			opstr = "implies";
+			break;
 	}
 	appendStringInfoString(str, " :boolop ");
 	outToken(str, opstr);
