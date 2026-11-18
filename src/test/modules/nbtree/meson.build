@@ -14,6 +14,12 @@ tests += {
       'nbtree_incomplete_splits',
     ],
   },
+  'tap': {
+    'tests': [
+      't/001_prefix.pl',
+      't/002_prefix_split.pl',
+    ],
+  },
   'isolation': {
     'specs': [
       'backwards-scan-concurrent-splits',

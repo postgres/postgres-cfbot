@@ -696,12 +696,23 @@ _bt_compare(Relation rel,
 	TupleDesc	itupdesc = RelationGetDescr(rel);
 	BTPageOpaque opaque = BTPageGetOpaque(page);
 	IndexTuple	itup;
+	BTItemBuf	prefixbuf;		/* decode workspace; must outlive itup's use */
 	ItemPointer heapTid;
 	ScanKey		scankey;
 	int			ncmpkey;
 	int			ntupatts;
 	int32		result;
 
+	/*
+	 * On a prefix-compressed leaf a data item is stored coded; compare
+	 * against its decoded form so the heap TID tiebreak below applies
+	 * unchanged.  prefixbuf is a function-scope stack local (not static, for
+	 * reentrancy) and must outlive every use of itup below, since on a coded
+	 * page itup points into it.
+	 */
+	itup = _bt_getitem(page, offnum, &prefixbuf);
+
+	/* Validate prefix members before assertions inspect their raw headers. */
 	Assert(_bt_check_natts(rel, key->heapkeyspace, page, offnum));
 	Assert(key->keysz <= IndexRelationGetNumberOfKeyAttributes(rel));
 	Assert(key->heapkeyspace || key->scantid == NULL);
@@ -713,7 +724,6 @@ _bt_compare(Relation rel,
 	if (!P_ISLEAF(opaque) && offnum == P_FIRSTDATAKEY(opaque))
 		return 1;
 
-	itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));
 	ntupatts = BTreeTupleGetNAtts(itup, rel);
 
 	/*

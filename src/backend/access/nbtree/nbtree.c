@@ -379,6 +379,7 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 	 * scan->xs_itupdesc whether we'll need it or not, since that's so cheap.
 	 */
 	so->currTuples = so->markTuples = NULL;
+	so->bigTuples = false;
 
 	scan->xs_itupdesc = RelationGetDescr(rel);
 
