@@ -3749,6 +3749,9 @@ deparseBoolExpr(BoolExpr *node, deparse_expr_cxt *context)
 			deparseExpr(linitial(node->args), context);
 			appendStringInfoChar(buf, ')');
 			return;
+		default:
+			elog(ERROR, "unrecognized boolop: %d", (int) node->boolop);
+			break;
 	}
 
 	appendStringInfoChar(buf, '(');

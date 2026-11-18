@@ -749,7 +749,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 	HANDLER HAVING HEADER_P HOLD HOUR_P
 
-	IDENTITY_P IF_P IGNORE_P ILIKE IMMEDIATE IMMUTABLE IMPLICIT_P IMPORT_P IN_P INCLUDE
+	IDENTITY_P IF_P IGNORE_P ILIKE IMMEDIATE IMMUTABLE IMPLICIT_P IMPLIES IMPORT_P IN_P INCLUDE
 	INCLUDING INCREMENT INDENT INDEX INDEXES INHERIT INHERITS INITIALLY INLINE_P
 	INNER_P INOUT INPUT_P INSENSITIVE INSERT INSTEAD INT_P INTEGER
 	INTERSECT INTERVAL INTO INVOKER IS ISNULL ISOLATION
@@ -844,6 +844,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 /* Precedence: lowest to highest */
 %left		UNION EXCEPT
 %left		INTERSECT
+%nonassoc	IMPLIES
 %left		OR
 %left		AND
 %right		NOT
@@ -15374,6 +15375,11 @@ a_expr:		c_expr									{ $$ = $1; }
 				{ $$ = makeAndExpr($1, $3, @2); }
 			| a_expr OR a_expr
 				{ $$ = makeOrExpr($1, $3, @2); }
+			| a_expr IMPLIES a_expr
+				{
+					$$ = (Node *) makeBoolExpr(IMPLIES_EXPR,
+											   list_make2($1, $3), @2);
+				}
 			| NOT a_expr
 				{ $$ = makeNotExpr($2, @1); }
 			| NOT_LA a_expr						%prec NOT
@@ -18190,6 +18196,7 @@ unreserved_keyword:
 			| IMMEDIATE
 			| IMMUTABLE
 			| IMPLICIT_P
+			| IMPLIES
 			| IMPORT_P
 			| INCLUDE
 			| INCLUDING
@@ -18782,6 +18789,7 @@ bare_label_keyword:
 			| IMMEDIATE
 			| IMMUTABLE
 			| IMPLICIT_P
+			| IMPLIES
 			| IMPORT_P
 			| IN_P
 			| INCLUDE
