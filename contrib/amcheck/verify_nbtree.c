@@ -131,6 +131,10 @@ typedef struct BtreeCheckState
 	bloom_filter *filter;
 	/* Debug counter */
 	int64		heaptuplespresent;
+
+	/* Decode workspaces for prefix-compressed leaf items */
+	BTItemBuf	itembuf;		/* current target item */
+	BTItemBuf	nextbuf;		/* any other item looked at meanwhile */
 } BtreeCheckState;
 
 /*
@@ -158,7 +162,7 @@ typedef struct BtreeLastVisibleEntry
 	OffsetNumber offset;		/* Offset on index block */
 	int			postingIndex;	/* Number in the posting list (-1 for
 								 * non-deduplicated tuples) */
-	ItemPointer tid;			/* Heap tid */
+	ItemPointerData tid;		/* Heap tid */
 } BtreeLastVisibleEntry;
 
 /*
@@ -230,6 +234,7 @@ static inline bool invariant_l_nontarget_offset(BtreeCheckState *state,
 												Page nontarget,
 												OffsetNumber upperbound);
 static Page palloc_btree_page(BtreeCheckState *state, BlockNumber blocknum);
+static void bt_prefix_page_check(BtreeCheckState *state, Page page, BlockNumber blocknum);
 static inline BTScanInsert bt_mkscankey_pivotsearch(Relation rel,
 													IndexTuple itup);
 static ItemId PageGetItemIdCareful(BtreeCheckState *state, BlockNumber block,
@@ -868,8 +873,8 @@ bt_report_duplicate(BtreeCheckState *state,
 			   *pnposting = "";
 
 	htid = psprintf("tid=(%u,%u)",
-					ItemPointerGetBlockNumberNoCheck(lVis->tid),
-					ItemPointerGetOffsetNumberNoCheck(lVis->tid));
+					ItemPointerGetBlockNumberNoCheck(&lVis->tid),
+					ItemPointerGetOffsetNumberNoCheck(&lVis->tid));
 	nhtid = psprintf("tid=(%u,%u)",
 					 ItemPointerGetBlockNumberNoCheck(nexttid),
 					 ItemPointerGetOffsetNumberNoCheck(nexttid));
@@ -916,7 +921,7 @@ bt_entry_unique_check(BtreeCheckState *state, IndexTuple itup,
 			if (heap_entry_is_visible(state, tid))
 			{
 				has_visible_entry = true;
-				if (ItemPointerIsValid(lVis->tid))
+				if (ItemPointerIsValid(&lVis->tid))
 				{
 					bt_report_duplicate(state,
 										lVis,
@@ -929,13 +934,13 @@ bt_entry_unique_check(BtreeCheckState *state, IndexTuple itup,
 				 * between the posting list entries of the first tuple on the
 				 * page after cross-page check.
 				 */
-				if (lVis->blkno != targetblock && ItemPointerIsValid(lVis->tid))
+				if (lVis->blkno != targetblock && ItemPointerIsValid(&lVis->tid))
 					return;
 
 				lVis->blkno = targetblock;
 				lVis->offset = offset;
 				lVis->postingIndex = i;
-				lVis->tid = tid;
+				lVis->tid = *tid;
 			}
 		}
 	}
@@ -951,7 +956,7 @@ bt_entry_unique_check(BtreeCheckState *state, IndexTuple itup,
 		if (heap_entry_is_visible(state, tid))
 		{
 			has_visible_entry = true;
-			if (ItemPointerIsValid(lVis->tid))
+			if (ItemPointerIsValid(&lVis->tid))
 			{
 				bt_report_duplicate(state,
 									lVis,
@@ -961,7 +966,7 @@ bt_entry_unique_check(BtreeCheckState *state, IndexTuple itup,
 
 			lVis->blkno = targetblock;
 			lVis->offset = offset;
-			lVis->tid = tid;
+			lVis->tid = *tid;
 			lVis->postingIndex = -1;
 		}
 	}
@@ -981,8 +986,8 @@ bt_entry_unique_check(BtreeCheckState *state, IndexTuple itup,
 						RelationGetRelationName(state->rel)),
 				 errdetail("It doesn't have visible heap tids and key is equal to the tid=(%u,%u)%s (points to heap tid=(%u,%u)).",
 						   lVis->blkno, lVis->offset, posting,
-						   ItemPointerGetBlockNumberNoCheck(lVis->tid),
-						   ItemPointerGetOffsetNumberNoCheck(lVis->tid)),
+						   ItemPointerGetBlockNumberNoCheck(&lVis->tid),
+						   ItemPointerGetOffsetNumberNoCheck(&lVis->tid)),
 				 errhint("VACUUM the table and repeat the check.")));
 	}
 }
@@ -1230,7 +1235,12 @@ bt_target_page_check(BtreeCheckState *state)
 	BTPageOpaque topaque;
 
 	/* Last visible entry info for checking indexes with unique constraint */
-	BtreeLastVisibleEntry lVis = {InvalidBlockNumber, InvalidOffsetNumber, -1, NULL};
+	BtreeLastVisibleEntry lVis;
+
+	lVis.blkno = InvalidBlockNumber;
+	lVis.offset = InvalidOffsetNumber;
+	lVis.postingIndex = -1;
+	ItemPointerSetInvalid(&lVis.tid);
 
 	topaque = BTPageGetOpaque(state->target);
 	max = PageGetMaxOffsetNumber(state->target);
@@ -1265,6 +1275,7 @@ bt_target_page_check(BtreeCheckState *state)
 										LSN_FORMAT_ARGS(state->targetlsn))));
 		}
 	}
+
 
 	/*
 	 * Loop over page items, starting from first non-highkey item, not high
@@ -1312,6 +1323,16 @@ bt_target_page_check(BtreeCheckState *state)
 										tupsize, ItemIdGetLength(itemid),
 										LSN_FORMAT_ARGS(state->targetlsn)),
 					 errhint("This could be a torn page problem.")));
+
+		/*
+		 * On a prefix-compressed leaf, check the decoded data item (the coded
+		 * form's size was just checked against lp_len).
+		 */
+		if (P_HASPREFIX(topaque))
+		{
+			itup = _bt_getitem(state->target, offset, &state->itembuf);
+			tupsize = IndexTupleSize(itup);
+		}
 
 		/* Check the number of index tuple attributes */
 		if (!_bt_check_natts(state->rel, state->heapkeyspace, state->target,
@@ -1606,7 +1627,8 @@ bt_target_page_check(BtreeCheckState *state)
 			itemid = PageGetItemIdCareful(state, state->targetblock,
 										  state->target,
 										  OffsetNumberNext(offset));
-			itup = (IndexTuple) PageGetItem(state->target, itemid);
+			itup = _bt_getitem(state->target, OffsetNumberNext(offset),
+							   &state->nextbuf);
 			tid = BTreeTupleGetPointsToTID(itup);
 			nhtid = psprintf("(%u,%u)",
 							 ItemPointerGetBlockNumberNoCheck(tid),
@@ -1634,7 +1656,7 @@ bt_target_page_check(BtreeCheckState *state)
 		 */
 		if (state->checkunique && state->indexinfo->ii_Unique &&
 			P_ISLEAF(topaque) && !skey->anynullkeys &&
-			(BTreeTupleIsPosting(itup) || ItemPointerIsValid(lVis.tid)))
+			(BTreeTupleIsPosting(itup) || ItemPointerIsValid(&lVis.tid)))
 		{
 			bt_entry_unique_check(state, itup, state->targetblock, offset,
 								  &lVis);
@@ -1668,7 +1690,7 @@ bt_target_page_check(BtreeCheckState *state)
 				lVis.blkno = InvalidBlockNumber;
 				lVis.offset = InvalidOffsetNumber;
 				lVis.postingIndex = -1;
-				lVis.tid = NULL;
+				ItemPointerSetInvalid(&lVis.tid);
 			}
 			else if (!unique_checked)
 			{
@@ -1793,7 +1815,8 @@ bt_target_page_check(BtreeCheckState *state)
 					itemid = PageGetItemIdCareful(state, rightblock_number,
 												  rightpage,
 												  rightfirstoffset);
-					itup = (IndexTuple) PageGetItem(rightpage, itemid);
+					itup = _bt_getitem(rightpage, rightfirstoffset,
+									   &state->nextbuf);
 
 					bt_entry_unique_check(state, itup, rightblock_number, rightfirstoffset, &lVis);
 
@@ -2047,7 +2070,11 @@ bt_right_page_check_scankey(BtreeCheckState *state, OffsetNumber *rightfirstoffs
 	 * Return first real item scankey.  Note that this relies on right page
 	 * memory remaining allocated.
 	 */
-	firstitup = (IndexTuple) PageGetItem(rightpage, rightitem);
+	if (P_ISLEAF(opaque))
+		firstitup = CopyIndexTuple(_bt_getitem(rightpage, *rightfirstoffset,
+											   &state->nextbuf));
+	else
+		firstitup = (IndexTuple) PageGetItem(rightpage, rightitem);
 	return bt_mkscankey_pivotsearch(state->rel, firstitup);
 }
 
@@ -3029,10 +3056,14 @@ bt_rootdescend(BtreeCheckState *state, IndexTuple itup)
 		insertstate.bounds_valid = false;
 		insertstate.buf = lbuf;
 
+		/* The search bypasses palloc_btree_page's structural checks. */
+		page = BufferGetPage(lbuf);
+		if (P_HASPREFIX(BTPageGetOpaque(page)))
+			bt_prefix_page_check(state, page, BufferGetBlockNumber(lbuf));
+
 		/* Get matching tuple on leaf page */
 		offnum = _bt_binsrch_insert(state->rel, &insertstate);
 		/* Compare first >= matching item on leaf page, if any */
-		page = BufferGetPage(lbuf);
 		/* Should match on first heap TID when tuple has a posting list */
 		if (offnum <= PageGetMaxOffsetNumber(page) &&
 			insertstate.postingoff <= 0 &&
@@ -3095,14 +3126,13 @@ static inline bool
 invariant_l_offset(BtreeCheckState *state, BTScanInsert key,
 				   OffsetNumber upperbound)
 {
-	ItemId		itemid;
 	int32		cmp;
 
 	Assert(!key->nextkey && key->backward);
 
 	/* Verify line pointer before checking tuple */
-	itemid = PageGetItemIdCareful(state, state->targetblock, state->target,
-								  upperbound);
+	(void) PageGetItemIdCareful(state, state->targetblock, state->target,
+								upperbound);
 	/* pg_upgrade'd indexes may legally have equal sibling tuples */
 	if (!key->heapkeyspace)
 		return invariant_leq_offset(state, key, upperbound);
@@ -3126,8 +3156,8 @@ invariant_l_offset(BtreeCheckState *state, BTScanInsert key,
 		ItemPointer rheaptid;
 		bool		nonpivot;
 
-		ritup = (IndexTuple) PageGetItem(state->target, itemid);
 		topaque = BTPageGetOpaque(state->target);
+		ritup = _bt_getitem(state->target, upperbound, &state->nextbuf);
 		nonpivot = P_ISLEAF(topaque) && upperbound >= P_FIRSTDATAKEY(topaque);
 
 		/* Get number of keys + heap TID for item to the right */
@@ -3218,14 +3248,13 @@ invariant_l_nontarget_offset(BtreeCheckState *state, BTScanInsert key,
 							 BlockNumber nontargetblock, Page nontarget,
 							 OffsetNumber upperbound)
 {
-	ItemId		itemid;
 	int32		cmp;
 
 	Assert(!key->nextkey && key->backward);
 
 	/* Verify line pointer before checking tuple */
-	itemid = PageGetItemIdCareful(state, nontargetblock, nontarget,
-								  upperbound);
+	(void) PageGetItemIdCareful(state, nontargetblock, nontarget,
+								upperbound);
 	cmp = _bt_compare(state->rel, key, nontarget, upperbound);
 
 	/* pg_upgrade'd indexes may legally have equal sibling tuples */
@@ -3241,8 +3270,8 @@ invariant_l_nontarget_offset(BtreeCheckState *state, BTScanInsert key,
 		BTPageOpaque copaque;
 		bool		nonpivot;
 
-		child = (IndexTuple) PageGetItem(nontarget, itemid);
 		copaque = BTPageGetOpaque(nontarget);
+		child = _bt_getitem(nontarget, upperbound, &state->nextbuf);
 		nonpivot = P_ISLEAF(copaque) && upperbound >= P_FIRSTDATAKEY(copaque);
 
 		/* Get number of keys + heap TID for child/non-target item */
@@ -3257,6 +3286,29 @@ invariant_l_nontarget_offset(BtreeCheckState *state, BTScanInsert key,
 	}
 
 	return cmp < 0;
+}
+
+/* Add relation and block identification to catalog-free prefix diagnostics. */
+static void
+bt_prefix_error_callback(void *arg)
+{
+	errcontext("%s", (char *) arg);
+}
+
+static void
+bt_prefix_page_check(BtreeCheckState *state, Page page, BlockNumber blocknum)
+{
+	ErrorContextCallback errcallback;
+
+	errcallback.callback = bt_prefix_error_callback;
+	errcallback.arg = psprintf("Index \"%s\", block %u, page LSN %X/%08X.",
+							   RelationGetRelationName(state->rel), blocknum,
+							   LSN_FORMAT_ARGS(PageGetLSN(page)));
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+	_bt_prefix_check(page);
+	error_context_stack = errcallback.previous;
+	pfree(errcallback.arg);
 }
 
 /*
@@ -3397,6 +3449,22 @@ palloc_btree_page(BtreeCheckState *state, BlockNumber blocknum)
 				(errcode(ERRCODE_INDEX_CORRUPTED),
 				 errmsg("non-rightmost leaf block %u in index \"%s\" lacks high key item",
 						blocknum, RelationGetRelationName(state->rel))));
+
+	/*
+	 * A prefix-compressed page is a live leaf holding its directory item and
+	 * at least one coded data item (an emptied page drops the directory).
+	 */
+	if (P_HASPREFIX(opaque) &&
+		(!P_ISLEAF(opaque) || P_ISDELETED(opaque) || P_ISHALFDEAD(opaque) ||
+		 maxoffset < P_FIRSTDATAKEY(opaque)))
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("block %u in index \"%s\" has an invalid prefix-compressed layout",
+						blocknum, RelationGetRelationName(state->rel))));
+
+	/* Validate all members before a comparison can decode any of them. */
+	if (P_HASPREFIX(opaque))
+		bt_prefix_page_check(state, page, blocknum);
 
 	/*
 	 * In general, internal pages are never marked half-dead, except on

@@ -215,6 +215,7 @@ BTDeletedPageData
 BTIndexStat
 BTInsertState
 BTInsertStateData
+BTItemBuf
 BTLeader
 BTMetaPageData
 BTOneVacInfo
@@ -226,6 +227,12 @@ BTPageStat
 BTPageState
 BTParallelScanDesc
 BTPendingFSM
+BTPrefixAnchor
+BTPrefixAnchorDisk
+BTPrefixCode
+BTPrefixDir
+BTPrefixDirHdr
+BTPrefixPageEst
 BTReadPageState
 BTScanInsert
 BTScanInsertData

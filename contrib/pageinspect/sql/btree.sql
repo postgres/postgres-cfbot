@@ -53,6 +53,12 @@ SELECT bt_page_items('aaa'::bytea);
 CREATE INDEX test1_a_brin ON test1 USING brin(a);
 SELECT bt_page_items(get_raw_page('test1', 0));
 SELECT bt_page_items(get_raw_page('test1_a_brin', 0));
+-- A forged page size must not make an out-of-bounds special area look valid.
+WITH raw AS (SELECT get_raw_page('test1_a_idx', 1) AS p)
+SELECT bt_page_items(set_byte(set_byte(set_byte(set_byte(p,
+  16, CASE WHEN get_byte(p, 18) = 4 THEN 240 ELSE 255 END),
+  17, CASE WHEN get_byte(p, 18) = 4 THEN 255 ELSE 240 END), 18, 0), 19, 0))
+FROM raw;
 \set VERBOSITY default
 
 -- Tests with all-zero pages.
@@ -60,3 +66,27 @@ SHOW block_size \gset
 SELECT bt_page_items(decode(repeat('00', :block_size), 'hex'));
 
 DROP TABLE test1;
+
+-- A prefix-compressed leaf: data items are shown decoded, so data and htid
+-- read as on a plain page, while itemlen shows the stored (coded) size.
+CREATE TABLE test_prefix (u text COLLATE "C");
+INSERT INTO test_prefix
+  SELECT 'https://example.com/path/' || lpad(g::text, 4, '0')
+  FROM generate_series(1, 20) g;
+CREATE INDEX test_prefix_idx ON test_prefix (u) WITH (prefix_compression = on);
+CREATE INDEX test_plain_idx ON test_prefix (u);
+SELECT btpo_flags & 512 <> 0 AS coded FROM bt_page_stats('test_prefix_idx', 1);
+-- same decoded items as the plain index (offset 1 is the prefix directory)
+SELECT count(*) AS mismatches
+  FROM bt_page_items('test_prefix_idx', 1) c
+  FULL JOIN bt_page_items('test_plain_idx', 1) p ON p.itemoffset = c.itemoffset - 1
+  WHERE c.itemoffset > 1 AND (c.data IS DISTINCT FROM p.data OR c.htid IS DISTINCT FROM p.htid);
+-- and the same from a raw page image
+SELECT count(*) AS mismatches
+  FROM bt_page_items(get_raw_page('test_prefix_idx', 1)) c
+  JOIN bt_page_items('test_prefix_idx', 1) r USING (itemoffset)
+  WHERE c.data IS DISTINCT FROM r.data;
+-- coded items are smaller than the plain ones
+SELECT (SELECT sum(itemlen) FROM bt_page_items('test_prefix_idx', 1) WHERE itemoffset > 1) <
+       (SELECT sum(itemlen) FROM bt_page_items('test_plain_idx', 1)) AS smaller;
+DROP TABLE test_prefix;

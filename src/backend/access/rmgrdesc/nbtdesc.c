@@ -46,6 +46,11 @@ btree_desc(StringInfo buf, XLogReaderState *record)
 				appendStringInfo(buf, "level: %u, firstrightoff: %d, newitemoff: %d, postingoff: %d",
 								 xlrec->level, xlrec->firstrightoff,
 								 xlrec->newitemoff, xlrec->postingoff);
+				if (xlrec->flags != 0)
+					appendStringInfo(buf, ", prefix:%s%s%s",
+									 (xlrec->flags & XLH_SPLIT_ORIG_CODED) ? " orig" : "",
+									 (xlrec->flags & XLH_SPLIT_LEFT_CODED) ? " left" : "",
+									 (xlrec->flags & XLH_SPLIT_RIGHT_CODED) ? " right" : "");
 				break;
 			}
 		case XLOG_BTREE_DEDUP:

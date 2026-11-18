@@ -96,6 +96,7 @@ typedef struct ua_page_items
 	bool		leafpage;
 	bool		rightmost;
 	TupleDesc	tupd;
+	BTItemBuf	decodebuf;		/* decoded data item of a BTP_PREFIX leaf */
 } ua_page_items;
 
 
@@ -497,11 +498,23 @@ bt_page_print_tuples(ua_page_items *uargs)
 
 	itup = (IndexTuple) PageGetItem(page, id);
 
+	/*
+	 * On a prefix-compressed leaf (BTP_PREFIX), show each data item decoded,
+	 * so its data and heap TIDs read as on a plain page.  itemlen still shows
+	 * the stored (coded) size.  The prefix directory item before the data
+	 * items is shown raw.  Decoding needs only the page, so this also works
+	 * on a page image passed as bytea.
+	 */
+	if (leafpage &&
+		P_HASPREFIX(BTPageGetOpaque(page)) &&
+		offset >= P_FIRSTDATAKEY(BTPageGetOpaque(page)))
+		itup = _bt_getitem(page, offset, &uargs->decodebuf);
+
 	j = 0;
 	memset(nulls, 0, sizeof(nulls));
 	values[j++] = Int16GetDatum(offset);
 	values[j++] = ItemPointerGetDatum(&itup->t_tid);
-	values[j++] = Int16GetDatum(IndexTupleSize(itup));
+	values[j++] = Int16GetDatum(ItemIdGetLength(id));
 	values[j++] = BoolGetDatum(IndexTupleHasNulls(itup));
 	values[j++] = BoolGetDatum(IndexTupleHasVarwidths(itup));
 
@@ -663,6 +676,8 @@ bt_page_items_internal(PG_FUNCTION_ARGS, enum pageinspect_version ext_version)
 		uargs->offset = FirstOffsetNumber;
 
 		opaque = BTPageGetOpaque(uargs->page);
+		if (P_HASPREFIX(opaque))
+			_bt_prefix_check(uargs->page);
 
 		if (!P_ISDELETED(opaque))
 			fctx->max_calls = PageGetMaxOffsetNumber(uargs->page);
@@ -756,6 +771,13 @@ bt_page_items_bytea(PG_FUNCTION_ARGS)
 
 		uargs->offset = FirstOffsetNumber;
 
+		/* The raw header's page size cannot establish allocation bounds. */
+		if (((PageHeader) uargs->page)->pd_special !=
+			BLCKSZ - MAXALIGN(sizeof(BTPageOpaqueData)))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("input page is not a valid %s page", "btree")));
+
 		/* verify the special space has the expected size */
 		if (PageGetSpecialSize(uargs->page) != MAXALIGN(sizeof(BTPageOpaqueData)))
 			ereport(ERROR,
@@ -776,6 +798,9 @@ bt_page_items_bytea(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("block is not a valid btree leaf page")));
+
+		if (P_HASPREFIX(opaque))
+			_bt_prefix_check(uargs->page);
 
 		if (P_ISDELETED(opaque))
 			elog(NOTICE, "page is deleted");
