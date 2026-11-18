@@ -33,6 +33,41 @@ delete from gist_point_tbl where id > 5000;
 
 vacuum analyze gist_point_tbl;
 
+-- The empty leaf pages deleted above can only be recycled once the deleting
+-- transaction is behind the xid horizon, so assign a new xid before vacuuming
+-- again.  Reinserting into the emptied range then reuses the recycled pages.
+select pg_current_xact_id() is not null;
+vacuum gist_point_tbl;
+insert into gist_point_tbl (id, p)
+select g, point(g*10, g*10) from generate_series(5001, 7000) g;
+
+-- The index must agree with a sequential scan after all of that.
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+select count(*) from gist_point_tbl where p <@ box(point(0,0), point(100000,100000));
+reset enable_seqscan;
+reset enable_bitmapscan;
+set enable_indexscan = off;
+set enable_bitmapscan = off;
+set enable_indexonlyscan = off;
+select count(*) from gist_point_tbl where p <@ box(point(0,0), point(100000,100000));
+reset enable_indexscan;
+reset enable_bitmapscan;
+reset enable_indexonlyscan;
+
+-- Deleting everything must leave the last downlink on each internal page in
+-- place, and the index must still be usable afterwards.
+delete from gist_point_tbl;
+vacuum gist_point_tbl;
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+select count(*) from gist_point_tbl where p <@ box(point(0,0), point(100000,100000));
+insert into gist_point_tbl (id, p)
+select g, point(g*10, g*10) from generate_series(1, 2000) g;
+select count(*) from gist_point_tbl where p <@ box(point(0,0), point(100000,100000));
+reset enable_seqscan;
+reset enable_bitmapscan;
+
 -- rebuild the index with a different fillfactor
 alter index gist_pointidx SET (fillfactor = 40);
 reindex index gist_pointidx;
