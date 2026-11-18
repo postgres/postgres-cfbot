@@ -250,6 +250,21 @@ SELECT isfalse OR isnul OR istrue FROM booltbl4;
 SELECT istrue OR isfalse OR isnul FROM booltbl4;
 SELECT isnul OR istrue OR isfalse FROM booltbl4;
 
+-- IMPLIES expression need to return null if there's any nulls, the
+-- left value is not false, and the right value is not true
+SELECT istrue IMPLIES isnul FROM booltbl4;
+SELECT isnul IMPLIES isfalse FROM booltbl4;
+SELECT isnul IMPLIES isnul FROM booltbl4;
+SELECT istrue IMPLIES istrue FROM booltbl4;
+SELECT istrue IMPLIES isfalse FROM booltbl4;
+SELECT isfalse IMPLIES istrue FROM booltbl4;
+SELECT isfalse IMPLIES isfalse FROM booltbl4;
+SELECT isfalse IMPLIES isnul FROM booltbl4;
+SELECT isnul IMPLIES istrue FROM booltbl4;
+
+-- IMPLIES is non-associative
+SELECT istrue IMPLIES istrue IMPLIES istrue AS error FROM booltbl4;
+
 -- Casts
 SELECT 0::boolean;
 SELECT 1::boolean;

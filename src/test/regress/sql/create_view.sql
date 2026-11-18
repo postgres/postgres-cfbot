@@ -829,7 +829,9 @@ select x + y + z as c1,
        (x,y) <= ANY (values(1,2),(3,4)) as c11,
        (x>0 OR y>0) IN (SELECT false) AS c12,
        (x < y) <> ALL (SELECT false) AS c13,
-       true = (y = ANY (SELECT 1)) AS c14
+       true = (y = ANY (SELECT 1)) AS c14,
+       (x > y OR y > z) IMPLIES NOT (x > z) AS c15,
+       NOT (x > y IMPLIES y > z) IMPLIES (x > z) AS c16
 from (values(1,2,3)) v(x,y,z);
 select pg_get_viewdef('tt26v', true);
 

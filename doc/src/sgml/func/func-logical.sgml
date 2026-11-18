@@ -13,7 +13,7 @@
    </indexterm>
 
    <para>
-    The usual logical operators are available:
+    The following logical operators are available:
 
     <indexterm>
      <primary>AND (operator)</primary>
@@ -39,10 +39,19 @@
      <primary>negation</primary>
     </indexterm>
 
+    <indexterm>
+     <primary>IMPLIES (operator)</primary>
+    </indexterm>
+
+    <indexterm>
+     <primary>implication</primary>
+    </indexterm>
+
 <synopsis>
 <type>boolean</type> <literal>AND</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
 <type>boolean</type> <literal>OR</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
 <literal>NOT</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
+<type>boolean</type> <literal>IMPLIES</literal> <type>boolean</type> <returnvalue>boolean</returnvalue>
 </synopsis>
 
     <acronym>SQL</acronym> uses a three-valued logic system with true,
@@ -143,14 +152,56 @@
       </tbody>
      </tgroup>
     </informaltable>
+
+    <informaltable rowheader="firstcol">
+     <tgroup cols="4">
+      <thead>
+       <row>
+        <entry>IMPLIES</entry>
+        <entry>TRUE</entry>
+        <entry>FALSE</entry>
+        <entry>NULL</entry>
+       </row>
+      </thead>
+
+      <tbody>
+       <row>
+        <entry>TRUE</entry>
+        <entry>TRUE</entry>
+        <entry>FALSE</entry>
+        <entry>NULL</entry>
+       </row>
+
+       <row>
+        <entry>FALSE</entry>
+        <entry>TRUE</entry>
+        <entry>TRUE</entry>
+        <entry>TRUE</entry>
+       </row>
+
+       <row>
+        <entry>NULL</entry>
+        <entry>TRUE</entry>
+        <entry>NULL</entry>
+        <entry>NULL</entry>
+       </row>
+      </tbody>
+     </tgroup>
+    </informaltable>
    </para>
 
    <para>
     The operators <literal>AND</literal> and <literal>OR</literal> are
     commutative, that is, you can switch the left and right operands
-    without affecting the result.  (However, it is not guaranteed that
-    the left operand is evaluated before the right operand.  See <xref
-    linkend="syntax-express-eval"/> for more information about the
-    order of evaluation of subexpressions.)
+    without affecting the result.  <literal>IMPLIES</literal> is not
+    commutative.
+   </para>
+
+   <para>
+    Note that it is not guaranteed that the left operand of
+    <literal>AND</literal>, <literal>OR</literal>, or
+    <literal>IMPLIES</literal> is evaluated before the right operand.  See
+    <xref linkend="syntax-express-eval"/> for more information about the
+    order of evaluation of subexpressions.
    </para>
   </sect1>

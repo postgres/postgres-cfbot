@@ -566,6 +566,67 @@ SELECT isnul OR istrue OR isfalse FROM booltbl4;
  t
 (1 row)
 
+-- IMPLIES expression need to return null if there's any nulls, the
+-- left value is not false, and the right value is not true
+SELECT istrue IMPLIES isnul FROM booltbl4;
+ ?column? 
+----------
+ (null)
+(1 row)
+
+SELECT isnul IMPLIES isfalse FROM booltbl4;
+ ?column? 
+----------
+ (null)
+(1 row)
+
+SELECT isnul IMPLIES isnul FROM booltbl4;
+ ?column? 
+----------
+ (null)
+(1 row)
+
+SELECT istrue IMPLIES istrue FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT istrue IMPLIES isfalse FROM booltbl4;
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT isfalse IMPLIES istrue FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT isfalse IMPLIES isfalse FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT isfalse IMPLIES isnul FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT isnul IMPLIES istrue FROM booltbl4;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- IMPLIES is non-associative
+SELECT istrue IMPLIES istrue IMPLIES istrue AS error FROM booltbl4;
+ERROR:  syntax error at or near "IMPLIES"
+LINE 1: SELECT istrue IMPLIES istrue IMPLIES istrue AS error FROM bo...
+                                     ^
 -- Casts
 SELECT 0::boolean;
  bool 
