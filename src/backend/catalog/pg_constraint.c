@@ -24,6 +24,7 @@
 #include "catalog/heap.h"
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
@@ -1772,6 +1773,15 @@ check_functional_grouping(Oid relid,
 
 	if (bms_is_subset(pkattnos, groupbyattnos))
 	{
+		/*
+		 * Since GROUP BY uses the btree default opclass's equality operator,
+		 * require that the index be btree.  XXX: If a GiST WITHOUT OVERLAPS
+		 * index uses the same proc for its equality operator, lets it prove
+		 * functionality grouping too.
+		 */
+		if (get_rel_relam(get_constraint_index(constraintOid)) != BTREE_AM_OID)
+			return false;
+
 		/* The PK is a subset of grouping_columns, so we win */
 		*constraintDeps = lappend_oid(*constraintDeps, constraintOid);
 		return true;
