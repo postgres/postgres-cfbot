@@ -411,7 +411,7 @@ SELECT *, c <#> '(100, 100),(500, 500)'::cube as dist FROM test_cube ORDER BY c 
 
 -- Test sorting by coordinates
 SELECT c~>1, c FROM test_cube ORDER BY c~>1 LIMIT 15; -- ascending by left bound
-SELECT c~>2, c FROM test_cube ORDER BY c~>2 LIMIT 15; -- ascending by right bound
+SELECT c~>2, c FROM test_cube ORDER BY c~>2, c LIMIT 15; -- ascending by right bound
 SELECT c~>3, c FROM test_cube ORDER BY c~>3 LIMIT 15; -- ascending by lower bound
 SELECT c~>4, c FROM test_cube ORDER BY c~>4 LIMIT 15; -- ascending by upper bound
 SELECT c~>(-1), c FROM test_cube ORDER BY c~>(-1) LIMIT 15; -- descending by left bound
@@ -428,7 +428,7 @@ RESET extra_float_digits;
 SELECT *, c <=> '(100, 100),(500, 500)'::cube as dist FROM test_cube ORDER BY c <=> '(100, 100),(500, 500)'::cube LIMIT 5;
 SELECT *, c <#> '(100, 100),(500, 500)'::cube as dist FROM test_cube ORDER BY c <#> '(100, 100),(500, 500)'::cube LIMIT 5;
 SELECT c~>1, c FROM test_cube ORDER BY c~>1 LIMIT 15; -- ascending by left bound
-SELECT c~>2, c FROM test_cube ORDER BY c~>2 LIMIT 15; -- ascending by right bound
+SELECT c~>2, c FROM test_cube ORDER BY c~>2, c LIMIT 15; -- ascending by right bound
 SELECT c~>3, c FROM test_cube ORDER BY c~>3 LIMIT 15; -- ascending by lower bound
 SELECT c~>4, c FROM test_cube ORDER BY c~>4 LIMIT 15; -- ascending by upper bound
 SELECT c~>(-1), c FROM test_cube ORDER BY c~>(-1) LIMIT 15; -- descending by left bound
@@ -436,3 +436,94 @@ SELECT c~>(-2), c FROM test_cube ORDER BY c~>(-2) LIMIT 15; -- descending by rig
 SELECT c~>(-3), c FROM test_cube ORDER BY c~>(-3) LIMIT 15; -- descending by lower bound
 SELECT c~>(-4), c FROM test_cube ORDER BY c~>(-4) LIMIT 15; -- descending by upper bound
 RESET enable_indexscan;
+
+-- Check that sorted input does not produce pathologically unbalanced splits.
+CREATE TABLE cube_picksplit_test (id int, c cube);
+CREATE INDEX cube_picksplit_test_idx ON cube_picksplit_test USING gist (c);
+INSERT INTO cube_picksplit_test
+SELECT g, cube(ARRAY[g::float8 / 400, g::float8 / 400 + 1])
+FROM generate_series(1, 400) g;
+SELECT pg_relation_size('cube_picksplit_test_idx') <
+       20 * current_setting('block_size')::int AS balanced;
+
+-- Exercise splits containing cubes with different dimensionalities.
+TRUNCATE cube_picksplit_test;
+INSERT INTO cube_picksplit_test
+SELECT g, cube(ARRAY(SELECT g::float8 / 20 + d
+                     FROM generate_series(1, dim) d),
+               ARRAY(SELECT g::float8 / 20 + d + 1
+                     FROM generate_series(1, dim) d))
+FROM unnest(ARRAY[1, 2, 3, 10, 100]) dim
+CROSS JOIN generate_series(1, 20) g;
+SET enable_seqscan = false;
+SELECT count(*) FROM cube_picksplit_test
+WHERE c <@ cube(ARRAY(SELECT -1000::float8
+                      FROM generate_series(1, 100)),
+                ARRAY(SELECT 1000::float8
+                      FROM generate_series(1, 100)));
+RESET enable_seqscan;
+DROP TABLE cube_picksplit_test;
+
+-- Split-quality arithmetic must not reject valid cube coordinates.
+CREATE TABLE cube_picksplit_special (id int, c cube);
+SET enable_seqscan = false;
+SET enable_bitmapscan = false;
+DO $$
+DECLARE
+    kind text;
+    indexed_ids int[];
+BEGIN
+    FOREACH kind IN ARRAY ARRAY['nan', 'large', 'infinity', 'equal',
+                               'nan_bounds', 'nan_2d', 'underflow']
+    LOOP
+        CREATE INDEX cube_picksplit_special_idx
+            ON cube_picksplit_special USING gist (c);
+        INSERT INTO cube_picksplit_special
+        SELECT g,
+               CASE kind
+                   WHEN 'nan' THEN
+                       cube(ARRAY[CASE WHEN g % 2 = 1
+                                       THEN 'NaN'::float8 ELSE g END])
+                   WHEN 'large' THEN
+                       cube(ARRAY[CASE WHEN g % 2 = 0
+                                       THEN 1e308 ELSE -1e308 END]::float8[])
+                   WHEN 'infinity' THEN
+                       cube(ARRAY[CASE WHEN g % 2 = 0
+                                       THEN 'Infinity'::float8
+                                       ELSE '-Infinity'::float8 END])
+                   WHEN 'equal' THEN cube(ARRAY[1.0::float8])
+                   WHEN 'nan_bounds' THEN
+                       CASE WHEN g % 2 = 0
+                            THEN cube(ARRAY['NaN'::float8], ARRAY[g::float8])
+                            ELSE cube(ARRAY[g::float8], ARRAY['NaN'::float8])
+                       END
+                   WHEN 'nan_2d' THEN
+                       cube(ARRAY['NaN'::float8, g::float8])
+                   WHEN 'underflow' THEN
+                       cube(ARRAY[CASE WHEN g = 300 THEN 1e308::float8
+                                       ELSE g * 1e-300::float8 END])
+               END
+        FROM generate_series(1, 300) g;
+
+        -- Check that index scans return every inserted tuple, both after
+        -- incremental splits and after building an index on existing data.
+        FOR build IN 1..2 LOOP
+            SELECT array_agg(id ORDER BY id) INTO indexed_ids
+                FROM cube_picksplit_special WHERE c IS NOT NULL;
+            IF indexed_ids IS DISTINCT FROM
+               ARRAY(SELECT generate_series(1, 300)) THEN
+                RAISE EXCEPTION 'lost entries for % (build %)', kind, build;
+            END IF;
+            DROP INDEX cube_picksplit_special_idx;
+            IF build = 1 THEN
+                CREATE INDEX cube_picksplit_special_idx
+                    ON cube_picksplit_special USING gist (c);
+            END IF;
+        END LOOP;
+        TRUNCATE cube_picksplit_special;
+    END LOOP;
+END
+$$;
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+DROP TABLE cube_picksplit_special;
