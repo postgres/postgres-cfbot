@@ -19,6 +19,7 @@ PG_MODULE_MAGIC;
 
 static void ReleaseString(Datum res);
 static char *PrintString(Datum res);
+static void CountRelease(Datum res);
 
 /*
  * A resource that tracks strings and prints the string when it's released.
@@ -204,6 +205,92 @@ test_resowner_forget_between_phases(PG_FUNCTION_ARGS)
 
 	/* unreachable */
 	elog(ERROR, "ResourceOwnerForget should have errored out");
+
+	PG_RETURN_VOID();
+}
+
+static void
+CountRelease(Datum res)
+{
+	int		   *nreleased = (int *) DatumGetPointer(res);
+
+	(*nreleased)++;
+}
+
+/*
+ * Check that an auxiliary resource owner can be reused after bulk release.
+ */
+PG_FUNCTION_INFO_V1(test_resowner_aux);
+Datum
+test_resowner_aux(PG_FUNCTION_ARGS)
+{
+	static const ResourceOwnerDesc before_desc = {
+		.name = "test resource before locks",
+		.release_phase = RESOURCE_RELEASE_BEFORE_LOCKS,
+		.release_priority = RELEASE_PRIO_FIRST,
+		.ReleaseResource = CountRelease
+	};
+	static const ResourceOwnerDesc after_desc = {
+		.name = "test resource after locks",
+		.release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
+		.release_priority = RELEASE_PRIO_FIRST,
+		.ReleaseResource = CountRelease
+	};
+	int32		nresources = PG_GETARG_INT32(0);
+	int		   *nreleased[2];
+	ResourceOwner resowner;
+	ResourceOwner save_current = CurrentResourceOwner;
+	ResourceOwner save_aux = AuxProcessResourceOwner;
+
+	if (nresources <= 0)
+		elog(ERROR, "nresources must be greater than zero");
+
+	nreleased[0] = palloc0_array(int, nresources);
+	nreleased[1] = palloc0_array(int, nresources);
+	resowner = ResourceOwnerCreate(CurrentResourceOwner, "test auxiliary owner");
+
+	/*
+	 * Use an isolated owner without registering an auxiliary-process exit
+	 * hook.
+	 */
+	PG_TRY();
+	{
+		CurrentResourceOwner = AuxProcessResourceOwner = resowner;
+		for (int round = 0; round < 2; round++)
+		{
+			for (int i = 0; i < nresources; i++)
+			{
+				const ResourceOwnerDesc *kind = i % 2 == 0 ? &before_desc : &after_desc;
+
+				ResourceOwnerEnlarge(resowner);
+				ResourceOwnerRemember(resowner,
+									  PointerGetDatum(&nreleased[round][i]), kind);
+			}
+			ReleaseAuxProcessResources(false);
+		}
+	}
+	PG_FINALLY();
+	{
+		CurrentResourceOwner = save_current;
+		AuxProcessResourceOwner = save_aux;
+	}
+	PG_END_TRY();
+
+	ResourceOwnerDelete(resowner);
+
+	/*
+	 * Keep both rounds' counters alive to detect releases of stale entries.
+	 */
+	for (int round = 0; round < 2; round++)
+	{
+		for (int i = 0; i < nresources; i++)
+		{
+			if (nreleased[round][i] != 1)
+				elog(ERROR, "resource %d in round %d was released %d times",
+					 i, round, nreleased[round][i]);
+		}
+		pfree(nreleased[round]);
+	}
 
 	PG_RETURN_VOID();
 }
