@@ -29,6 +29,10 @@
  * nudge the existing walreceiver process that's waiting, instead of launching
  * a new one.
  *
+ * A clean primary shutdown is different. There is no next timeline to follow
+ * on this connection, so walreceiver exits and a fresh process is started
+ * when streaming is requested again.
+ *
  * Normal termination is by SIGTERM, which instructs the walreceiver to
  * ereport(FATAL). Emergency termination is by SIGQUIT; like any postmaster
  * child process, the walreceiver will simply abort and exit on SIGQUIT. A
@@ -690,6 +694,13 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 			 * our side, too.
 			 */
 			walrcv_endstreaming(wrconn, &primaryTLI);
+
+			/*
+			 * Clean remote shutdown. Exit instead of waiting mode, which would
+			 * reuse a dead connection and archive an incomplete segment.
+			 */
+			if (primaryTLI == 0)
+				proc_exit(0);
 
 			/*
 			 * If the server had switched to a new timeline that we didn't
