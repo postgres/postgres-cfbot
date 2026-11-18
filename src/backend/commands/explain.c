@@ -3668,29 +3668,33 @@ show_table_func_scan_info(TableFuncScanState *tscanstate, ExplainState *es)
 static void
 show_recursive_union_info(RecursiveUnionState *rstate, ExplainState *es)
 {
-	bool		maxUsedDisk,
-				tempUsedDisk;
-	int64		maxSpaceUsed,
-				tempSpaceUsed;
+	Tuplestorestate *tables[2] = {rstate->working_table,
+	rstate->intermediate_table};
+	bool		totalDiskUsed = false;
+	int64		totalSpaceUsed = 0;
 
 	if (!es->analyze)
 		return;
 
 	/*
-	 * Recursive union node uses two tuplestores.  We employ the storage type
-	 * from one of them which consumed more memory/disk than the other.  The
-	 * storage size is sum of the two.
+	 * Similar to nodeRecursiveunion.c's update_storage_stats() function, we
+	 * need to fetch the stats from the final iteration and use those values
+	 * if they're higher than what's already stored in RecursiveUnionState.
 	 */
-	tuplestore_get_stats(rstate->working_table, &tempUsedDisk,
-						 &tempSpaceUsed);
-	tuplestore_get_stats(rstate->intermediate_table, &maxUsedDisk,
-						 &maxSpaceUsed);
+	for (int i = 0; i < 2; i++)
+	{
+		bool		diskUsed;
+		int64		spaceUsed;
 
-	if (tempSpaceUsed > maxSpaceUsed)
-		maxUsedDisk = tempUsedDisk;
+		tuplestore_get_stats_since_clear(tables[i], &diskUsed, &spaceUsed);
+		totalSpaceUsed += spaceUsed;
+		totalDiskUsed |= diskUsed;
+	}
 
-	maxSpaceUsed += tempSpaceUsed;
-	show_storage_info(maxUsedDisk, maxSpaceUsed, es);
+	rstate->maxSpaceUsed = Max(rstate->maxSpaceUsed, totalSpaceUsed);
+	rstate->usedDisk |= totalDiskUsed;
+
+	show_storage_info(rstate->usedDisk, rstate->maxSpaceUsed, es);
 }
 
 /*

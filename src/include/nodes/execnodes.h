@@ -1592,6 +1592,9 @@ typedef struct RecursiveUnionState
 	bool		intermediate_empty;
 	Tuplestorestate *working_table;
 	Tuplestorestate *intermediate_table;
+	/* storage statistics to report in EXPLAIN ANALYZE */
+	int64		maxSpaceUsed;
+	bool		usedDisk;
 	/* Remaining fields are unused in UNION ALL case */
 	Oid		   *eqfuncoids;		/* per-grouping-field equality fns */
 	FmgrInfo   *hashfunctions;	/* per-grouping-field hash fns */
