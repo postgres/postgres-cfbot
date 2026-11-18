@@ -937,6 +937,8 @@ if have_cxx
     # Some distros put LLVM and clang in different paths, so fallback to
     # find via PATH, too.
     clang = find_program(llvm_binpath / 'clang', 'clang', required: true)
+    llvm_lto = find_program(llvm_binpath / 'llvm-lto', required: true)
+    irlink = find_program('src/tools/irlink', native: true)
   endif
 else
   msg = 'llvm requires a C++ compiler'
@@ -3381,6 +3383,11 @@ update_unicode_targets = []
 test_deps = []
 tests = []
 
+# List of object files + source files to generated LLVM IR for inlining.
+# Each element is a hash of:
+# {'target': target, 'srcfiles': ..., 'additional_flags': ...}.
+bitcode_modules = []
+
 
 # Default options for targets
 
@@ -3703,6 +3710,11 @@ subdir('src/test')
 subdir('src/interfaces/ecpg/test')
 
 subdir('doc/src/sgml')
+
+# generate bitcode for JIT inlining after giving contrib modules etc a chance
+# to add themselves to bitcode_modules[]
+subdir('src/backend/jit/llvm/bitcode', if_found: llvm)
+
 
 generated_sources_ac += {'': ['GNUmakefile']}
 
@@ -4342,6 +4354,15 @@ summary(
   },
   section: 'Programs',
 )
+
+if llvm.found()
+  summary(
+    {
+      'clang': clang,
+    },
+    section: 'Programs',
+  )
+endif
 
 summary(
   {
