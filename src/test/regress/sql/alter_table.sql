@@ -218,7 +218,7 @@ INSERT INTO atcomp_inc_ref VALUES ('3', '(3,30,300)');
 SELECT rownum, r, (r).c1 FROM atcomp_inc_ref ORDER BY rownum;
 
 
--- Store composites with columns that are then subsequently removed
+-- Store composites of row types that subsequently lose columns
 CREATE TABLE attdrop_tail (t1 int, t2 text, t3 int8, t4 float8);
 CREATE TABLE attdrop_mid (m1 int, m2 text, m3 int8, m4 float8);
 CREATE TABLE attdrop_tozero (z1 int);
@@ -235,22 +235,29 @@ INSERT INTO attdrop_test(key, tail, mid, tozero, toadd) VALUES
 -- plain executor, before drop
 SELECT key, tail, mid, tozero, toadd, (tail).*, (mid).*, (tozero).*, (toadd).* FROM attdrop_test ORDER BY key;
 
--- while at it, make sure this works not just for top-level SQL, but also
--- plpgsql, by doing the drop inside a DO block.
+-- Dropping a column is refused while values of its row type are stored.
+ALTER TABLE attdrop_tail DROP COLUMN t4; -- fails
+ALTER TABLE attdrop_toadd DROP COLUMN a2; -- fails
+
+-- Values held in plpgsql variables can still outlive a drop; check that they
+-- can still be deformed after it.
+CREATE TYPE attdrop_rec AS (key text, tail attdrop_tail, mid attdrop_mid, tozero attdrop_tozero, toadd attdrop_toadd);
 DO $$
 DECLARE
-    r1 attdrop_test;
+    r1 attdrop_rec;
     r2 record;
-    r3 attdrop_test;
+    r3 attdrop_rec;
     r3_t attdrop_tail;
     r3_m attdrop_mid;
     r3_z attdrop_tozero;
     r3_a attdrop_toadd;
 BEGIN
-    r1 = at FROM attdrop_test at WHERE key = 'r1-all-present';
+    r1 = ROW(at.key, at.tail, at.mid, at.tozero, at.toadd)::attdrop_rec
+      FROM attdrop_test at WHERE key = 'r1-all-present';
     SELECT * INTO r2 FROM attdrop_test t WHERE key = 'r2-some-nulls';
 
-    r3 = at FROM attdrop_test at WHERE key = 'r3-other-nulls';
+    r3 = ROW(at.key, at.tail, at.mid, at.tozero, at.toadd)::attdrop_rec
+      FROM attdrop_test at WHERE key = 'r3-other-nulls';
     r3_t = tail FROM attdrop_test at WHERE key = 'r3-other-nulls';
     r3_m = r3.mid;
     r3_z = r3.tozero;
@@ -261,6 +268,8 @@ BEGIN
     RAISE NOTICE 'r2 before drop: %', r2;
     RAISE NOTICE 'r3 before drop: %', r3;
     RAISE NOTICE 'r3_* before drop: t: %, m: %, z: %, a: %', r3_t, r3_m, r3_z, r3_a;
+
+    DROP TABLE attdrop_test;
 
     ALTER TABLE attdrop_tail DROP COLUMN t4;
     ALTER TABLE attdrop_mid DROP COLUMN m3;
@@ -275,23 +284,22 @@ BEGIN
 END;
 $$;
 
--- show plain executor after drop
-SELECT key, tail, mid, tozero, toadd, (tail).*, (mid).*, (tozero).*, (toadd).* FROM attdrop_test ORDER BY key;
-
--- check that updating the datums works after the drop, and that a new rows look right too
-UPDATE attdrop_test SET tail.t1 = -(tail).t1, mid.m4 = -1, toadd.a1 = -(toadd).a1 WHERE key = 'r1-all-present';
+-- Store values of the narrowed row types.  Left behind for pg_upgrade.
+CREATE TABLE attdrop_test(key text, tail attdrop_tail, mid attdrop_mid, tozero attdrop_tozero, toadd attdrop_toadd);
 INSERT INTO attdrop_test(key, tail, mid, tozero, toadd) VALUES
+   ('r4-null-rows', NULL, NULL, NULL, NULL),
    ('r5-post-drop-1', ROW(5, 5, 5), ROW(5, 5, 5), ROW(), ROW(5)),
-   ('r6-post-drop-2', ROW(6, 6, 6), ROW(6, 6, 6), ROW(), ROW(6));
+   ('r6-post-drop-2', ROW(6, NULL, 6), ROW(NULL, 6, NULL), ROW(), ROW(6));
+UPDATE attdrop_test SET tail.t1 = -(tail).t1, mid.m4 = -1, toadd.a1 = -(toadd).a1 WHERE key = 'r5-post-drop-1';
 SELECT key, tail, mid, tozero, toadd, (tail).*, (mid).*, (tozero).*, (toadd).* FROM attdrop_test ORDER BY key;
 
--- add a new column, insert row, drop another set of columns
+-- Adding a column is allowed while values are stored; dropping one is not.
 ALTER TABLE attdrop_toadd ADD COLUMN a3 int;
-ALTER TABLE attdrop_tail DROP COLUMN t3;
-ALTER TABLE attdrop_mid DROP COLUMN m2;
+ALTER TABLE attdrop_tail DROP COLUMN t3; -- fails
+ALTER TABLE attdrop_mid DROP COLUMN m2; -- fails
 INSERT INTO attdrop_test(key, tail, mid, tozero, toadd) VALUES
-   ('r7-post-add', ROW(7, 7), ROW(7, 7), ROW(), ROW(7, 77));
-UPDATE attdrop_test SET tail.t2 = (tail).t2||'-u', mid.m4 = -2, toadd.a1 = -(toadd).a1, toadd.a3 = 23 WHERE key = 'r2-some-nulls';
+   ('r7-post-add', ROW(7, 7, 7), ROW(7, 7, 7), ROW(), ROW(7, 77));
+UPDATE attdrop_test SET tail.t2 = (tail).t2||'-u', mid.m4 = -2, toadd.a1 = -(toadd).a1, toadd.a3 = 23 WHERE key = 'r6-post-drop-2';
 SELECT key, tail, mid, tozero, toadd, (tail).*, (mid).*, (tozero).*, (toadd).* FROM attdrop_test ORDER BY key;
 
 -- Adding a column to a view goes through ATExecAddColumn; make sure that
@@ -2296,20 +2304,91 @@ ALTER TYPE test_type2 RENAME ATTRIBUTE a TO aa CASCADE;
 DROP TABLE test_tbl2_subclass, test_tbl2;
 DROP TYPE test_type2;
 
+-- Refused while stored, even with CASCADE.
 CREATE TYPE test_typex AS (a int, b text);
 CREATE TABLE test_tblx (x int, y test_typex check ((y).a > 0));
 ALTER TYPE test_typex DROP ATTRIBUTE a; -- fails
-ALTER TYPE test_typex DROP ATTRIBUTE a CASCADE;
+ALTER TYPE test_typex DROP ATTRIBUTE a CASCADE; -- fails
 \d test_tblx
 DROP TABLE test_tblx;
 DROP TYPE test_typex;
 
+-- Dropping an attribute of a stored type is refused, as it would vanish from
+-- stored values, making distinct values equal.
+CREATE TYPE test_stored AS (a int, b int);
+CREATE TABLE test_stored_tbl (v test_stored);
+CREATE UNIQUE INDEX test_stored_tbl_v ON test_stored_tbl (v);
+INSERT INTO test_stored_tbl VALUES (ROW(1, 2)::test_stored),
+                                   (ROW(1, 3)::test_stored);
+ALTER TYPE test_stored DROP ATTRIBUTE b; -- fails
+REINDEX INDEX test_stored_tbl_v;
+DROP TABLE test_stored_tbl;
+ALTER TYPE test_stored DROP ATTRIBUTE b;
+DROP TYPE test_stored;
+
+-- Constants of the type in expressions count too.
+CREATE TYPE test_stored_const AS (a int, b int);
+CREATE VIEW test_stored_view AS
+  SELECT '(1,2)'::test_stored_const = '(1,3)'::test_stored_const AS eq;
+ALTER TYPE test_stored_const DROP ATTRIBUTE b; -- fails
+SELECT eq FROM test_stored_view;
+DROP VIEW test_stored_view;
+DROP TYPE test_stored_const;
+
+-- Also when the column is dropped by cascading from its datatype.
+CREATE DOMAIN test_stored_dom AS int;
+CREATE TYPE test_stored_casc AS (a int, b test_stored_dom);
+CREATE TABLE test_stored_casc_tbl (v test_stored_casc UNIQUE);
+INSERT INTO test_stored_casc_tbl VALUES (ROW(1, 2)), (ROW(1, 3));
+DROP DOMAIN test_stored_dom CASCADE; -- fails
+SELECT count(DISTINCT v) FROM test_stored_casc_tbl;
+DROP TABLE test_stored_casc_tbl;
+DROP TYPE test_stored_casc;
+-- ... but not when the same command drops the storing table, created first
+-- so that it is dropped after the column.
+CREATE TABLE test_stored_casc_part (k int)
+  PARTITION BY LIST ((k::test_stored_dom));
+CREATE TYPE test_stored_casc AS (a int, b test_stored_dom);
+ALTER TABLE test_stored_casc_part ADD COLUMN v test_stored_casc;
+DROP DOMAIN test_stored_dom CASCADE;
+DROP TYPE test_stored_casc;
+-- Temp object cleanup is not checked.
+CREATE DOMAIN pg_temp.test_stored_tmpdom AS int;
+CREATE TYPE test_stored_tmp AS (a int, b pg_temp.test_stored_tmpdom);
+CREATE TABLE test_stored_tmp_tbl (v test_stored_tmp);
+DISCARD TEMP;
+DROP TABLE test_stored_tmp_tbl;
+DROP TYPE test_stored_tmp;
+
+-- SQL functions only block a drop if they hold a value of the row type;
+-- otherwise the usual column dependencies apply.
+CREATE TABLE test_stored_person (id int, first text, middle text, last text);
+CREATE FUNCTION test_stored_full_name(test_stored_person) RETURNS text
+  BEGIN ATOMIC SELECT $1.first || ' ' || $1.last; END;
+CREATE FUNCTION test_stored_middle_name(test_stored_person) RETURNS text
+  BEGIN ATOMIC SELECT $1.middle; END;
+ALTER TABLE test_stored_person DROP COLUMN middle; -- fails
+ALTER TABLE test_stored_person DROP COLUMN middle CASCADE;
+ALTER TABLE test_stored_person DROP COLUMN id;
+DROP FUNCTION test_stored_full_name(test_stored_person);
+CREATE FUNCTION test_stored_const_name() RETURNS text
+  BEGIN ATOMIC SELECT ('(Ada,Lovelace)'::test_stored_person).last; END;
+ALTER TABLE test_stored_person DROP COLUMN first; -- fails
+DROP FUNCTION test_stored_const_name();
+CREATE FUNCTION test_stored_row_name() RETURNS text
+  BEGIN ATOMIC SELECT (ROW('Ada', 'Lovelace')::test_stored_person).last; END;
+ALTER TABLE test_stored_person DROP COLUMN first; -- fails
+-- unless the drop also drops it
+ALTER TABLE test_stored_person DROP COLUMN last CASCADE;
+DROP TABLE test_stored_person;
+
 -- This test isn't that interesting on its own, but the purpose is to leave
 -- behind a table to test pg_upgrade with. The table has a composite type
--- column in it, and the composite type has a dropped attribute.
+-- column in it, and the composite type has a dropped attribute (dropped
+-- before the table is created, as it can't be afterwards).
 CREATE TYPE test_type3 AS (a int);
-CREATE TABLE test_tbl3 (c) AS SELECT '(1)'::test_type3;
 ALTER TYPE test_type3 DROP ATTRIBUTE a, ADD ATTRIBUTE b int;
+CREATE TABLE test_tbl3 (c) AS SELECT '(1)'::test_type3;
 
 CREATE TYPE test_type_empty AS ();
 DROP TYPE test_type_empty;

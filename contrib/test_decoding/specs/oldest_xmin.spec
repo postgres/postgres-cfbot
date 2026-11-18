@@ -20,7 +20,8 @@ session "s0"
 setup { SET synchronous_commit=on; }
 step "s0_begin" { BEGIN; }
 step "s0_getxid" { SELECT pg_current_xact_id() IS NULL; }
-step "s0_alter" { ALTER TYPE basket DROP ATTRIBUTE mangos; }
+# Rename, as dropping an attribute of a stored type is refused.
+step "s0_alter" { ALTER TYPE basket RENAME ATTRIBUTE mangos TO plums; }
 step "s0_commit" { COMMIT; }
 step "s0_checkpoint" { CHECKPOINT; }
 step "s0_vacuum" { VACUUM pg_attribute; }

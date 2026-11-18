@@ -180,6 +180,9 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       contain data for only a single column.
       You will need to say <literal>CASCADE</literal> if anything outside the table
       depends on the column, for example, foreign key references or views.
+      The column cannot be dropped while another table has a column of the
+      table's row type, even with <literal>CASCADE</literal>, nor while a view,
+      column default or other stored expression contains a constant of it.
       If <literal>IF EXISTS</literal> is specified and the column
       does not exist, no error is thrown. In this case a notice
       is issued instead.
