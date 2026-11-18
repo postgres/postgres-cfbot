@@ -741,7 +741,7 @@ DecodingContextFindStartpoint(LogicalDecodingContext *ctx)
 	ReplicationSlot *slot = ctx->slot;
 
 	/* Initialize from where to start reading WAL. */
-	XLogBeginRead(ctx->reader, slot->data.restart_lsn);
+	XLogBeginReadStreamed(ctx->reader, slot->data.restart_lsn, NULL);
 
 	elog(DEBUG1, "searching for logical decoding starting point, starting at %X/%08X",
 		 LSN_FORMAT_ARGS(slot->data.restart_lsn));
@@ -2147,7 +2147,8 @@ LogicalReplicationSlotCheckPendingWal(XLogRecPtr end_of_wal,
 		 * Start reading at the slot's restart_lsn, which we know points to a
 		 * valid record.
 		 */
-		XLogBeginRead(ctx->reader, MyReplicationSlot->data.restart_lsn);
+		XLogBeginReadStreamed(ctx->reader,
+							  MyReplicationSlot->data.restart_lsn, NULL);
 
 		/* Invalidate non-timetravel entries */
 		InvalidateSystemCaches();
@@ -2250,7 +2251,8 @@ LogicalSlotAdvanceAndCheckSnapState(XLogRecPtr moveto,
 		 * Start reading at the slot's restart_lsn, which we know to point to
 		 * a valid record.
 		 */
-		XLogBeginRead(ctx->reader, MyReplicationSlot->data.restart_lsn);
+		XLogBeginReadStreamed(ctx->reader,
+							  MyReplicationSlot->data.restart_lsn, NULL);
 
 		/* invalidate non-timetravel entries */
 		InvalidateSystemCaches();
