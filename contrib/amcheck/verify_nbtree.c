@@ -1470,6 +1470,46 @@ bt_target_page_check(BtreeCheckState *state)
 		}
 
 		/*
+		 * Heap TIDs stored in the leaf page tuples must be valid item
+		 * pointers regardless of the the table AM implementation.
+		 */
+		if (P_ISLEAF(topaque) && !BTreeTupleIsPivot(itup))
+		{
+			int			nhtids = 1;
+
+			if (BTreeTupleIsPosting(itup))
+				nhtids = BTreeTupleGetNPosting(itup);
+
+			for (int i = 0; i < nhtids; i++)
+			{
+				ItemPointer htid;
+				char	   *postingoff = "";
+
+				if (BTreeTupleIsPosting(itup))
+					htid = BTreeTupleGetPostingN(itup, i);
+				else
+					htid = &itup->t_tid;
+
+				/* Valid heap TID cannot be zero */
+				if (ItemPointerIsValid(htid))
+					continue;
+
+				if (BTreeTupleIsPosting(itup))
+					postingoff = psprintf(" posting list offset=%d", i);
+
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("index tuple in index \"%s\" contains invalid heap TID",
+								RelationGetRelationName(state->rel)),
+						 errdetail_internal("Index tid=(%u,%u)%s points to heap tid=(%u,%u) page lsn=%X/%08X.",
+											state->targetblock, offset, postingoff,
+											ItemPointerGetBlockNumberNoCheck(htid),
+											ItemPointerGetOffsetNumberNoCheck(htid),
+											LSN_FORMAT_ARGS(state->targetlsn))));
+			}
+		}
+
+		/*
 		 * Don't try to generate scankey using "negative infinity" item on
 		 * internal pages. They are always truncated to zero attributes.
 		 */
@@ -3198,7 +3238,8 @@ bt_report_dangling_index_entry(BtreeCheckState *state, ItemPointer tid,
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	page = BufferGetPage(buffer);
 
-	if (offnum > PageGetMaxOffsetNumber(page))
+	if (offnum < FirstOffsetNumber ||
+		offnum > PageGetMaxOffsetNumber(page))
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
 				 errmsg("index tuple in index \"%s\" points to heap tuple in table \"%s\" with out-of-range offset",
