@@ -10790,6 +10790,30 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
      </varlistentry>
 
 
+     <varlistentry id="guc-report-commit-lsn" xreflabel="report_commit_lsn">
+      <term><varname>report_commit_lsn</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>report_commit_lsn</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        When on, the server reports the value of
+        <xref linkend="guc-last-commit-lsn"/> to the client whenever it has
+        changed, in a ParameterStatus message sent just before the server
+        next reports that it is ready for a query
+        (see <xref linkend="protocol-async"/>).  A client can then wait for
+        that <acronym>LSN</acronym> with <xref linkend="sql-wait"/> before
+        reading the committed changes on a standby server, without asking
+        the primary for a WAL position
+        (see <xref linkend="read-your-writes-consistency"/>).  In the
+        extended query protocol, the report comes at the next Sync, so a
+        pipeline that commits several times before a Sync reports only the
+        last commit.  The default is <literal>off</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-session-replication-role" xreflabel="session_replication_role">
       <term><varname>session_replication_role</varname> (<type>enum</type>)
       <indexterm>
@@ -12549,6 +12573,30 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
         read-only.  Within a session, this can change only if the server is
         promoted to be primary.  See <xref linkend="hot-standby"/> for more
         information.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-last-commit-lsn" xreflabel="last_commit_lsn">
+      <term><varname>last_commit_lsn</varname> (<type>string</type>)
+      <indexterm>
+       <primary><varname>last_commit_lsn</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Reports the end of the commit record of the most recent transaction
+        committed in the current session, as a <type>pg_lsn</type> value, or
+        <literal>0/00000000</literal> if there is none.  Once a standby
+        server has replayed the <acronym>WAL</acronym> up to this position,
+        queries there that take their snapshot afterwards see that
+        transaction's changes.  A transaction that was not
+        assigned a transaction ID (see <xref linkend="transaction-id"/>)
+        writes no commit record, and leaves this unchanged, as do
+        transactions that roll back and <command>PREPARE
+        TRANSACTION</command>; <command>COMMIT PREPARED</command> sets it.
+        See <xref linkend="guc-report-commit-lsn"/> to have it reported to
+        the client after each commit.
        </para>
       </listitem>
      </varlistentry>

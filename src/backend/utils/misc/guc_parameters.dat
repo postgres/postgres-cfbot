@@ -1566,6 +1566,14 @@
   boot_val => 'PG_KRB_SRVTAB',
 },
 
+{ name => 'last_commit_lsn', type => 'string', context => 'PGC_INTERNAL', group => 'PRESET_OPTIONS',
+  short_desc => 'Shows the end of the commit record of the session\'s most recent commit.',
+  flags => 'GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE',
+  variable => 'last_commit_lsn_string',
+  boot_val => '"0/00000000"',
+  show_hook => 'show_last_commit_lsn',
+},
+
 { name => 'lc_messages', type => 'string', context => 'PGC_SUSET', group => 'CLIENT_CONN_LOCALE',
   short_desc => 'Sets the language in which messages are displayed.',
   long_desc => 'An empty string means use the operating system setting.',
@@ -2559,6 +2567,13 @@
   flags => 'GUC_NOT_IN_SAMPLE',
   variable => 'remove_temp_files_after_crash',
   boot_val => 'true',
+},
+
+{ name => 'report_commit_lsn', type => 'bool', context => 'PGC_USERSET', group => 'CLIENT_CONN_STATEMENT',
+  short_desc => 'Reports last_commit_lsn to the client after each commit.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'report_commit_lsn',
+  boot_val => 'false',
 },
 
 { name => 'reserved_connections', type => 'int', context => 'PGC_POSTMASTER', group => 'CONN_AUTH_SETTINGS',

@@ -1489,6 +1489,125 @@ test_protocol_version(PGconn *conn)
 	PQconninfoFree(opts);
 }
 
+/*
+ * Run a command that returns no rows, and fail unless it succeeds.
+ */
+static void
+exec_command_ok(PGconn *conn, const char *sql)
+{
+	PGresult   *res = PQexec(conn, sql);
+
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("\"%s\" failed: %s", sql, PQerrorMessage(conn));
+	PQclear(res);
+}
+
+/*
+ * Return the last_commit_lsn reported to us, failing if none has been, and
+ * check that it matches what the server shows.
+ */
+static char *
+reported_commit_lsn(PGconn *conn)
+{
+	const char *reported = PQparameterStatus(conn, "last_commit_lsn");
+	PGresult   *res;
+
+	if (reported == NULL)
+		pg_fatal("last_commit_lsn was not reported");
+
+	res = PQexec(conn, "SHOW last_commit_lsn");
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		pg_fatal("SHOW last_commit_lsn failed: %s", PQerrorMessage(conn));
+	if (strcmp(PQgetvalue(res, 0, 0), reported) != 0)
+		pg_fatal("last_commit_lsn reported as %s, but shown as %s",
+				 reported, PQgetvalue(res, 0, 0));
+	PQclear(res);
+
+	return pg_strdup(reported);
+}
+
+/*
+ * Test that last_commit_lsn is reported once report_commit_lsn is on, after
+ * each commit that wrote a commit record, and not otherwise.
+ */
+static void
+test_report_commit_lsn(PGconn *conn)
+{
+	PGresult   *res;
+	char	   *lsn;
+	char	   *prev;
+
+	exec_command_ok(conn, "CREATE TABLE commit_lsn_tbl (a int)");
+	if (PQparameterStatus(conn, "last_commit_lsn") != NULL)
+		pg_fatal("last_commit_lsn reported without report_commit_lsn");
+
+	/* Turning it on reports the value, which hasn't been reported yet */
+	exec_command_ok(conn, "SET report_commit_lsn = on");
+	prev = reported_commit_lsn(conn);
+	if (strcmp(prev, "0/00000000") == 0)
+		pg_fatal("last_commit_lsn not set by CREATE TABLE");
+
+	/* An autocommit INSERT reports a new value */
+	exec_command_ok(conn, "INSERT INTO commit_lsn_tbl VALUES (1)");
+	lsn = reported_commit_lsn(conn);
+	if (strcmp(lsn, prev) == 0)
+		pg_fatal("last_commit_lsn not advanced by INSERT");
+	pg_free(prev);
+	prev = lsn;
+
+	/* A rolled back transaction doesn't */
+	exec_command_ok(conn, "BEGIN");
+	exec_command_ok(conn, "INSERT INTO commit_lsn_tbl VALUES (2)");
+	exec_command_ok(conn, "ROLLBACK");
+	lsn = reported_commit_lsn(conn);
+	if (strcmp(lsn, prev) != 0)
+		pg_fatal("last_commit_lsn advanced by ROLLBACK, from %s to %s",
+				 prev, lsn);
+	pg_free(lsn);
+
+	/*
+	 * In a pipeline, the value is reported at the Sync, before the
+	 * ReadyForQuery, and so it's known once the pipeline's results are.
+	 */
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("failed to enter pipeline mode: %s", PQerrorMessage(conn));
+	if (PQsendQueryParams(conn, "BEGIN", 0, NULL, NULL, NULL, NULL, 0) != 1 ||
+		PQsendQueryParams(conn, "INSERT INTO commit_lsn_tbl VALUES (3)",
+						  0, NULL, NULL, NULL, NULL, 0) != 1 ||
+		PQsendQueryParams(conn, "COMMIT", 0, NULL, NULL, NULL, NULL, 0) != 1 ||
+		PQsendQueryParams(conn, "SELECT current_setting('last_commit_lsn')",
+						  0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("failed to send query: %s", PQerrorMessage(conn));
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("pipeline sync failed: %s", PQerrorMessage(conn));
+
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	lsn = pg_strdup(PQgetvalue(res, 0, 0));
+	PQclear(res);
+	consume_null_result(conn);
+	consume_result_status(conn, PGRES_PIPELINE_SYNC);
+
+	if (strcmp(PQparameterStatus(conn, "last_commit_lsn"), lsn) != 0)
+		pg_fatal("last_commit_lsn reported as %s after the pipeline, expected %s",
+				 PQparameterStatus(conn, "last_commit_lsn"), lsn);
+	if (strcmp(lsn, prev) == 0)
+		pg_fatal("last_commit_lsn not advanced by the pipeline's COMMIT");
+	if (PQexitPipelineMode(conn) != 1)
+		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
+	pg_free(prev);
+	pg_free(lsn);
+
+	exec_command_ok(conn, "DROP TABLE commit_lsn_tbl");
+
+	fprintf(stderr, "ok\n");
+}
+
 /* Notice processor: print notices, and count how many we got */
 static void
 notice_processor(void *arg, const char *message)
@@ -2172,6 +2291,7 @@ print_test_list(void)
 	printf("pipelined_insert\n");
 	printf("prepared\n");
 	printf("protocol_version\n");
+	printf("report_commit_lsn\n");
 	printf("simple_pipeline\n");
 	printf("singlerow\n");
 	printf("transaction\n");
@@ -2288,6 +2408,8 @@ main(int argc, char **argv)
 		test_prepared(conn);
 	else if (strcmp(testname, "protocol_version") == 0)
 		test_protocol_version(conn);
+	else if (strcmp(testname, "report_commit_lsn") == 0)
+		test_report_commit_lsn(conn);
 	else if (strcmp(testname, "simple_pipeline") == 0)
 		test_simple_pipeline(conn);
 	else if (strcmp(testname, "singlerow") == 0)

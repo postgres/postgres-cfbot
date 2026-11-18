@@ -658,6 +658,32 @@ SELECT * FROM trans_abc ORDER BY 1;
 
 DROP TABLE trans_abc;
 
+-- last_commit_lsn: the end of the commit record of this session's last commit
+CREATE TABLE trans_lsn (a int);
+SELECT current_setting('last_commit_lsn')::pg_lsn AS lsn \gset
+SELECT :'lsn'::pg_lsn > '0/0' AS set_by_create,
+       :'lsn'::pg_lsn <= pg_current_wal_insert_lsn() AS not_ahead;
+INSERT INTO trans_lsn VALUES (1);
+SELECT current_setting('last_commit_lsn')::pg_lsn > :'lsn' AS advanced;
+SELECT current_setting('last_commit_lsn')::pg_lsn AS lsn \gset
+-- unchanged by transactions that write no commit record
+SELECT count(*) FROM trans_lsn;
+BEGIN;
+INSERT INTO trans_lsn VALUES (2);
+ROLLBACK;
+BEGIN;
+INSERT INTO trans_lsn VALUES (3);
+SELECT current_setting('last_commit_lsn')::pg_lsn = :'lsn' AS unchanged;
+COMMIT;
+SELECT current_setting('last_commit_lsn')::pg_lsn > :'lsn' AS advanced;
+SELECT current_setting('last_commit_lsn')::pg_lsn AS lsn \gset
+-- parallel workers show the leader's value
+SET debug_parallel_query = on;
+SELECT current_setting('last_commit_lsn')::pg_lsn = :'lsn' AS same_in_worker;
+RESET debug_parallel_query;
+SET last_commit_lsn = '0/0';  -- error
+DROP TABLE trans_lsn;
+
 -- TRANSACTION SNAPSHOT
 -- Incorrect identifier.
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;

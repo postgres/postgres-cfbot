@@ -1423,6 +1423,16 @@ postgres=# SELECT pg_current_wal_insert_lsn();
    </para>
 
    <para>
+    Alternatively, the application can use the session's
+    <xref linkend="guc-last-commit-lsn"/>, the end of its most recent commit
+    record.  If <xref linkend="guc-report-commit-lsn"/> is on, the server
+    reports it to the client after each commit, before it is ready for the
+    next query, so no further query is needed;
+    <application>libpq</application> applications can read it with
+    <xref linkend="libpq-PQparameterStatus"/>.
+   </para>
+
+   <para>
     The <acronym>LSN</acronym> obtained from the primary is then communicated
     to the standby server. This can be managed at the application level or
     via the connection pooler.  On the standby, the application issues the

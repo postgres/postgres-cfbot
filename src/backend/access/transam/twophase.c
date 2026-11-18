@@ -2416,7 +2416,7 @@ RecordTransactionCommitPrepared(TransactionId xid,
 								 initfileinval,
 								 MyXactFlags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
 								 xid, gid);
-
+	XactLastCommitRecordEnd = recptr;
 
 	if (replorigin)
 		/* Move LSNs forward for this replication origin */

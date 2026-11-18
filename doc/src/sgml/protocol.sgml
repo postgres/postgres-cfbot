@@ -1548,6 +1548,9 @@ SELCT 1/0;<!-- this typo is intentional -->
     14; <varname>scram_iterations</varname> was not reported by releases
     before 16; <varname>search_path</varname> was not reported by releases
     before 18.)
+    <varname>last_commit_lsn</varname> is also reported, after each commit,
+    if <xref linkend="guc-report-commit-lsn"/> is on; releases before 20 do
+    not have it.
     Note that
     <varname>server_version</varname>,
     <varname>server_encoding</varname> and
