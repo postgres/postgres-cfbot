@@ -705,6 +705,66 @@ on true limit 1;
 explain (verbose, costs off)
 select null::int[] union all select null::int[] union all select null::bigint[];
 
+--
+-- Test estimation of the distinct-value count of an appendrel parent that was
+-- synthesized by flattening a UNION ALL.
+--
+-- Such a parent has no relation of its own, hence no pg_statistic entry, so
+-- before this was handled most questions about its columns' distinct-value
+-- counts fell back to DEFAULT_NUM_DISTINCT (200), however much data the members
+-- actually held.  We now derive low and high member-based estimates and let
+-- each consumer use the end that is conservative for its estimate.
+--
+-- Restore the default plan choices first; the tests above turned several off.
+reset enable_hashagg;
+reset enable_sort;
+reset enable_seqscan;
+reset enable_indexscan;
+reset enable_bitmapscan;
+reset enable_indexonlyscan;
+set max_parallel_workers_per_gather = 0;
+
+create temp table ua1 (id int);
+create temp table ua2 (id int);
+insert into ua1 select g from generate_series(1, 2000) g;
+insert into ua2 select g + 100000 from generate_series(1, 2000) g;
+create temp table ud (id int primary key);
+insert into ud select g from generate_series(1, 2000) g;
+create temp table uu (id int);
+insert into uu select g from generate_series(1, 2000) g;
+analyze ua1;
+analyze ua2;
+analyze ud;
+-- uu is deliberately left unanalyzed
+
+-- A semi-join over the flattened union.  With the historical default of 200
+-- distinct values, the inner side would look small enough to de-duplicate and
+-- hash rather than being joined with semi-join semantics.
+explain (costs off)
+select count(*) from ud where ud.id in
+  (select id from ua1 union all select id from ua2);
+
+-- The union's group count feeds the join below, so it has to be derived from
+-- the members rather than from a constant.
+explain (costs off)
+select count(*) from ud
+  join (select distinct id from
+          (select id from ua1 union all select id from ua2) x) y
+    on ud.id = y.id;
+
+-- A member with no statistics cannot contribute to the sum, so the union has
+-- no high end and consumers fall back to the largest member estimate.  The
+-- result must not depend on member order.
+explain (costs off)
+select count(*) from ud where ud.id in
+  (select id from ua1 union all select id from uu);
+
+explain (costs off)
+select count(*) from ud where ud.id in
+  (select id from uu union all select id from ua1);
+
+drop table ua1, ua2, ud, uu;
+
 -- Estimate a UNION's output rows as the sum of its children's distinct-group
 -- estimates, not the total input size.  Ensure we get an index nested loop
 explain (costs off)

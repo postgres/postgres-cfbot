@@ -98,6 +98,18 @@ typedef struct VariableStatData
 								 * clause */
 	bool		acl_ok;			/* true if user has SELECT privilege on all
 								 * rows from the table or column */
+
+	/*
+	 * Distinct-value planning ends derived without pg_statistic; zero if
+	 * unavailable.  For a flattened UNION ALL, the low end is the largest
+	 * member estimate, and the high end is their sum when every member is
+	 * estimable.  Divisor-based estimates use the low end; group-count and
+	 * numerator-based estimates use the high end when available.  The ends do
+	 * not describe value frequencies and must not replace an MCV or
+	 * histogram.
+	 */
+	double		ndistinct_lo;
+	double		ndistinct_hi;
 } VariableStatData;
 
 #define ReleaseVariableStats(vardata)  \
