@@ -70,6 +70,7 @@ tests += {
       't/059_remote_apply_status_interval.pl',
       't/060_multixact_crashed_updater.pl',
       't/061_recovery_target_prefetch.pl',
+      't/062_primary_shutdown_streaming.pl',
     ],
   },
 }
