@@ -1369,7 +1369,7 @@ dumpTablespaces(PGconn *conn)
 					   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
 					   "pg_catalog.pg_tablespace_location(oid), "
 					   "spcacl, acldefault('t', spcowner) AS acldefault, "
-					   "array_to_string(spcoptions, ', '),"
+					   "spcoptions, "
 					   "pg_catalog.shobj_description(oid, 'pg_tablespace') "
 					   "FROM pg_catalog.pg_tablespace "
 					   "WHERE spcname !~ '^pg_' "
@@ -1417,8 +1417,13 @@ dumpTablespaces(PGconn *conn)
 		appendPQExpBufferStr(buf, ";\n");
 
 		if (spcoptions && spcoptions[0] != '\0')
-			appendPQExpBuffer(buf, "ALTER TABLESPACE %s SET (%s);\n",
-							  fspcname, spcoptions);
+		{
+			appendPQExpBuffer(buf, "ALTER TABLESPACE %s SET (", fspcname);
+			if (!appendReloptionsArray(buf, spcoptions, "",
+									   PQclientEncoding(conn), true))
+				pg_fatal("could not parse reloptions array");
+			appendPQExpBufferStr(buf, ");\n");
+		}
 
 		/* tablespaces can't have initprivs */
 
