@@ -321,6 +321,7 @@ extern bool BufferBeginSetHintBits(Buffer buffer);
 extern void BufferFinishSetHintBits(Buffer buffer, bool mark_dirty, bool buffer_std);
 
 extern void UnlockBuffers(void);
+extern void BufferLockReleaseAll(void);
 extern void UnlockBuffer(Buffer buffer);
 extern void LockBufferInternal(Buffer buffer, BufferLockMode mode);
 
