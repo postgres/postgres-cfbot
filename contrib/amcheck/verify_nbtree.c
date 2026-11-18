@@ -446,11 +446,18 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 	 * user may have deliberately excluded the corrupt table from table-level
 	 * verification, which is what reports a missing main fork.
 	 */
-	if (state->heaprel->rd_rel->relam == HEAP_TABLE_AM_OID &&
-		smgrexists(RelationGetSmgr(state->heaprel), MAIN_FORKNUM))
-		state->heapnblocks = RelationGetNumberOfBlocks(state->heaprel);
-	else
+	if (state->heaprel->rd_rel->relam != HEAP_TABLE_AM_OID)
+	{
+		ereport(NOTICE,
+				(errmsg_internal("skipping beyond-end-of-table checks for index \"%s\" because table \"%s\" does not use the heap access method",
+								 RelationGetRelationName(state->rel),
+								 RelationGetRelationName(state->heaprel))));
 		state->heapnblocks = InvalidBlockNumber;
+	}
+	else if (!smgrexists(RelationGetSmgr(state->heaprel), MAIN_FORKNUM))
+		state->heapnblocks = InvalidBlockNumber;
+	else
+		state->heapnblocks = RelationGetNumberOfBlocks(state->heaprel);
 	state->heapallindexed = heapallindexed;
 	state->indexallkeysmatch = indexallkeysmatch;
 	state->rootdescend = rootdescend;
