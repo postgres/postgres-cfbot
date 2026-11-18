@@ -434,8 +434,12 @@ GetPubPartitionOptionRelations(List *result, PublicationPartOpt pub_partopt,
 	if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE &&
 		pub_partopt != PUBLICATION_PART_ROOT)
 	{
-		List	   *all_parts = find_all_inheritors(relid, NoLock,
-													NULL);
+		/*
+		 * A partition pending detach is not published through its parent, so
+		 * leave it out here.
+		 */
+		List	   *all_parts = find_all_inheritors_extended(relid, true,
+															 NoLock, NULL);
 
 		if (pub_partopt == PUBLICATION_PART_ALL)
 			result = list_concat(result, all_parts);

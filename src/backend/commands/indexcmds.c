@@ -1267,7 +1267,7 @@ DefineIndex(ParseState *pstate,
 	 */
 	if (partitioned && stmt->relation && !stmt->relation->inh)
 	{
-		PartitionDesc pd = RelationGetPartitionDesc(rel, true);
+		PartitionDesc pd = RelationGetPartitionDesc(rel);
 
 		if (pd->nparts != 0)
 			flags |= INDEX_CREATE_INVALID;
@@ -1337,7 +1337,7 @@ DefineIndex(ParseState *pstate,
 		 *
 		 * If we're called internally (no stmt->relation), recurse always.
 		 */
-		partdesc = RelationGetPartitionDesc(rel, true);
+		partdesc = RelationGetPartitionDesc(rel);
 		if ((!stmt->relation || stmt->relation->inh) && partdesc->nparts > 0)
 		{
 			int			nparts = partdesc->nparts;

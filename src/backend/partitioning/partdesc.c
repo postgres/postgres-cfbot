@@ -46,6 +46,7 @@ typedef struct PartitionDirectoryEntry
 	PartitionDesc pd;
 } PartitionDirectoryEntry;
 
+static PartitionDesc get_partition_desc(Relation rel, bool omit_detached);
 static PartitionDesc RelationBuildPartitionDesc(Relation rel,
 												bool omit_detached);
 
@@ -68,7 +69,17 @@ static PartitionDesc RelationBuildPartitionDesc(Relation rel,
  * that the data doesn't become stale.
  */
 PartitionDesc
-RelationGetPartitionDesc(Relation rel, bool omit_detached)
+RelationGetPartitionDesc(Relation rel)
+{
+	return get_partition_desc(rel, false);
+}
+
+/*
+ * get_partition_desc -- workhorse for RelationGetPartitionDesc and
+ * PartitionDirectoryLookup.  Only queries omit partitions pending detach.
+ */
+static PartitionDesc
+get_partition_desc(Relation rel, bool omit_detached)
 {
 	Assert(rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE);
 
@@ -467,7 +478,7 @@ PartitionDirectoryLookup(PartitionDirectory pdir, Relation rel)
 		 */
 		RelationIncrementReferenceCount(rel);
 		pde->rel = rel;
-		pde->pd = RelationGetPartitionDesc(rel, pdir->omit_detached);
+		pde->pd = get_partition_desc(rel, pdir->omit_detached);
 		Assert(pde->pd != NULL);
 	}
 	return pde->pd;
