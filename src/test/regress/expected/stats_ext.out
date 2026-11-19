@@ -3653,25 +3653,22 @@ CREATE TABLE sb_1 AS
   FROM generate_series(1, 1e4) AS gs;
 CREATE TABLE sb_2 AS
   SELECT gs % 49 AS x, gs % 51 AS y, gs % 73 AS z, 'abc' || gs AS payload
-  FROM generate_series(1, 1e4) AS gs;
+  FROM generate_series(1, 2e4) AS gs;
 ANALYZE sb_1, sb_2;
 -- During hash join estimation, the number of distinct values on each column
--- is calculated. The optimizer selects the smallest number of distinct values
--- and the largest hash bucket size. The optimizer decides that the hash
--- bucket size is quite big because there are possibly many correlations.
-EXPLAIN (COSTS OFF) -- Choose merge join
+-- is calculated.  Without extended statistics covering the columns, the
+-- bucket size now comes from the joint ndistinct of the hash key columns,
+-- bounded by the input row count, so the bucket is no longer overpriced.
+EXPLAIN (COSTS OFF) -- Choose hash join
 SELECT * FROM sb_1 a, sb_2 b WHERE a.x = b.x AND a.y = b.y AND a.z = b.z;
-                         QUERY PLAN                          
--------------------------------------------------------------
- Merge Join
-   Merge Cond: ((a.z = b.z) AND (a.x = b.x) AND (a.y = b.y))
-   ->  Sort
-         Sort Key: a.z, a.x, a.y
-         ->  Seq Scan on sb_1 a
-   ->  Sort
-         Sort Key: b.z, b.x, b.y
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Hash Join
+   Hash Cond: ((a.x = b.x) AND (a.y = b.y) AND (a.z = b.z))
+   ->  Seq Scan on sb_1 a
+   ->  Hash
          ->  Seq Scan on sb_2 b
-(8 rows)
+(5 rows)
 
 -- The ndistinct extended statistics on (x, y, z) provides more reliable value
 -- of bucket size.
@@ -3720,7 +3717,7 @@ RESET enable_mergejoin;
 SELECT * FROM check_estimated_rows('SELECT * FROM sb_2 WHERE numeric_lt(y, 1.0)');
  estimated | actual 
 -----------+--------
-      3333 |    196
+      6667 |    392
 (1 row)
 
 CREATE STATISTICS extstat_sb_2_small ON numeric_lt(y, 1.0) FROM sb_2;
@@ -3728,7 +3725,7 @@ ANALYZE sb_2;
 SELECT * FROM check_estimated_rows('SELECT * FROM sb_2 WHERE numeric_lt(y, 1.0)');
  estimated | actual 
 -----------+--------
-       196 |    196
+       392 |    392
 (1 row)
 
 -- Tidy up
