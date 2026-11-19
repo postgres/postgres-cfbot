@@ -220,3 +220,35 @@ NOTICE:  relation "ctas_ine_tbl" already exists, skipping
 (0 rows)
 
 DROP TABLE ctas_ine_tbl;
+-- CREATE TABLE AS EXECUTE needs a prepared SELECT, with or without EXPLAIN
+CREATE TABLE ctas_exec_src (a int);
+PREPARE ctas_exec_ins AS INSERT INTO ctas_exec_src VALUES (1) RETURNING *;
+PREPARE ctas_exec_into AS SELECT 1 AS a INTO ctas_exec_inner;
+CREATE TABLE ctas_exec_tbl AS EXECUTE ctas_exec_ins; -- error
+ERROR:  prepared statement is not a SELECT
+CREATE TABLE ctas_exec_tbl AS EXECUTE ctas_exec_into; -- error
+ERROR:  prepared statement is not a SELECT
+EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF, BUFFERS OFF)
+  CREATE TABLE ctas_exec_tbl AS EXECUTE ctas_exec_ins; -- error
+ERROR:  prepared statement is not a SELECT
+EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF, BUFFERS OFF)
+  CREATE TABLE ctas_exec_tbl AS EXECUTE ctas_exec_into; -- error
+ERROR:  prepared statement is not a SELECT
+EXPLAIN (COSTS OFF)
+  CREATE TABLE ctas_exec_tbl AS EXECUTE ctas_exec_ins; -- error
+ERROR:  prepared statement is not a SELECT
+SELECT count(*) FROM ctas_exec_src;
+ count 
+-------
+     0
+(1 row)
+
+SELECT relname FROM pg_class
+  WHERE relname IN ('ctas_exec_tbl', 'ctas_exec_inner');
+ relname 
+---------
+(0 rows)
+
+DEALLOCATE ctas_exec_ins;
+DEALLOCATE ctas_exec_into;
+DROP TABLE ctas_exec_src;
