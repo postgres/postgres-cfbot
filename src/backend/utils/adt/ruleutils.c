@@ -381,6 +381,10 @@ static void set_simple_column_names(deparse_namespace *dpns);
 static bool has_dangerous_join_using(deparse_namespace *dpns, Node *jtnode);
 static void set_using_names(deparse_namespace *dpns, Node *jtnode,
 							List *parentUsing);
+static void add_function_new_colnames(List *funcnewcols, List *funcendcols,
+									  int endcol, int *next_new_col,
+									  deparse_namespace *dpns,
+									  deparse_columns *colinfo);
 static void set_relation_column_names(deparse_namespace *dpns,
 									  RangeTblEntry *rte,
 									  deparse_columns *colinfo);
@@ -4377,6 +4381,45 @@ set_using_names(deparse_namespace *dpns, Node *jtnode, List *parentUsing)
 }
 
 /*
+ * add_function_new_colnames: append to new_colnames[] the columns that
+ * functions have gained since parse time, for the functions whose parse-time
+ * columns end at column number endcol of the RTE (0 for leading functions
+ * that had no columns).  Such columns have no varattno, so they appear only
+ * in new_colnames[].  *next_new_col is the next free slot there; it is
+ * advanced.
+ */
+static void
+add_function_new_colnames(List *funcnewcols, List *funcendcols, int endcol,
+						  int *next_new_col, deparse_namespace *dpns,
+						  deparse_columns *colinfo)
+{
+	ListCell   *lcn;
+	ListCell   *lce;
+
+	forboth(lcn, funcnewcols, lce, funcendcols)
+	{
+		if (lfirst_int(lce) != endcol)
+			continue;
+		foreach_ptr(char, newname, (List *) lfirst(lcn))
+		{
+			newname = make_colname_unique(newname, dpns, colinfo);
+			add_to_names_hash(colinfo, newname);
+			colinfo->new_colnames[*next_new_col] = newname;
+			colinfo->is_new_col[*next_new_col] = true;
+			(*next_new_col)++;
+
+			/*
+			 * Without a names hash, colname_is_unique finds a name that is
+			 * not in colnames[], such as this one, only by scanning
+			 * new_colnames[] up to num_new_cols.  The entries before
+			 * *next_new_col are all filled in.
+			 */
+			colinfo->num_new_cols = *next_new_col;
+		}
+	}
+}
+
+/*
  * set_relation_column_names: select column aliases for a non-join RTE
  *
  * Column alias info is saved in *colinfo, which is assumed to be pre-zeroed.
@@ -4393,6 +4436,9 @@ set_relation_column_names(deparse_namespace *dpns, RangeTblEntry *rte,
 	int			noldcolumns;
 	int			i;
 	int			j;
+	List	   *funcnewcols = NIL;	/* per function: new column names */
+	List	   *funcendcols = NIL;	/* per function: parse-time end column */
+	int			nfuncnew = 0;
 
 	/*
 	 * Construct an array of the current "real" column names of the RTE.
@@ -4445,9 +4491,49 @@ set_relation_column_names(deparse_namespace *dpns, RangeTblEntry *rte,
 		 */
 		if (rte->rtekind == RTE_FUNCTION && rte->functions != NIL)
 		{
+			int			endcol = 0;
+
 			/* Since we're not creating Vars, rtindex etc. don't matter */
 			expandRTE(rte, 1, 0, VAR_RETURNING_DEFAULT, -1,
 					  true /* include dropped */ , &colnames, NULL);
+
+			/*
+			 * expandRTE() reports only as many columns of a function that
+			 * returns a composite type as there were at parse time, but a
+			 * reparsed query would see the columns added since, in the middle
+			 * of the RTE's columns if there are several functions or an
+			 * ordinality column.  Find out which functions got new columns,
+			 * and where they go.
+			 */
+			foreach(lc, rte->functions)
+			{
+				RangeTblFunction *rtfunc = (RangeTblFunction *) lfirst(lc);
+				TupleDesc	tupdesc;
+				TypeFuncClass functypclass;
+				List	   *newcols = NIL;
+
+				functypclass = get_expr_result_type(rtfunc->funcexpr, NULL,
+													&tupdesc);
+				if (functypclass == TYPEFUNC_COMPOSITE ||
+					functypclass == TYPEFUNC_COMPOSITE_DOMAIN)
+				{
+					Assert(tupdesc);
+					for (i = rtfunc->funccolcount; i < tupdesc->natts; i++)
+					{
+						Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+						if (!attr->attisdropped)
+						{
+							newcols = lappend(newcols,
+											  pstrdup(NameStr(attr->attname)));
+							nfuncnew++;
+						}
+					}
+				}
+				endcol += rtfunc->funccolcount;
+				funcnewcols = lappend(funcnewcols, newcols);
+				funcendcols = lappend_int(funcendcols, endcol);
+			}
 		}
 		else
 			colnames = rte->eref->colnames;
@@ -4485,12 +4571,14 @@ set_relation_column_names(deparse_namespace *dpns, RangeTblEntry *rte,
 	/*
 	 * Make sufficiently large new_colnames and is_new_col arrays, too.
 	 *
-	 * Note: because we leave colinfo->num_new_cols zero until after the loop,
-	 * colname_is_unique will not consult that array, which is fine because it
-	 * would only be duplicate effort.
+	 * Note: we leave colinfo->num_new_cols zero until after the loop, except
+	 * that add_function_new_colnames() advances it, because the names that
+	 * function adds are only in new_colnames[].  For the other columns,
+	 * colname_is_unique need not consult that array: their names are in
+	 * colnames[] as well.
 	 */
-	colinfo->new_colnames = palloc_array(char *, ncolumns);
-	colinfo->is_new_col = palloc_array(bool, ncolumns);
+	colinfo->new_colnames = palloc_array(char *, ncolumns + nfuncnew);
+	colinfo->is_new_col = palloc_array(bool, ncolumns + nfuncnew);
 
 	/* If the RTE is wide enough, use a hash table to avoid O(N^2) costs */
 	build_colinfo_names_hash(colinfo);
@@ -4500,11 +4588,17 @@ set_relation_column_names(deparse_namespace *dpns, RangeTblEntry *rte,
 	 * colinfo->colnames and colinfo->new_colnames.  The former array has NULL
 	 * entries for dropped columns, the latter omits them.  Also mark
 	 * new_colnames entries as to whether they are new since parse time; this
-	 * is the case for entries beyond the length of rte->eref->colnames.
+	 * is the case for entries beyond the length of rte->eref->colnames, and
+	 * for the columns that a function has got since parse time (which
+	 * add_function_new_colnames() adds, possibly in the middle).
 	 */
 	noldcolumns = list_length(rte->eref->colnames);
 	changed_any = false;
 	j = 0;
+
+	/* New columns of leading functions that had no columns come first */
+	add_function_new_colnames(funcnewcols, funcendcols, 0, &j, dpns, colinfo);
+
 	for (i = 0; i < ncolumns; i++)
 	{
 		char	   *real_colname = real_colnames[i];
@@ -4514,34 +4608,42 @@ set_relation_column_names(deparse_namespace *dpns, RangeTblEntry *rte,
 		if (real_colname == NULL)
 		{
 			Assert(colname == NULL);	/* colnames[i] is already NULL */
-			continue;
 		}
-
-		/* If alias already assigned, that's what to use */
-		if (colname == NULL)
+		else
 		{
-			/* If user wrote an alias, prefer that over real column name */
-			if (rte->alias && i < list_length(rte->alias->colnames))
-				colname = strVal(list_nth(rte->alias->colnames, i));
-			else
-				colname = real_colname;
+			/* If alias already assigned, that's what to use */
+			if (colname == NULL)
+			{
+				/* If user wrote an alias, prefer that over real column name */
+				if (rte->alias && i < list_length(rte->alias->colnames))
+					colname = strVal(list_nth(rte->alias->colnames, i));
+				else
+					colname = real_colname;
 
-			/* Unique-ify and insert into colinfo */
-			colname = make_colname_unique(colname, dpns, colinfo);
+				/* Unique-ify and insert into colinfo */
+				colname = make_colname_unique(colname, dpns, colinfo);
 
-			colinfo->colnames[i] = colname;
-			add_to_names_hash(colinfo, colname);
+				colinfo->colnames[i] = colname;
+				add_to_names_hash(colinfo, colname);
+			}
+
+			/* Put names of non-dropped columns in new_colnames[] too */
+			colinfo->new_colnames[j] = colname;
+			/* And mark them as new or not */
+			colinfo->is_new_col[j] = (i >= noldcolumns);
+			j++;
+
+			/* Remember if any assigned aliases differ from "real" name */
+			if (!changed_any && strcmp(colname, real_colname) != 0)
+				changed_any = true;
 		}
 
-		/* Put names of non-dropped columns in new_colnames[] too */
-		colinfo->new_colnames[j] = colname;
-		/* And mark them as new or not */
-		colinfo->is_new_col[j] = (i >= noldcolumns);
-		j++;
-
-		/* Remember if any assigned aliases differ from "real" name */
-		if (!changed_any && strcmp(colname, real_colname) != 0)
-			changed_any = true;
+		/*
+		 * If this is the last parse-time column of a function that has got
+		 * new columns, they come right after it.
+		 */
+		add_function_new_colnames(funcnewcols, funcendcols, i + 1, &j,
+								  dpns, colinfo);
 	}
 
 	/* We're now done needing the colinfo's names_hash */
@@ -4549,9 +4651,11 @@ set_relation_column_names(deparse_namespace *dpns, RangeTblEntry *rte,
 
 	/*
 	 * Set correct length for new_colnames[] array.  (Note: if columns have
-	 * been added, colinfo->num_cols includes them, which is not really quite
-	 * right but is harmless, since any new columns must be at the end where
-	 * they won't affect varattnos of pre-existing columns.)
+	 * been added to a relation, colinfo->num_cols includes them, which is not
+	 * really quite right but is harmless, since any new columns must be at
+	 * the end where they won't affect varattnos of pre-existing columns.  The
+	 * columns that a function has got since parse time are not counted in
+	 * num_cols; they have no varattno.)
 	 */
 	colinfo->num_new_cols = j;
 
