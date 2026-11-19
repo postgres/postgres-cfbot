@@ -1999,6 +1999,65 @@ EXEC SQL EXECUTE mystmt USING 42, 'foobar';
    </para>
 
    <para>
+    A prepared statement can also be executed by writing its parameter
+    values in parentheses after the statement name, as in the SQL
+    command <xref linkend="sql-execute"/>:
+<programlisting>
+EXEC SQL PREPARE mystmt2(int, text) AS INSERT INTO test1 VALUES($1, $2);
+ ...
+EXEC SQL EXECUTE mystmt2(:id, :name);
+</programlisting>
+    In this form, host variables in the parenthesized list are not sent
+    to the server as separate parameter values.  Instead, the value of
+    each host variable is inserted, without quoting, into the text of
+    the <command>EXECUTE</command> command, and the server parses the
+    resulting command as SQL.  This is the case regardless of how the
+    statement was prepared.  As a consequence:
+   </para>
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      Integer, floating-point and <type>numeric</type> host variables work
+      as expected for ordinary finite values.  <literal>NaN</literal> and
+      infinite values of floating-point and <type>numeric</type> host
+      variables do not work.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      A character host variable must contain a complete SQL literal for
+      the parameter, including the enclosing single quotes and escaped as
+      required by the connection's client encoding and settings.  For
+      example, to pass the string <literal>O'Brien</literal>, the variable
+      must contain <literal>'O''Brien'</literal>.  A value that is not
+      written this way is parsed as part of the SQL command, so a value
+      taken from untrusted input can change the command that is executed.
+      The <application>libpq</application> function
+      <xref linkend="libpq-PQescapeLiteral"/>, called with the connection
+      handle returned by <function>ECPGget_PGconn()</function>
+      (see <xref linkend="ecpg-library"/>), produces such a literal.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      Boolean, date, timestamp and interval host variables do not work in
+      this list, because their values are not inserted as valid literals
+      of their types.
+     </para>
+    </listitem>
+   </itemizedlist>
+
+   <para>
+    To pass host variable values to a prepared statement as separate
+    parameter values, without these restrictions, use
+    <literal>USING</literal> as shown above.  This works regardless of how
+    the statement was prepared.
+   </para>
+
+   <para>
     When you don't need the prepared statement anymore, you should
     deallocate it:
 <programlisting>
@@ -7659,6 +7718,13 @@ PREPARE <replaceable class="parameter">prepared_name</replaceable> FROM <replace
      later be handled according to C rules; but <literal>\"</literal>
      causes an immediate syntax error because it is seen as ending the
      literal.
+    </para>
+
+    <para>
+     A prepared statement can be executed with <literal>USING</literal>,
+     or with its parameter values in parentheses after the statement name.
+     In the second form, host variable values are inserted into the
+     command text without quoting; see <xref linkend="ecpg-dynamic-input"/>.
     </para>
    </refsect1>
 
