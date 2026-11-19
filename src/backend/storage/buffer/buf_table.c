@@ -3,6 +3,27 @@
  * buf_table.c
  *	  routines for mapping BufferTags to buffer indexes.
  *
+ * The shared buffer mapping table is a flat, index-linked hash table (an
+ * open-chaining replacement for the former dynahash-based table).  It is made
+ * of two shared-memory arrays:
+ *
+ *	  buckets[num_buckets] - one chain head per hash bucket
+ *	  entries[NBuffers]     - one entry per buffer, indexed by buf_id
+ *
+ * Each buffer slot i permanently owns entry slot i, so no freelist is needed:
+ * bufmgr always removes a buffer's old mapping (BufTableDelete, called from
+ * InvalidateVictimBuffer) before inserting a new tag for that same buf_id (see
+ * GetVictimBuffer / BufferAlloc in bufmgr.c).  Empty entry slots are marked by
+ * tag.blockNum == P_NEW; chains are linked by int index and terminated by
+ * BUF_TABLE_CHAIN_END.
+ *
+ * num_buckets is a power of two and a multiple of NUM_BUFFER_PARTITIONS, so the
+ * bucket index (hashcode % num_buckets) shares its low bits with the partition
+ * index (hashcode % NUM_BUFFER_PARTITIONS).  Every tag that maps to a given
+ * bucket therefore maps to a single partition, and the caller's BufMappingLock
+ * fully serializes each chain -- the same guarantee the dynahash table relied
+ * on.
+ *
  * Note: the routines in this file do no locking of their own.  The caller
  * must hold a suitable lock on the appropriate BufMappingLock, as specified
  * in the comments.  We can't do the locking inside these functions because
@@ -21,54 +42,112 @@
  */
 #include "postgres.h"
 
+#include "common/hashfn.h"
+#include "miscadmin.h"
+#include "port/pg_bitutils.h"
 #include "storage/buf_internals.h"
+#include "storage/bufmgr.h"
+#include "storage/shmem.h"
 #include "storage/subsystems.h"
+
+#define BUF_TABLE_CHAIN_END  (-1)
+
+/* bucket for buffer lookup hashtable */
+typedef struct
+{
+	int			head;			/* head of hash chain, or BUF_TABLE_CHAIN_END */
+} BufferLookupBucket;
 
 /* entry for buffer lookup hashtable */
 typedef struct
 {
-	BufferTag	key;			/* Tag of a disk page */
-	int			id;				/* Associated buffer ID */
+	BufferTag	tag;			/* Tag of a disk page, or P_NEW if empty */
+	int			next;			/* next entry in hash chain */
 } BufferLookupEnt;
 
-static HTAB *SharedBufHash;
+/* bucket and entry arrays for buffer lookup hashtable (in shared memory) */
+static BufferLookupBucket *buckets;
+static BufferLookupEnt *entries;
+
+/* number of hash buckets; power of two and multiple of NUM_BUFFER_PARTITIONS */
+static int	num_buckets;
 
 static void BufTableShmemRequest(void *arg);
+static void BufTableShmemInit(void *arg);
+static void BufTableShmemAttach(void *arg);
 
 const ShmemCallbacks BufTableShmemCallbacks = {
 	.request_fn = BufTableShmemRequest,
-	/* no special initialization needed, the hash table will start empty */
+	.init_fn = BufTableShmemInit,
+	.attach_fn = BufTableShmemAttach,
 };
 
 /*
- * Register shmem hash table for mapping buffers.
- *		size is the desired hash table size (possibly more than NBuffers)
+ * Number of hash buckets for the current NBuffers.
+ *
+ * Must be a power of two (so hashcode % num_buckets == hashcode & (num_buckets
+ * - 1)) and a multiple of NUM_BUFFER_PARTITIONS, so that every tag in a bucket
+ * maps to a single buffer partition (see file header).
+ */
+static inline int
+BufTableNumBuckets(void)
+{
+	return Max(NUM_BUFFER_PARTITIONS, pg_nextpower2_32(1.5 * NBuffers));
+}
+
+/*
+ * Register shared memory arrays for mapping buffers.
  */
 void
 BufTableShmemRequest(void *arg)
 {
-	int			size;
+	num_buckets = BufTableNumBuckets();
+	Assert(num_buckets % NUM_BUFFER_PARTITIONS == 0);
 
-	/*
-	 * Request the shared buffer lookup hashtable.
-	 *
-	 * Since we can't tolerate running out of lookup table entries, we must be
-	 * sure to specify an adequate table size here.  The maximum steady-state
-	 * usage is of course NBuffers entries, but BufferAlloc() tries to insert
-	 * a new entry before deleting the old.  In principle this could be
-	 * happening in each partition concurrently, so we could need as many as
-	 * NBuffers + NUM_BUFFER_PARTITIONS entries.
-	 */
-	size = NBuffers + NUM_BUFFER_PARTITIONS;
-
-	ShmemRequestHash(.name = "Shared Buffer Lookup Table",
-					 .nelems = size,
-					 .ptr = &SharedBufHash,
-					 .hash_info.keysize = sizeof(BufferTag),
-					 .hash_info.entrysize = sizeof(BufferLookupEnt),
-					 .hash_info.num_partitions = NUM_BUFFER_PARTITIONS,
-					 .hash_flags = HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_FIXED_SIZE,
+	ShmemRequestStruct(.name = "Shared Buffer Lookup Buckets",
+					   .size = (Size) num_buckets * sizeof(BufferLookupBucket),
+					   .ptr = (void **) &buckets,
 		);
+
+	ShmemRequestStruct(.name = "Shared Buffer Lookup Entries",
+					   .size = (Size) NBuffers * sizeof(BufferLookupEnt),
+					   .ptr = (void **) &entries,
+		);
+}
+
+/*
+ * Initialize the shared buffer lookup table.  Called once during shared-memory
+ * initialization (in the postmaster, or in a standalone backend).
+ *
+ * Shared memory is zeroed, but zero is a valid buf_id and block 0 is a valid
+ * block number, so we must explicitly mark every bucket empty
+ * (BUF_TABLE_CHAIN_END) and every entry empty (tag.blockNum == P_NEW).
+ */
+void
+BufTableShmemInit(void *arg)
+{
+	num_buckets = BufTableNumBuckets();
+
+	for (int i = 0; i < num_buckets; i++)
+		buckets[i].head = BUF_TABLE_CHAIN_END;
+
+	for (int i = 0; i < NBuffers; i++)
+	{
+		entries[i].tag.blockNum = P_NEW;
+		entries[i].next = BUF_TABLE_CHAIN_END;
+	}
+}
+
+/*
+ * Per-backend attach.  The buckets/entries pointers are restored by the shmem
+ * framework, but num_buckets is a process-local scalar that must be recomputed
+ * in each backend.  Forked children inherit it, but EXEC_BACKEND children run
+ * only the attach callback, so set it here too.
+ */
+void
+BufTableShmemAttach(void *arg)
+{
+	num_buckets = BufTableNumBuckets();
 }
 
 /*
@@ -83,7 +162,7 @@ BufTableShmemRequest(void *arg)
 uint32
 BufTableHashCode(BufferTag *tagPtr)
 {
-	return get_hash_value(SharedBufHash, tagPtr);
+	return tag_hash(tagPtr, sizeof(BufferTag));
 }
 
 /*
@@ -95,19 +174,15 @@ BufTableHashCode(BufferTag *tagPtr)
 int
 BufTableLookup(BufferTag *tagPtr, uint32 hashcode)
 {
-	BufferLookupEnt *result;
+	int			id = buckets[hashcode % num_buckets].head;
 
-	result = (BufferLookupEnt *)
-		hash_search_with_hash_value(SharedBufHash,
-									tagPtr,
-									hashcode,
-									HASH_FIND,
-									NULL);
-
-	if (!result)
-		return -1;
-
-	return result->id;
+	while (id != BUF_TABLE_CHAIN_END)
+	{
+		if (BufferTagsEqual(&entries[id].tag, tagPtr))
+			return id;
+		id = entries[id].next;
+	}
+	return -1;
 }
 
 /*
@@ -123,23 +198,35 @@ BufTableLookup(BufferTag *tagPtr, uint32 hashcode)
 int
 BufTableInsert(BufferTag *tagPtr, uint32 hashcode, int buf_id)
 {
-	BufferLookupEnt *result;
-	bool		found;
+	int			bucket_id = hashcode % num_buckets;
+	int			head = buckets[bucket_id].head;
+	int			id = head;
 
-	Assert(buf_id >= 0);		/* -1 is reserved for not-in-table */
+	Assert(buf_id >= 0 && buf_id < NBuffers);
 	Assert(tagPtr->blockNum != P_NEW);	/* invalid tag */
 
-	result = (BufferLookupEnt *)
-		hash_search_with_hash_value(SharedBufHash,
-									tagPtr,
-									hashcode,
-									HASH_ENTER,
-									&found);
+	/* If the tag is already in the chain, surface the existing buf_id. */
+	while (id != BUF_TABLE_CHAIN_END)
+	{
+		if (BufferTagsEqual(&entries[id].tag, tagPtr))
+			return id;
+		id = entries[id].next;
+	}
 
-	if (found)					/* found something already in the table */
-		return result->id;
+	/*
+	 * Not present.  entry[buf_id] must be empty: bufmgr always deletes a
+	 * buffer's old mapping before inserting a new tag for that buf_id.
+	 */
+	Assert(entries[buf_id].tag.blockNum == P_NEW);
 
-	result->id = buf_id;
+	/*
+	 * Link entry[buf_id] at the chain head, keeping the prior head as its
+	 * successor.  (Use the saved `head`, not `id`, which the loop above has
+	 * advanced to BUF_TABLE_CHAIN_END.)
+	 */
+	entries[buf_id].tag = *tagPtr;
+	entries[buf_id].next = head;
+	buckets[bucket_id].head = buf_id;
 
 	return -1;
 }
@@ -153,15 +240,32 @@ BufTableInsert(BufferTag *tagPtr, uint32 hashcode, int buf_id)
 void
 BufTableDelete(BufferTag *tagPtr, uint32 hashcode)
 {
-	BufferLookupEnt *result;
+	int			bucket_id = hashcode % num_buckets;
+	int			prev = BUF_TABLE_CHAIN_END;
+	int			id = buckets[bucket_id].head;
 
-	result = (BufferLookupEnt *)
-		hash_search_with_hash_value(SharedBufHash,
-									tagPtr,
-									hashcode,
-									HASH_REMOVE,
-									NULL);
+	while (id != BUF_TABLE_CHAIN_END)
+	{
+		if (BufferTagsEqual(&entries[id].tag, tagPtr))
+		{
+			/* unlink from the chain */
+			if (prev == BUF_TABLE_CHAIN_END)
+				buckets[bucket_id].head = entries[id].next;
+			else
+				entries[prev].next = entries[id].next;
+			/* mark the entry empty */
+			entries[id].tag.blockNum = P_NEW;
+			entries[id].next = BUF_TABLE_CHAIN_END;
+			return;
+		}
+		prev = id;
+		id = entries[id].next;
+	}
 
-	if (!result)				/* shouldn't happen */
-		elog(ERROR, "shared buffer hash table corrupted");
+	/*
+	 * Entry not in table.  Callers never double-delete (deletion is gated by
+	 * BM_TAG_VALID on the buffer header), so this indicates corruption.
+	 */
+	Assert(false);
+	elog(ERROR, "shared buffer hash table corrupted");
 }
