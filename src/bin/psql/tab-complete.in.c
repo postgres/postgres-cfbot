@@ -930,6 +930,17 @@ static const SchemaQuery Query_for_list_of_indexables = {
 	.result = "c.relname",
 };
 
+/* Relations supporting CREATE INDEX CONCURRENTLY */
+static const SchemaQuery Query_for_list_of_concurrent_indexables = {
+	.catname = "pg_catalog.pg_class c",
+	.selcondition =
+	"c.relkind IN (" CppAsString2(RELKIND_RELATION) ", "
+	CppAsString2(RELKIND_MATVIEW) ")",
+	.viscondition = "pg_catalog.pg_table_is_visible(c.oid)",
+	.namespace = "c.relnamespace",
+	.result = "c.relname",
+};
+
 /*
  * Relations supporting VACUUM are currently same as those supporting
  * indexing.
@@ -3547,11 +3558,26 @@ match_previous_words(int pattern_id,
 										"ON", "CONCURRENTLY");
 
 	/*
-	 * Complete ... INDEX|CONCURRENTLY [<name>] ON with a list of relations
-	 * that indexes can be created on
+	 * Complete CREATE [UNIQUE] INDEX CONCURRENTLY [<name>] ON with a list of
+	 * relations that support it, which leaves out partitioned tables.  CREATE
+	 * INDEX CONCURRENTLY can't be used inside CREATE SCHEMA, so these rules
+	 * match the whole command.  Matching only the end would also fire on
+	 * other commands, such as REPACK (CONCURRENTLY ON.
 	 */
-	else if (TailMatches("INDEX|CONCURRENTLY", MatchAny, "ON") ||
-			 TailMatches("INDEX|CONCURRENTLY", "ON"))
+	else if (Matches("CREATE", "INDEX", "CONCURRENTLY", "ON") ||
+			 Matches("CREATE", "INDEX", "CONCURRENTLY", MatchAny, "ON") ||
+			 Matches("CREATE", "UNIQUE", "INDEX", "CONCURRENTLY", "ON") ||
+			 Matches("CREATE", "UNIQUE", "INDEX", "CONCURRENTLY", MatchAny, "ON"))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_concurrent_indexables);
+
+	/*
+	 * Complete CREATE|UNIQUE INDEX [<name>] ON with a list of relations that
+	 * indexes can be created on.  This must not match any CONCURRENTLY form
+	 * (not even one with an index named "index"), or it would offer
+	 * partitioned tables there.
+	 */
+	else if (TailMatches("CREATE|UNIQUE", "INDEX", MatchAnyExcept("CONCURRENTLY"), "ON") ||
+			 TailMatches("CREATE|UNIQUE", "INDEX", "ON"))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_indexables);
 
 	/*
@@ -3563,7 +3589,8 @@ match_previous_words(int pattern_id,
 										"ON");
 	/* Complete CREATE|UNIQUE INDEX [CONCURRENTLY] <sth> with "ON" */
 	else if (TailMatches("CREATE|UNIQUE", "INDEX", MatchAny) ||
-			 TailMatches("CREATE|UNIQUE", "INDEX", "CONCURRENTLY", MatchAny))
+			 Matches("CREATE", "INDEX", "CONCURRENTLY", MatchAny) ||
+			 Matches("CREATE", "UNIQUE", "INDEX", "CONCURRENTLY", MatchAny))
 		COMPLETE_WITH("ON");
 
 	/*
@@ -3571,10 +3598,10 @@ match_previous_words(int pattern_id,
 	 * should really be in parens)
 	 */
 	else if (TailMatches("INDEX", MatchAny, "ON", MatchAny) ||
-			 TailMatches("INDEX|CONCURRENTLY", "ON", MatchAny))
+			 TailMatches("INDEX", "ON", MatchAny))
 		COMPLETE_WITH("(", "USING");
 	else if (TailMatches("INDEX", MatchAny, "ON", MatchAny, "(") ||
-			 TailMatches("INDEX|CONCURRENTLY", "ON", MatchAny, "("))
+			 TailMatches("INDEX", "ON", MatchAny, "("))
 		COMPLETE_WITH_ATTR(prev2_wd);
 	/* same if you put in USING */
 	else if (TailMatches("ON", MatchAny, "USING", MatchAny, "("))
