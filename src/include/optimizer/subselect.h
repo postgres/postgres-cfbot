@@ -27,7 +27,9 @@ extern JoinExpr *convert_ANY_sublink_to_join(PlannerInfo *root,
 extern JoinExpr *convert_EXISTS_sublink_to_join(PlannerInfo *root,
 												SubLink *sublink,
 												bool under_not,
-												Relids available_rels);
+												Relids available_rels,
+												Relids preserved_rels,
+												Node **replacement);
 extern Node *SS_replace_correlation_vars(PlannerInfo *root, Node *expr);
 extern Node *SS_process_sublinks(PlannerInfo *root, Node *expr, bool isQual);
 extern void SS_identify_outer_params(PlannerInfo *root);
