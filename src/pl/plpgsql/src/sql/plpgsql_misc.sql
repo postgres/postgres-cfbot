@@ -70,3 +70,26 @@ end $$;
 -- unterminated constructs should complain about the missing terminator
 do $$ begin if true $$;
 do $$ declare x int; begin x := 1 $$;
+
+-- ORDER BY ALL in PL/pgSQL queries (these go through the PLpgSQL_Expr grammar)
+create temp table plpgsql_order_all (a int, b text);
+insert into plpgsql_order_all values (3, 'foo'), (1, 'bar'), (2, 'baz'), (1, 'qux');
+
+do $$
+declare
+  r record;
+  cur cursor for select * from plpgsql_order_all order by all desc;
+begin
+  for r in select * from plpgsql_order_all order by all loop
+    raise notice 'for: a=%, b=%', r.a, r.b;
+  end loop;
+  open cur;
+  loop
+    fetch cur into r;
+    exit when not found;
+    raise notice 'cursor: a=%, b=%', r.a, r.b;
+  end loop;
+  close cur;
+end $$;
+
+drop table plpgsql_order_all;

@@ -110,3 +110,31 @@ do $$ declare x int; begin x := 1 $$;
 ERROR:  missing ";" at end of SQL statement
 LINE 1: do $$ declare x int; begin x := 1 $$;
                                           ^
+-- ORDER BY ALL in PL/pgSQL queries (these go through the PLpgSQL_Expr grammar)
+create temp table plpgsql_order_all (a int, b text);
+insert into plpgsql_order_all values (3, 'foo'), (1, 'bar'), (2, 'baz'), (1, 'qux');
+do $$
+declare
+  r record;
+  cur cursor for select * from plpgsql_order_all order by all desc;
+begin
+  for r in select * from plpgsql_order_all order by all loop
+    raise notice 'for: a=%, b=%', r.a, r.b;
+  end loop;
+  open cur;
+  loop
+    fetch cur into r;
+    exit when not found;
+    raise notice 'cursor: a=%, b=%', r.a, r.b;
+  end loop;
+  close cur;
+end $$;
+NOTICE:  for: a=1, b=bar
+NOTICE:  for: a=1, b=qux
+NOTICE:  for: a=2, b=baz
+NOTICE:  for: a=3, b=foo
+NOTICE:  cursor: a=3, b=foo
+NOTICE:  cursor: a=2, b=baz
+NOTICE:  cursor: a=1, b=qux
+NOTICE:  cursor: a=1, b=bar
+drop table plpgsql_order_all;

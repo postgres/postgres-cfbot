@@ -2216,6 +2216,12 @@ WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x ORDER BY 1)
 ERROR:  ORDER BY in a recursive query is not implemented
 LINE 1: ...VE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x ORDER BY 1)
                                                                      ^
+-- ORDER BY ALL
+WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x ORDER BY ALL)
+  SELECT * FROM x;
+ERROR:  ORDER BY in a recursive query is not implemented
+LINE 1: ... x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x ORDER BY ALL)
+                                                                ^
 -- LIMIT/OFFSET
 WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x LIMIT 10 OFFSET 1)
   SELECT * FROM x;

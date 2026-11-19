@@ -1821,3 +1821,96 @@ join (select ten from tenk1 union select ten from onek) s on s.ten = t.unique1;
          Index Cond: (unique1 = tenk1.ten)
 (8 rows)
 
+--
+-- ORDER BY ALL on set operations
+--
+create temp table union_order_all (a int, b text);
+insert into union_order_all values (3, 'foo'), (1, 'bar'), (2, null), (1, 'qux');
+select a, b from union_order_all union select a, b from union_order_all
+  order by all;
+ a |  b  
+---+-----
+ 1 | bar
+ 1 | qux
+ 2 | 
+ 3 | foo
+(4 rows)
+
+select a, b from union_order_all union all select a, b from union_order_all
+  order by all desc nulls last;
+ a |  b  
+---+-----
+ 3 | foo
+ 3 | foo
+ 2 | 
+ 2 | 
+ 1 | qux
+ 1 | qux
+ 1 | bar
+ 1 | bar
+(8 rows)
+
+select a, b from union_order_all intersect select a, b from union_order_all
+  order by all desc;
+ a |  b  
+---+-----
+ 3 | foo
+ 2 | 
+ 1 | qux
+ 1 | bar
+(4 rows)
+
+select a, b from union_order_all except select 1, 'bar'
+  order by all nulls first;
+ a |  b  
+---+-----
+ 1 | qux
+ 2 | 
+ 3 | foo
+(3 rows)
+
+select * from (select a, b from union_order_all
+               union all select a, b from union_order_all) s
+  order by all;
+ a |  b  
+---+-----
+ 1 | bar
+ 1 | bar
+ 1 | qux
+ 1 | qux
+ 2 | 
+ 2 | 
+ 3 | foo
+ 3 | foo
+(8 rows)
+
+-- a view over a set operation must deparse with ORDER BY ALL
+create view union_order_all_v as
+  select a, b from union_order_all union select a, b from union_order_all
+  order by all desc nulls last;
+NOTICE:  view "union_order_all_v" will be a temporary view
+DETAIL:  It depends on temporary table union_order_all.
+select pg_get_viewdef('union_order_all_v'::regclass, true);
+                  pg_get_viewdef                  
+--------------------------------------------------
+  SELECT union_order_all.a,                      +
+     union_order_all.b                           +
+    FROM union_order_all                         +
+ UNION                                           +
+  SELECT union_order_all.a,                      +
+     union_order_all.b                           +
+    FROM union_order_all                         +
+   ORDER BY 1 DESC NULLS LAST, 2 DESC NULLS LAST;
+(1 row)
+
+select * from union_order_all_v;
+ a |  b  
+---+-----
+ 3 | foo
+ 2 | 
+ 1 | qux
+ 1 | bar
+(4 rows)
+
+drop view union_order_all_v;
+drop table union_order_all;
