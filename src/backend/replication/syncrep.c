@@ -89,6 +89,8 @@
 
 /* User-settable parameters for sync rep */
 char	   *SyncRepStandbyNames;
+bool		SyncRepWaitOnQueryCancel = false;
+int			post_recovery_sync_level = SYNCHRONOUS_COMMIT_OFF;
 
 #define SyncStandbysDefined() \
 	(SyncRepStandbyNames != NULL && SyncRepStandbyNames[0] != '\0')
@@ -149,6 +151,7 @@ void
 SyncRepWaitForLSN(XLogRecPtr lsn, bool commit)
 {
 	int			mode;
+	bool		query_cancel_reported = false;
 
 	/*
 	 * This should be called while holding interrupts during a transaction
@@ -319,19 +322,29 @@ SyncRepWaitForLSN(XLogRecPtr lsn, bool commit)
 		}
 
 		/*
-		 * It's unclear what to do if a query cancel interrupt arrives.  We
-		 * can't actually abort at this point, but ignoring the interrupt
-		 * altogether is not helpful, so we just terminate the wait with a
-		 * suitable warning.
+		 * We can't actually abort at this point.  By default, terminate the
+		 * wait with a suitable warning.  If configured otherwise, continue
+		 * waiting so that query cancellation cannot make locally committed
+		 * data visible before it has been replicated.
 		 */
 		if (QueryCancelPending)
 		{
 			QueryCancelPending = false;
-			ereport(WARNING,
-					(errmsg("canceling wait for synchronous replication due to user request"),
-					 errdetail("The transaction has already committed locally, but might not have been replicated to the standby.")));
-			SyncRepCancelWait();
-			break;
+			if (!SyncRepWaitOnQueryCancel)
+			{
+				ereport(WARNING,
+						(errmsg("canceling wait for synchronous replication due to user request"),
+						 errdetail("The transaction has already committed locally, but might not have been replicated to the standby.")));
+				SyncRepCancelWait();
+				break;
+			}
+			if (!query_cancel_reported)
+			{
+				ereport(WARNING,
+						(errmsg("ignoring request to cancel wait for synchronous replication"),
+						 errdetail_internal("The locally written WAL record has not been replicated according to \"synchronous_standby_names\".")));
+				query_cancel_reported = true;
+			}
 		}
 
 		/*
@@ -1144,4 +1157,90 @@ assign_synchronous_commit(int newval, void *extra)
 			SyncRepWaitMode = SYNC_REP_NO_WAIT;
 			break;
 	}
+}
+
+void
+SyncRepInitPostRecovery(XLogRecPtr recovery_end_lsn)
+{
+	LWLockAcquire(SyncRepLock, LW_EXCLUSIVE);
+	WalSndCtl->post_recovery_sync_lsn = recovery_end_lsn;
+	memset(WalSndCtl->post_recovery_sync_complete, false,
+		   sizeof(WalSndCtl->post_recovery_sync_complete));
+	LWLockRelease(SyncRepLock);
+}
+
+/*
+ * Return whether the end-of-recovery LSN has reached the configured
+ * synchronous standbys at the level requested by this session.  Once a level
+ * is reached, it remains complete until the next postmaster start.
+ */
+bool
+SyncRepPostRecoveryComplete(void)
+{
+	bool		bypassed = false;
+	bool		can_complete = false;
+	bool		complete;
+	int			mode;
+
+	switch (post_recovery_sync_level)
+	{
+		case SYNCHRONOUS_COMMIT_REMOTE_WRITE:
+			mode = SYNC_REP_WAIT_WRITE;
+			break;
+		case SYNCHRONOUS_COMMIT_REMOTE_FLUSH:
+			mode = SYNC_REP_WAIT_FLUSH;
+			break;
+		case SYNCHRONOUS_COMMIT_REMOTE_APPLY:
+			mode = SYNC_REP_WAIT_APPLY;
+			break;
+		default:
+			return true;
+	}
+
+	LWLockAcquire(SyncRepLock, LW_SHARED);
+	complete = WalSndCtl->post_recovery_sync_complete[mode];
+	if (!complete &&
+		(WalSndCtl->sync_standbys_status & SYNC_STANDBY_INIT) != 0)
+	{
+		if ((WalSndCtl->sync_standbys_status & SYNC_STANDBY_DEFINED) == 0)
+			can_complete = true;
+		else if (WalSndCtl->lsn[mode] >=
+				 WalSndCtl->post_recovery_sync_lsn)
+			can_complete = true;
+	}
+	LWLockRelease(SyncRepLock);
+
+	if (can_complete)
+	{
+		LWLockAcquire(SyncRepLock, LW_EXCLUSIVE);
+		complete = WalSndCtl->post_recovery_sync_complete[mode];
+		if (!complete &&
+			(WalSndCtl->sync_standbys_status & SYNC_STANDBY_INIT) != 0)
+		{
+			if ((WalSndCtl->sync_standbys_status & SYNC_STANDBY_DEFINED) == 0)
+			{
+				memset(WalSndCtl->post_recovery_sync_complete, true,
+					   sizeof(WalSndCtl->post_recovery_sync_complete));
+				bypassed = complete = true;
+			}
+			else if (WalSndCtl->lsn[mode] >=
+					 WalSndCtl->post_recovery_sync_lsn)
+				complete = true;
+
+			WalSndCtl->post_recovery_sync_complete[mode] = complete;
+		}
+		LWLockRelease(SyncRepLock);
+	}
+
+	/*
+	 * Only the process that changes the shared state to complete reports
+	 * this.  Later connections observe the completed state, so this message
+	 * is logged only once.
+	 */
+	if (bypassed)
+		ereport(LOG,
+				(errmsg("post-recovery synchronization wait skipped"),
+				 errdetail("\"synchronous_standby_names\" is empty.")));
+
+	return complete;
 }
