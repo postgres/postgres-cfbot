@@ -317,7 +317,9 @@ reconstruct_from_incremental_file(char *input_filename,
 	}
 
 	/* Prepare for checksum calculation, if required. */
-	pg_checksum_init(&checksum_ctx, checksum_type);
+	if (pg_checksum_init(&checksum_ctx, checksum_type) < 0)
+		pg_fatal("could not initialize checksum of file \"%s\"",
+				 output_filename);
 
 	/*
 	 * If the full file can be created by copying a file from an older backup
@@ -353,6 +355,9 @@ reconstruct_from_incremental_file(char *input_filename,
 		*checksum_payload = pg_malloc(PG_CHECKSUM_MAX_LENGTH);
 		*checksum_length = pg_checksum_final(&checksum_ctx,
 											 *checksum_payload);
+		if (*checksum_length < 0)
+			pg_fatal("could not finalize checksum of file \"%s\"",
+					 output_filename);
 	}
 
 	/*
