@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-
+#include <pgtypes_date.h>
 
 #line 1 "regression.h"
 
@@ -701,39 +701,38 @@ if (sqlca.sqlcode < 0) sqlprint();}
 
 	/*
 	 * A value that contains a quote or $n (or ?, with -r questionmarks) must
-	 * not hide the placeholder after it or be taken for one.  A bytea value
-	 * is inserted as a quoted literal, and so is a character value that
-	 * already holds one.  Placeholders from $10 up must be replaced whole.
-	 * All rows must be stored as given.
+	 * not hide the placeholder after it or be taken for one.  Every value is
+	 * inserted as a quoted literal.  Placeholders from $10 up must be
+	 * replaced whole.  All rows must be stored as given.
 	 */
 	{
 		/* exec sql begin declare section */
 		 
 		 
 		
-#line 217 "prepareas.pgc"
+#line 216 "prepareas.pgc"
   struct bytea_1  { int len; char arr[ 4 ]; }  v_bytea ;
  
-#line 218 "prepareas.pgc"
+#line 217 "prepareas.pgc"
  char v_literal [ 16 ] ;
 /* exec sql end declare section */
-#line 219 "prepareas.pgc"
+#line 218 "prepareas.pgc"
 
 
 		printf("+++++ Test for a quoted value before another value in EXECUTE(exprlist) +++++\n");
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create table test_pos ( a text , b int )", ECPGt_EOIT, ECPGt_EORT);
-#line 222 "prepareas.pgc"
+#line 221 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 222 "prepareas.pgc"
+#line 221 "prepareas.pgc"
 
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_prepare, "prepare $0 ( bytea , int ) as insert into test_pos values ( encode ( $1 , 'escape' ) , $2 )", 
 	ECPGt_const,"stmt_pos_b",(long)10,(long)1,strlen("stmt_pos_b"), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 223 "prepareas.pgc"
+#line 222 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 223 "prepareas.pgc"
+#line 222 "prepareas.pgc"
 
 		v_bytea.len = 2;
 		memcpy(v_bytea.arr, "ab", 2);
@@ -744,20 +743,20 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 226 "prepareas.pgc"
+#line 225 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 226 "prepareas.pgc"
+#line 225 "prepareas.pgc"
 
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_prepare, "prepare $0 ( text , int ) as insert into test_pos values ( $1 , $2 )", 
 	ECPGt_const,"stmt_pos_t",(long)10,(long)1,strlen("stmt_pos_t"), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 227 "prepareas.pgc"
+#line 226 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 227 "prepareas.pgc"
+#line 226 "prepareas.pgc"
 
-		strcpy(v_literal, "'cd'");
+		strcpy(v_literal, "cd");
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
 	ECPGt_const,"stmt_pos_t",(long)10,(long)1,strlen("stmt_pos_t"), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
@@ -765,12 +764,12 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 229 "prepareas.pgc"
+#line 228 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 229 "prepareas.pgc"
+#line 228 "prepareas.pgc"
 
-		strcpy(v_literal, "'x$2'");
+		strcpy(v_literal, "x$2");
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
 	ECPGt_const,"stmt_pos_t",(long)10,(long)1,strlen("stmt_pos_t"), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
@@ -778,12 +777,12 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 231 "prepareas.pgc"
+#line 230 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 231 "prepareas.pgc"
+#line 230 "prepareas.pgc"
 
-		strcpy(v_literal, "'a?b'");
+		strcpy(v_literal, "a?b");
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  )", 
 	ECPGt_const,"stmt_pos_t",(long)10,(long)1,strlen("stmt_pos_t"), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
@@ -791,27 +790,27 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 233 "prepareas.pgc"
+#line 232 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 233 "prepareas.pgc"
+#line 232 "prepareas.pgc"
 
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select count ( * ) from test_pos where a in ( 'ab' , 'cd' , 'x$2' , 'a?b' ) and b = 2", ECPGt_EOIT, 
 	ECPGt_int,&(ivar1),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
-#line 234 "prepareas.pgc"
+#line 233 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 234 "prepareas.pgc"
+#line 233 "prepareas.pgc"
 
 		printf("rows stored (must be 4) = %d\n", ivar1);
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_prepare, "prepare $0 ( int , int , int , int , int , int , int , int , int , int , int ) as insert into test_pos values ( concat_ws ( ',' , $1 , $2 , $3 , $4 , $5 , $6 , $7 , $8 , $9 , $10 ) , $11 )", 
 	ECPGt_const,"stmt_pos_11",(long)11,(long)1,strlen("stmt_pos_11"), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 237 "prepareas.pgc"
+#line 236 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 237 "prepareas.pgc"
+#line 236 "prepareas.pgc"
 
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  , $3  , $4  , $5  , $6  , $7  , $8  , $9  , $10  , $11  )", 
 	ECPGt_const,"stmt_pos_11",(long)11,(long)1,strlen("stmt_pos_11"), 
@@ -838,57 +837,179 @@ if (sqlca.sqlcode < 0) sqlprint();}
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
 	ECPGt_int,&(ivar2),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
-#line 239 "prepareas.pgc"
+#line 238 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 239 "prepareas.pgc"
+#line 238 "prepareas.pgc"
 
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select count ( * ) from test_pos where a = '2,2,2,2,2,2,2,2,2,2' and b = 2", ECPGt_EOIT, 
 	ECPGt_int,&(ivar1),(long)1,(long)1,sizeof(int), 
 	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
-#line 240 "prepareas.pgc"
+#line 239 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 240 "prepareas.pgc"
+#line 239 "prepareas.pgc"
 
 		printf("eleven values stored (must be 1) = %d\n", ivar1);
 		{ ECPGdeallocate(__LINE__, 0, NULL, "stmt_pos_b");
-#line 242 "prepareas.pgc"
+#line 241 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 242 "prepareas.pgc"
+#line 241 "prepareas.pgc"
 
 		{ ECPGdeallocate(__LINE__, 0, NULL, "stmt_pos_t");
-#line 243 "prepareas.pgc"
+#line 242 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 243 "prepareas.pgc"
+#line 242 "prepareas.pgc"
 
 		{ ECPGdeallocate(__LINE__, 0, NULL, "stmt_pos_11");
-#line 244 "prepareas.pgc"
+#line 243 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 244 "prepareas.pgc"
+#line 243 "prepareas.pgc"
 
 		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "drop table test_pos", ECPGt_EOIT, ECPGt_EORT);
-#line 245 "prepareas.pgc"
+#line 244 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 245 "prepareas.pgc"
+#line 244 "prepareas.pgc"
+
+	}
+
+	/*
+	 * A character value containing SQL text must be stored as is, and the
+	 * INSERT into test_marker in it must not run.  Boolean, date and NaN
+	 * values, which can't be written as bare words, must be stored too.
+	 */
+	{
+		/* exec sql begin declare section */
+		 
+		   
+		 
+		 
+		
+#line 254 "prepareas.pgc"
+ char v_text [ 64 ] ;
+ 
+#line 255 "prepareas.pgc"
+ bool v_bool = true ;
+ 
+#line 256 "prepareas.pgc"
+ date v_date ;
+ 
+#line 257 "prepareas.pgc"
+ double v_double ;
+/* exec sql end declare section */
+#line 258 "prepareas.pgc"
+
+
+		printf("+++++ Test for quoting values in EXECUTE(exprlist) +++++\n");
+		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create table test_quote ( t text , b bool , d date , f float8 )", ECPGt_EOIT, ECPGt_EORT);
+#line 261 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 261 "prepareas.pgc"
+
+		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "create table test_marker ( c int )", ECPGt_EOIT, ECPGt_EORT);
+#line 262 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 262 "prepareas.pgc"
+
+		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_prepare, "prepare $0 ( text , bool , date , float8 ) as insert into test_quote values ( $1 , $2 , $3 , $4 )", 
+	ECPGt_const,"stmt_q",(long)6,(long)1,strlen("stmt_q"), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
+#line 263 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 263 "prepareas.pgc"
+
+		v_date = PGTYPESdate_from_asc("2026-11-18", NULL);
+		v_double = strtod("NaN", NULL);
+		strcpy(v_text, "x'); insert into test_marker values(1); --");
+		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  , $3  , $4  )", 
+	ECPGt_const,"stmt_q",(long)6,(long)1,strlen("stmt_q"), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
+	ECPGt_char,(v_text),(long)64,(long)1,(64)*sizeof(char), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
+	ECPGt_bool,&(v_bool),(long)1,(long)1,sizeof(bool), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
+	ECPGt_date,&(v_date),(long)1,(long)1,sizeof(date), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
+	ECPGt_double,&(v_double),(long)1,(long)1,sizeof(double), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
+#line 267 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 267 "prepareas.pgc"
+
+		strcpy(v_text, "O'Brien");
+		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_exec_with_exprlist, "execute $0 ( $1  , $2  , $3  , $4  )", 
+	ECPGt_const,"stmt_q",(long)6,(long)1,strlen("stmt_q"), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
+	ECPGt_char,(v_text),(long)64,(long)1,(64)*sizeof(char), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
+	ECPGt_bool,&(v_bool),(long)1,(long)1,sizeof(bool), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
+	ECPGt_date,&(v_date),(long)1,(long)1,sizeof(date), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, 
+	ECPGt_double,&(v_double),(long)1,(long)1,sizeof(double), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EOIT, ECPGt_EORT);
+#line 269 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 269 "prepareas.pgc"
+
+		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select count ( * ) from test_marker", ECPGt_EOIT, 
+	ECPGt_int,&(ivar1),(long)1,(long)1,sizeof(int), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
+#line 270 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 270 "prepareas.pgc"
+
+		printf("rows in test_marker (must be 0) = %d\n", ivar1);
+		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select count ( * ) from test_quote where ( t = 'O''Brien' or t like 'x''); insert%' ) and b and d = '2026-11-18' and f = 'NaN'", ECPGt_EOIT, 
+	ECPGt_int,&(ivar1),(long)1,(long)1,sizeof(int), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
+#line 273 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 273 "prepareas.pgc"
+
+		printf("rows stored (must be 2) = %d\n", ivar1);
+		{ ECPGdeallocate(__LINE__, 0, NULL, "stmt_q");
+#line 275 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 275 "prepareas.pgc"
+
+		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "drop table test_quote", ECPGt_EOIT, ECPGt_EORT);
+#line 276 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 276 "prepareas.pgc"
+
+		{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "drop table test_marker", ECPGt_EOIT, ECPGt_EORT);
+#line 277 "prepareas.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint();}
+#line 277 "prepareas.pgc"
 
 	}
 
 	{ ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "drop table test", ECPGt_EOIT, ECPGt_EORT);
-#line 248 "prepareas.pgc"
+#line 280 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 248 "prepareas.pgc"
+#line 280 "prepareas.pgc"
 
 	{ ECPGtrans(__LINE__, NULL, "commit work");
-#line 249 "prepareas.pgc"
+#line 281 "prepareas.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint();}
-#line 249 "prepareas.pgc"
+#line 281 "prepareas.pgc"
 
 
 	return 0;

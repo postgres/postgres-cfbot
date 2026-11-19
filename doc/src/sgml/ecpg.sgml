@@ -2009,53 +2009,31 @@ EXEC SQL EXECUTE mystmt2(:id, :name);
 </programlisting>
     In this form, host variables in the parenthesized list are not sent
     to the server as separate parameter values.  Instead, the value of
-    each host variable is inserted, without quoting, into the text of
-    the <command>EXECUTE</command> command, and the server parses the
-    resulting command as SQL.  This is the case regardless of how the
-    statement was prepared.  As a consequence:
+    each host variable is written into the text of
+    the <command>EXECUTE</command> command as a quoted SQL literal,
+    escaped as needed, so the value is passed exactly as it is.  This is
+    the case regardless of how the statement was prepared.  To pass host
+    variable values as separate parameter values, use
+    <literal>USING</literal> as shown above.
    </para>
 
-   <itemizedlist>
-    <listitem>
-     <para>
-      Integer, floating-point and <type>numeric</type> host variables work
-      as expected for ordinary finite values.  <literal>NaN</literal> and
-      infinite values of floating-point and <type>numeric</type> host
-      variables do not work.
-     </para>
-    </listitem>
-
-    <listitem>
-     <para>
-      A character host variable must contain a complete SQL literal for
-      the parameter, including the enclosing single quotes and escaped as
-      required by the connection's client encoding and settings.  For
-      example, to pass the string <literal>O'Brien</literal>, the variable
-      must contain <literal>'O''Brien'</literal>.  A value that is not
-      written this way is parsed as part of the SQL command, so a value
-      taken from untrusted input can change the command that is executed.
-      The <application>libpq</application> function
-      <xref linkend="libpq-PQescapeLiteral"/>, called with the connection
-      handle returned by <function>ECPGget_PGconn()</function>
-      (see <xref linkend="ecpg-library"/>), produces such a literal.
-     </para>
-    </listitem>
-
-    <listitem>
-     <para>
-      Boolean, date, timestamp and interval host variables do not work in
-      this list, because their values are not inserted as valid literals
-      of their types.
-     </para>
-    </listitem>
-   </itemizedlist>
-
-   <para>
-    To pass host variable values to a prepared statement as separate
-    parameter values, without these restrictions, use
-    <literal>USING</literal> as shown above.  This works regardless of how
-    the statement was prepared.
-   </para>
+   <note>
+    <para>
+     Before <productname>PostgreSQL</productname> 20,
+     ecpglib inserted the values in this list
+     into the command text without quoting, so a character host variable
+     had to contain a complete, quoted SQL literal, and boolean and
+     date/time host variables did not work.  A program that puts a quoted
+     literal or other SQL text into a character host variable in this list
+     must be changed to pass the plain value; otherwise the quotes or SQL
+     text become part of the value.  Numeric values are now also passed
+     as quoted literals and converted the same way as with
+     <literal>USING</literal>; for example, a <type>double</type> host
+     variable containing 1.5 for an <type>integer</type> parameter is now
+     an error instead of being rounded.  What counts is the version of
+     ecpglib the program uses, not the server version.
+    </para>
+   </note>
 
    <para>
     When you don't need the prepared statement anymore, you should
@@ -7723,8 +7701,8 @@ PREPARE <replaceable class="parameter">prepared_name</replaceable> FROM <replace
     <para>
      A prepared statement can be executed with <literal>USING</literal>,
      or with its parameter values in parentheses after the statement name.
-     In the second form, host variable values are inserted into the
-     command text without quoting; see <xref linkend="ecpg-dynamic-input"/>.
+     In the second form, host variable values are written into the
+     command text as quoted SQL literals; see <xref linkend="ecpg-dynamic-input"/>.
     </para>
    </refsect1>
 
