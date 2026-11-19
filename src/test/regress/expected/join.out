@@ -2756,17 +2756,16 @@ select * from
   j1_tbl full join
   (select * from j2_tbl order by j2_tbl.i desc, j2_tbl.k asc) j2_tbl
   on j1_tbl.i = j2_tbl.i and j1_tbl.i = j2_tbl.k;
-                           QUERY PLAN                            
------------------------------------------------------------------
- Merge Full Join
-   Merge Cond: ((j2_tbl.i = j1_tbl.i) AND (j2_tbl.k = j1_tbl.i))
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Hash Full Join
+   Hash Cond: ((j2_tbl.i = j1_tbl.i) AND (j2_tbl.k = j1_tbl.i))
    ->  Sort
          Sort Key: j2_tbl.i DESC, j2_tbl.k
          ->  Seq Scan on j2_tbl
-   ->  Sort
-         Sort Key: j1_tbl.i DESC
+   ->  Hash
          ->  Seq Scan on j1_tbl
-(8 rows)
+(7 rows)
 
 select * from
   j1_tbl full join
@@ -2776,23 +2775,23 @@ select * from
 ---+---+-------+---+----
    |   |       |   |  0
    |   |       |   |   
-   | 0 | zero  |   |   
-   |   | null  |   |   
- 8 | 8 | eight |   |   
- 7 | 7 | seven |   |   
- 6 | 6 | six   |   |   
    |   |       | 5 | -5
    |   |       | 5 | -5
- 5 | 0 | five  |   |   
- 4 | 1 | four  |   |   
    |   |       | 3 | -3
- 3 | 2 | three |   |   
  2 | 3 | two   | 2 |  2
    |   |       | 2 |  4
    |   |       | 1 | -1
    |   |       | 0 |   
+ 3 | 2 | three |   |   
+ 4 | 1 | four  |   |   
  1 | 4 | one   |   |   
  0 |   | zero  |   |   
+ 7 | 7 | seven |   |   
+ 8 | 8 | eight |   |   
+ 6 | 6 | six   |   |   
+ 5 | 0 | five  |   |   
+   |   | null  |   |   
+   | 0 | zero  |   |   
 (19 rows)
 
 --
