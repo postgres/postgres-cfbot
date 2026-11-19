@@ -347,6 +347,90 @@ check_completion(
 
 clear_query();
 
+# CREATE INDEX CONCURRENTLY doesn't support partitioned tables, so they
+# must not be offered after it.  The two tables share a prefix: if only the
+# plain one is offered, "cic_p" completes to it.
+$node->safe_psql('postgres',
+		"CREATE TABLE cic_part (f1 int) PARTITION BY RANGE (f1);\n"
+	  . "CREATE TABLE cic_plain (f1 int);\n");
+
+# "index" is a valid index name, and must not make the command look like a
+# plain CREATE INDEX.
+foreach my $cmd (
+	'CREATE INDEX CONCURRENTLY ON',
+	'CREATE INDEX CONCURRENTLY cic_idx ON',
+	'CREATE INDEX CONCURRENTLY index ON',
+	'CREATE UNIQUE INDEX CONCURRENTLY ON',
+	'CREATE UNIQUE INDEX CONCURRENTLY index ON')
+{
+	check_completion("$cmd cic_p\t", qr/cic_plain /,
+		"$cmd does not offer partitioned tables");
+	clear_query();
+
+	# A prefix that matches only the partitioned table must not complete.
+	# The X typed after the tab shows that the word was left alone.
+	check_completion("$cmd cic_pa\tX",
+		qr/cic_pa\a?X/, "$cmd does not complete a partitioned table");
+	clear_query();
+}
+
+# CREATE INDEX CONCURRENTLY can't be used inside CREATE SCHEMA, and
+# "CONCURRENTLY ON" in other commands has nothing to do with it, so no
+# relations are offered there.
+foreach my $cmd (
+	'CREATE SCHEMA cic_s CREATE INDEX CONCURRENTLY ON',
+	'CREATE SCHEMA cic_s CREATE INDEX CONCURRENTLY cic_idx ON',
+	'REPACK (CONCURRENTLY ON')
+{
+	check_completion("$cmd cic_pl\tX",
+		qr/cic_pl\a?X/, "$cmd does not offer relations");
+	clear_query();
+}
+
+# Bare Tab there must not take ON as an index name and offer ON again.
+check_completion(
+	"CREATE SCHEMA cic_s CREATE INDEX CONCURRENTLY ON \tX",
+	qr/CONCURRENTLY ON \a?X/,
+	"CREATE SCHEMA with CREATE INDEX CONCURRENTLY ON does not repeat ON");
+clear_query();
+
+# An index name is still followed by ON at top level, and for plain
+# CREATE INDEX inside CREATE SCHEMA.
+foreach my $cmd (
+	'CREATE INDEX CONCURRENTLY cic_idx',
+	'CREATE SCHEMA cic_s CREATE INDEX cic_idx')
+{
+	check_completion("$cmd \t", qr/cic_idx ON /, "$cmd offers ON");
+	clear_query();
+}
+
+# After the table, CREATE INDEX CONCURRENTLY still completes like CREATE
+# INDEX, and REPACK (CONCURRENTLY ON doesn't.
+check_completion(
+	"CREATE INDEX CONCURRENTLY ON cic_plain U\t",
+	qr/USING /,
+	"CREATE INDEX CONCURRENTLY ON <table> offers USING");
+clear_query();
+check_completion(
+	"REPACK (CONCURRENTLY ON cic_plain U\tX",
+	qr/U\a?X/,
+	"REPACK (CONCURRENTLY ON <word> does not offer USING");
+clear_query();
+
+# Without CONCURRENTLY, partitioned tables are fine.
+foreach my $cmd (
+	'CREATE INDEX ON',
+	'CREATE INDEX cic_idx ON',
+	'CREATE INDEX index ON',
+	'CREATE UNIQUE INDEX ON')
+{
+	check_completion(
+		"$cmd cic_p\t\t",
+		qr/cic_part +cic_plain/,
+		"$cmd offers partitioned tables");
+	clear_query();
+}
+
 # check VersionedQuery infrastructure
 check_completion(
 	"DROP PUBLIC\t \t\t",
