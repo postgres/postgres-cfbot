@@ -611,6 +611,48 @@ pg_atomic_monotonic_advance_u64(volatile pg_atomic_uint64 *ptr, uint64 target)
 	return currval;
 }
 
+/*
+ * Compare and exchange the low half of a pg_atomic_uint64.
+ *
+ * Compare low half [31:0] of ptr with the low half of expected.
+ * If they are equal, change ptr.
+ * If they are not equal, refresh expected.
+ * The high half is not touched.
+ * Return true if the update changed ptr, false if it changed expected.
+ *
+ * Full barrier semantics.
+ */
+static inline bool
+pg_atomic_compare_exchange_u64_lo(volatile pg_atomic_uint64 *ptr,
+								  uint64 *expected, uint64 newval)
+{
+#ifndef PG_HAVE_ATOMIC_U64_SIMULATION
+	AssertPointerAlignment(ptr, 8);
+#endif
+	return pg_atomic_compare_exchange_u64_lo_impl(ptr, expected, newval);
+}
+
+/*
+ * Compare and exchange the high half of a pg_atomic_uint64.
+ *
+ * Compare high half [31:0] of ptr with the high half of expected.
+ * If they are equal, change ptr.
+ * If they are not equal, refresh expected.
+ * The low half is not touched.
+ * Return true if the update changed ptr, false if it changed expected.
+ *
+ * Full barrier semantics.
+ */
+static inline bool
+pg_atomic_compare_exchange_u64_hi(volatile pg_atomic_uint64 *ptr,
+								  uint64 *expected, uint64 newval)
+{
+#ifndef PG_HAVE_ATOMIC_U64_SIMULATION
+	AssertPointerAlignment(ptr, 8);
+#endif
+	return pg_atomic_compare_exchange_u64_hi_impl(ptr, expected, newval);
+}
+
 #undef INSIDE_ATOMICS_H
 
 #endif							/* ATOMICS_H */

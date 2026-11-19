@@ -428,3 +428,49 @@ pg_atomic_write_membarrier_u64_impl(volatile pg_atomic_uint64 *ptr, uint64 val)
 	(void) pg_atomic_exchange_u64_impl(ptr, val);
 }
 #endif
+
+/*
+ * Plain uint32 halves of a uint64. lo is bits [31:0] and hi is bits [63:32].
+ */
+typedef struct u64_halves
+{
+#ifndef WORDS_BIGENDIAN
+	uint32		lo;
+	uint32		hi;
+#else
+	uint32		hi;
+	uint32		lo;
+#endif
+} u64_halves;
+
+static_assert(sizeof(u64_halves) == sizeof(uint64),
+			  "u64_halves must overlay a uint64");
+
+#ifndef PG_HAVE_ATOMIC_U64_SIMULATION
+
+static_assert(sizeof(pg_atomic_uint32) == sizeof(uint32),
+			  "pg_atomic_uint32 must overlay a uint32");
+
+static inline bool
+pg_atomic_compare_exchange_u64_lo_impl(volatile pg_atomic_uint64 *ptr,
+									   uint64 *expected, uint64 newval)
+{
+	volatile pg_atomic_uint32 *p;
+	uint32 *exp = &((u64_halves *) expected)->lo;
+	uint32 new = ((u64_halves *) &newval)->lo;
+	p = (volatile pg_atomic_uint32 *) &((u64_halves *) &ptr->value)->lo;
+	return pg_atomic_compare_exchange_u32_impl(p, exp, new);
+}
+
+static inline bool
+pg_atomic_compare_exchange_u64_hi_impl(volatile pg_atomic_uint64 *ptr,
+									   uint64 *expected, uint64 newval)
+{
+	volatile pg_atomic_uint32 *p;
+	uint32 *exp = &((u64_halves *) expected)->hi;
+	uint32 new = ((u64_halves *) &newval)->hi;
+	p = (volatile pg_atomic_uint32 *) &((u64_halves *) &ptr->value)->hi;
+	return pg_atomic_compare_exchange_u32_impl(p, exp, new);
+}
+
+#endif							/* !PG_HAVE_ATOMIC_U64_SIMULATION */
