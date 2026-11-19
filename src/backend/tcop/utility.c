@@ -1104,6 +1104,24 @@ ProcessUtilitySlow(ParseState *pstate,
 	bool		commandCollected = false;
 	ObjectAddress address;
 	ObjectAddress secondaryObject = InvalidObjectAddress;
+	List	   *schemaElts = NIL;
+	Oid			schemaId = InvalidOid;
+
+	/*
+	 * The commands embedded in CREATE SCHEMA are run as separate commands
+	 * after the schema has been created and reported to event triggers, so
+	 * process the CREATE SCHEMA without them.
+	 */
+	if (IsA(parsetree, CreateSchemaStmt) &&
+		((CreateSchemaStmt *) parsetree)->schemaElts != NIL)
+	{
+		CreateSchemaStmt *stmt = makeNode(CreateSchemaStmt);
+
+		memcpy(stmt, parsetree, sizeof(CreateSchemaStmt));
+		schemaElts = stmt->schemaElts;
+		stmt->schemaElts = NIL;
+		parsetree = (Node *) stmt;
+	}
 
 	/* All event trigger calls are done only when isCompleteQuery is true */
 	needCleanup = isCompleteQuery && EventTriggerBeginCompleteQuery();
@@ -1120,10 +1138,10 @@ ProcessUtilitySlow(ParseState *pstate,
 				 * relation and attribute manipulation
 				 */
 			case T_CreateSchemaStmt:
-				CreateSchemaCommand(pstate,
-									(CreateSchemaStmt *) parsetree,
-									pstmt->stmt_location,
-									pstmt->stmt_len);
+				schemaId = CreateSchemaCommand(pstate,
+											   (CreateSchemaStmt *) parsetree,
+											   pstmt->stmt_location,
+											   pstmt->stmt_len);
 
 				/*
 				 * EventTriggerCollectSimpleCommand called by
@@ -1956,6 +1974,14 @@ ProcessUtilitySlow(ParseState *pstate,
 			EventTriggerEndCompleteQuery();
 	}
 	PG_END_TRY();
+
+	/*
+	 * Now run the commands embedded in CREATE SCHEMA, unless the schema
+	 * already existed and its creation was skipped.
+	 */
+	if (schemaElts != NIL && OidIsValid(schemaId))
+		CreateSchemaElements(pstate, schemaId, schemaElts, isCompleteQuery,
+							 pstmt->stmt_location, pstmt->stmt_len);
 }
 
 /*

@@ -104,6 +104,17 @@
      No check whether the affected object exists or doesn't exist is performed
      before the event trigger fires.
    </para>
+
+   <para>
+     The commands embedded in a <command>CREATE SCHEMA</command> command
+     fire their own events, as if they were separate commands following the
+     <command>CREATE SCHEMA</command>.  Foreign key constraints of the
+     tables created this way are added afterwards, by separate
+     <command>ALTER TABLE</command> commands.  The commands are executed, and
+     so are the event triggers fired for them, as the owner of the new schema
+     and with the new schema at the front of the
+     <varname>search_path</varname>.
+   </para>
    </sect2>
 
    <sect2 id="event-trigger-ddl_command_end">
