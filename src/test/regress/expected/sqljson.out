@@ -288,6 +288,22 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_SERIALIZE('{}' RETURNING bytea);
    Output: JSON_SERIALIZE('{}'::json RETURNING bytea)
 (2 rows)
 
+-- JSON_SERIALIZE() with jsonb input
+SELECT JSON_SERIALIZE('{"a": 1}'::jsonb);
+ json_serialize 
+----------------
+ {"a": 1}
+(1 row)
+
+SELECT JSON_SERIALIZE('{"a": 1}'::jsonb RETURNING bytea);
+   json_serialize   
+--------------------
+ \x7b2261223a20317d
+(1 row)
+
+-- Test implicit typmod coercion with jsonb input
+SELECT JSON_SERIALIZE('{ "a" : 1 } '::jsonb RETURNING varchar(2));
+ERROR:  value too long for type character varying(2)
 -- JSON_OBJECT()
 SELECT JSON_OBJECT();
  json_object 
