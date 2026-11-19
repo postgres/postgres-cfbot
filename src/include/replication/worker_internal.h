@@ -147,6 +147,13 @@ typedef enum PartialFileSetState
 	FS_READY,
 } PartialFileSetState;
 
+typedef enum ParallelApplyWorkerStatus
+{
+	PA_WORKER_RUNNING,
+	PA_WORKER_STOPPED,
+	PA_WORKER_FAILED,
+} ParallelApplyWorkerStatus;
+
 /*
  * Struct for sharing information between leader apply worker and parallel
  * apply workers.
@@ -196,6 +203,9 @@ typedef struct ParallelApplyWorkerShared
 	 */
 	PartialFileSetState fileset_state;
 	FileSet		fileset;
+
+	/* Current execution status of the parallel apply worker. */
+	ParallelApplyWorkerStatus worker_status;
 } ParallelApplyWorkerShared;
 
 /*
@@ -208,12 +218,6 @@ typedef struct ParallelApplyWorkerInfo
 	 * parallel apply worker.
 	 */
 	shm_mq_handle *mq_handle;
-
-	/*
-	 * This queue is used to transfer error messages from the parallel apply
-	 * worker to the leader apply worker.
-	 */
-	shm_mq_handle *error_mq_handle;
 
 	dsm_segment *dsm_seg;
 
@@ -331,7 +335,6 @@ extern void set_apply_error_context_origin(char *originname);
 /* Parallel apply worker setup and interactions */
 extern void pa_allocate_worker(TransactionId xid);
 extern ParallelApplyWorkerInfo *pa_find_worker(TransactionId xid);
-extern void pa_detach_all_error_mq(void);
 
 extern bool pa_send_data(ParallelApplyWorkerInfo *winfo, Size nbytes,
 						 const void *data);

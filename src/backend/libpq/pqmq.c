@@ -20,7 +20,6 @@
 #include "libpq/pqmq.h"
 #include "miscadmin.h"
 #include "pgstat.h"
-#include "replication/logicalworker.h"
 #include "storage/latch.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
@@ -173,11 +172,7 @@ mq_putmessage(char msgtype, const char *s, size_t len)
 
 		if (pq_mq_parallel_leader_pid != 0)
 		{
-			if (IsLogicalParallelApplyWorker())
-				SendProcSignal(pq_mq_parallel_leader_pid,
-							   PROCSIG_PARALLEL_APPLY_MESSAGE,
-							   pq_mq_parallel_leader_proc_number);
-			else if (AmRepackWorker())
+			if (AmRepackWorker())
 				SendProcSignal(pq_mq_parallel_leader_pid,
 							   PROCSIG_REPACK_MESSAGE,
 							   pq_mq_parallel_leader_proc_number);

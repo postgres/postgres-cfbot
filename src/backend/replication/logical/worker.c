@@ -6184,15 +6184,6 @@ IsLogicalWorker(void)
 }
 
 /*
- * Is current process a logical replication parallel apply worker?
- */
-bool
-IsLogicalParallelApplyWorker(void)
-{
-	return IsLogicalWorker() && am_parallel_apply_worker();
-}
-
-/*
  * Start skipping changes of the transaction if the given LSN matches the
  * LSN specified by subscription's skiplsn.
  */

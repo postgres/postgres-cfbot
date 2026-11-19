@@ -701,18 +701,6 @@ logicalrep_pa_worker_stop(ParallelApplyWorkerInfo *winfo)
 
 	Assert(slot_no >= 0 && slot_no < max_logical_replication_workers);
 
-	/*
-	 * Detach from the error_mq_handle for the parallel apply worker before
-	 * stopping it. This prevents the leader apply worker from trying to
-	 * receive the message from the error queue that might already be detached
-	 * by the parallel apply worker.
-	 */
-	if (winfo->error_mq_handle)
-	{
-		shm_mq_detach(winfo->error_mq_handle);
-		winfo->error_mq_handle = NULL;
-	}
-
 	LWLockAcquire(LogicalRepWorkerLock, LW_SHARED);
 
 	worker = &LogicalRepCtx->workers[slot_no];
@@ -810,14 +798,6 @@ logicalrep_worker_detach(void)
 	{
 		List	   *workers;
 		ListCell   *lc;
-
-		/*
-		 * Detach from the error_mq_handle for all parallel apply workers
-		 * before terminating them. This prevents the leader apply worker from
-		 * receiving the worker termination message and sending it to logs
-		 * when the same is already done by the parallel worker.
-		 */
-		pa_detach_all_error_mq();
 
 		LWLockAcquire(LogicalRepWorkerLock, LW_SHARED);
 
