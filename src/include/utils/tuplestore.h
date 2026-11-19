@@ -77,6 +77,10 @@ extern bool tuplestore_advance(Tuplestorestate *state, bool forward);
 extern bool tuplestore_skiptuples(Tuplestorestate *state,
 								  int64 ntuples, bool forward);
 
+extern int64 tuplestore_tell(Tuplestorestate *state);
+
+extern bool tuplestore_seek(Tuplestorestate *state, int64 row);
+
 extern int64 tuplestore_tuple_count(Tuplestorestate *state);
 
 extern bool tuplestore_ateof(Tuplestorestate *state);

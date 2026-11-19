@@ -24,7 +24,9 @@
  *
  * Upon creation, a tuplestore supports a single read pointer, numbered 0.
  * Additional read pointers can be created using tuplestore_alloc_read_pointer.
- * Mark/restore behavior is supported by copying read pointers.
+ * Mark/restore behavior is supported by copying read pointers.  Each read
+ * pointer also knows the absolute number of its next tuple, so a caller can
+ * reposition it with tuplestore_seek instead of counting relative moves.
  *
  * When the caller requests backward-scan capability, we write the temp file
  * in a format that allows either forward or backward scan.  Otherwise, only
@@ -216,6 +218,9 @@ static Tuplestorestate *tuplestore_begin_common(int eflags,
 												int maxKBytes);
 static void tuplestore_puttuple_common(Tuplestorestate *state, void *tuple);
 static void dumptuples(Tuplestorestate *state);
+static void switch_to_readfile(Tuplestorestate *state);
+static void step_record_forward(Tuplestorestate *state);
+static bool step_record_backward(Tuplestorestate *state);
 static void tuplestore_updatemax(Tuplestorestate *state);
 static unsigned int getlen(Tuplestorestate *state, bool eofOK);
 static void *copytup_heap(Tuplestorestate *state, void *tup);
@@ -995,19 +1000,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 			if (readptr->eof_reached && forward)
 				return NULL;
 
-			/*
-			 * Switch from writing to reading.
-			 */
-			BufFileTell(state->myfile,
-						&state->writepos_file, &state->writepos_offset);
-			if (!readptr->eof_reached)
-				if (BufFileSeek(state->myfile,
-								readptr->file, readptr->offset,
-								SEEK_SET) != 0)
-					ereport(ERROR,
-							(errcode_for_file_access(),
-							 errmsg("could not seek in tuplestore temporary file")));
-			state->status = TSS_READFILE;
+			switch_to_readfile(state);
 			pg_fallthrough;
 
 		case TSS_READFILE:
@@ -1272,6 +1265,160 @@ tuplestore_skiptuples(Tuplestorestate *state, int64 ntuples, bool forward)
 				CHECK_FOR_INTERRUPTS();
 			}
 			return true;
+	}
+}
+
+/*
+ * switch_to_readfile - switch from TSS_WRITEFILE to TSS_READFILE
+ *
+ * Save the write position and seek to the active read pointer's position.
+ */
+static void
+switch_to_readfile(Tuplestorestate *state)
+{
+	TSReadPointer *readptr = &state->readptrs[state->activeptr];
+
+	Assert(state->status == TSS_WRITEFILE);
+
+	BufFileTell(state->myfile,
+				&state->writepos_file, &state->writepos_offset);
+	if (!readptr->eof_reached)
+		if (BufFileSeek(state->myfile,
+						readptr->file, readptr->offset,
+						SEEK_SET) != 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not seek in tuplestore temporary file")));
+	state->status = TSS_READFILE;
+}
+
+/*
+ * step_record_forward - move the file position past the next record
+ *
+ * Only the length word is read, not the tuple.  The caller must know that
+ * a record is there.
+ */
+static void
+step_record_forward(Tuplestorestate *state)
+{
+	unsigned int tuplen = getlen(state, false);
+	pgoff_t		rest = tuplen - sizeof(unsigned int);
+
+	if (state->backward)
+		rest += sizeof(unsigned int);
+	if (BufFileSeek(state->myfile, 0, rest, SEEK_CUR) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not seek in tuplestore temporary file")));
+}
+
+/*
+ * step_record_backward - move the file position to the start of the
+ * previous record, using its trailing length word
+ *
+ * Returns false, without moving, at the start of the file.
+ */
+static bool
+step_record_backward(Tuplestorestate *state)
+{
+	unsigned int tuplen;
+
+	Assert(state->backward);
+
+	if (BufFileSeek(state->myfile, 0, -(pgoff_t) sizeof(unsigned int),
+					SEEK_CUR) != 0)
+		return false;
+	tuplen = getlen(state, false);
+	if (BufFileSeek(state->myfile, 0,
+					-(pgoff_t) (tuplen + sizeof(unsigned int)),
+					SEEK_CUR) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not seek in tuplestore temporary file")));
+	return true;
+}
+
+/*
+ * tuplestore_tell - return the active read pointer's absolute row number
+ *
+ * This is the number of the row that the next forward fetch would return;
+ * at EOF it is the number of rows stored so far.
+ */
+int64
+tuplestore_tell(Tuplestorestate *state)
+{
+	TSReadPointer *readptr = &state->readptrs[state->activeptr];
+
+	return readptr->eof_reached ? state->tuples : readptr->row;
+}
+
+/*
+ * tuplestore_seek - move the active read pointer to an absolute row number
+ *
+ * Afterwards the next forward fetch returns row "row".  Seeking to the number
+ * of rows stored so far positions the pointer at the end.  Returns false if
+ * the row is out of range or has been trimmed away; on disk the pointer may
+ * then have moved toward it.  Moving backward requires EXEC_FLAG_BACKWARD.
+ */
+bool
+tuplestore_seek(Tuplestorestate *state, int64 row)
+{
+	TSReadPointer *readptr = &state->readptrs[state->activeptr];
+	int64		cur;
+
+	check_read_pointer_rows(state);
+
+	if (row < 0 || row > state->tuples)
+		return false;
+	cur = tuplestore_tell(state);
+	if (row == cur && !readptr->eof_reached)
+		return true;
+	Assert(row >= cur || (readptr->eflags & EXEC_FLAG_BACKWARD));
+
+	switch (state->status)
+	{
+		case TSS_INMEM:
+			{
+				int64		base = state->tuples - state->memtupcount;
+
+				if (row < base + state->memtupdeleted)
+					return false;
+				readptr->eof_reached = false;
+				readptr->current = (int) (row - base);
+				readptr->row = row;
+				return true;
+			}
+
+		case TSS_WRITEFILE:
+			switch_to_readfile(state);
+			pg_fallthrough;
+
+		case TSS_READFILE:
+			/* at EOF, the file is already positioned at the write position */
+			if (readptr->eof_reached)
+			{
+				readptr->eof_reached = false;
+				readptr->row = state->tuples;
+			}
+
+			while (readptr->row < row)
+			{
+				step_record_forward(state);
+				readptr->row++;
+				CHECK_FOR_INTERRUPTS();
+			}
+			while (readptr->row > row)
+			{
+				if (!step_record_backward(state))
+					return false;
+				readptr->row--;
+				CHECK_FOR_INTERRUPTS();
+			}
+			return true;
+
+		default:
+			elog(ERROR, "invalid tuplestore state");
+			return false;		/* keep compiler quiet */
 	}
 }
 
