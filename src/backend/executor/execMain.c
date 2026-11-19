@@ -1365,6 +1365,69 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 }
 
 /*
+ * ExecInitInsertBatchSize
+ *		Decide whether inserts into a foreign table can be batched, and set
+ *		the batch size of the result relation accordingly.
+ *
+ * ExecBatchInsert() and CopyMultiInsertBufferFlush() insert batches without
+ * any of the per-row processing done after inserting a single row: they don't
+ * fire AFTER ROW triggers, check WITH CHECK OPTIONs, project RETURNING, or
+ * capture transition tuples.  So we batch only when none of that is needed.
+ * BEFORE ROW triggers prevent batching too.  The triggers might query the
+ * target table, so the pending inserts would have to be flushed before firing
+ * them for each row, which makes batching pointless.
+ *
+ * transition_capture is the statement's transition capture state when routing
+ * tuples to a partition, or NULL when inserting into the result relation
+ * directly, because a foreign table can't have transition tables of its own.
+ * Don't batch if the routed tuples may have to be added to a NEW TABLE (when
+ * inserting, or when an UPDATE moves rows to another partition).  Transition
+ * tuples can't be collected from foreign partitions, so the per-row code
+ * (ExecARInsertTriggers() and ExecARUpdateTriggers()) raises an error, while
+ * batching would silently leave the tuples out of the NEW TABLE.  An OLD
+ * TABLE never contains routed tuples (the old version of a moved row is
+ * captured when it's deleted from the source partition), so it doesn't
+ * prevent batching.  MERGE sets up transition capture for all kinds of
+ * actions, so an UPDATE NEW TABLE disables batching even for tuples routed by
+ * an INSERT action.
+ *
+ * The FDW's GetForeignModifyBatchSize callback is called only if batching is
+ * possible; otherwise the batch size is 1.
+ */
+void
+ExecInitInsertBatchSize(ResultRelInfo *resultRelInfo,
+						TransitionCaptureState *transition_capture)
+{
+	FdwRoutine *fdwroutine = resultRelInfo->ri_FdwRoutine;
+	TriggerDesc *trigdesc = resultRelInfo->ri_TrigDesc;
+	int			batch_size = 1;
+
+	if (fdwroutine != NULL &&
+		!resultRelInfo->ri_usesFdwDirectModify &&
+		fdwroutine->GetForeignModifyBatchSize != NULL &&
+		fdwroutine->ExecForeignBatchInsert != NULL &&
+		resultRelInfo->ri_projectReturning == NULL &&
+		resultRelInfo->ri_WithCheckOptions == NIL &&
+		(trigdesc == NULL ||
+		 (!trigdesc->trig_insert_before_row &&
+		  !trigdesc->trig_insert_after_row)) &&
+		(transition_capture == NULL ||
+		 (!transition_capture->tcs_insert_new_table &&
+		  !transition_capture->tcs_update_new_table)))
+	{
+		batch_size = fdwroutine->GetForeignModifyBatchSize(resultRelInfo);
+
+		/*
+		 * Don't rely on the FDW to return a valid batch size.  With a batch
+		 * size below 1, CopyMultiInsertBufferFlush() would loop forever.
+		 */
+		batch_size = Max(batch_size, 1);
+	}
+
+	resultRelInfo->ri_BatchSize = batch_size;
+}
+
+/*
  * ExecGetTriggerResultRel
  *		Get a ResultRelInfo for a trigger target relation.
  *

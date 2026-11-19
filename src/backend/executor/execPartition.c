@@ -1150,17 +1150,13 @@ ExecInitRoutingInfo(ModifyTableState *mtstate,
 	 * (a FDW may support batching, but it may be disabled for the
 	 * server/table or for this particular query).
 	 *
-	 * If the FDW does not support batching, we set the batch size to 1.
+	 * partRelInfo has the partition's WITH CHECK OPTIONs and RETURNING list
+	 * set up already (by ExecInitPartitionInfo(), or by ExecInitModifyTable()
+	 * for a reused UPDATE result relation), and its triggers include the row
+	 * triggers cloned from partitioned ancestors.  Transition tables belong
+	 * to the statement's target table, so pass its transition capture state.
 	 */
-	if (partRelInfo->ri_FdwRoutine != NULL &&
-		partRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize &&
-		partRelInfo->ri_FdwRoutine->ExecForeignBatchInsert)
-		partRelInfo->ri_BatchSize =
-			partRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize(partRelInfo);
-	else
-		partRelInfo->ri_BatchSize = 1;
-
-	Assert(partRelInfo->ri_BatchSize >= 1);
+	ExecInitInsertBatchSize(partRelInfo, mtstate->mt_transition_capture);
 
 	partRelInfo->ri_CopyMultiInsertBuffer = NULL;
 
