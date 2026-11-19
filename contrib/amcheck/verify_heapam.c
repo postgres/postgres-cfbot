@@ -18,6 +18,7 @@
 #include "access/table.h"
 #include "access/toast_compression.h"
 #include "access/toast_internals.h"
+#include "access/varsup.h"
 #include "access/visibilitymap.h"
 #include "access/xact.h"
 #include "catalog/pg_am.h"
