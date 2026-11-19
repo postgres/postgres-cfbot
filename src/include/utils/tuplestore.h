@@ -40,11 +40,6 @@
  */
 typedef struct Tuplestorestate Tuplestorestate;
 
-/*
- * Currently we only need to store MinimalTuples, but it would be easy
- * to support the same behavior for IndexTuples and/or bare Datums.
- */
-
 extern Tuplestorestate *tuplestore_begin_heap(bool randomAccess,
 											  bool interXact,
 											  int maxKBytes);

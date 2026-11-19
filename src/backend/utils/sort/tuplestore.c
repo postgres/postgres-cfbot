@@ -118,39 +118,6 @@ struct Tuplestorestate
 	ResourceOwner resowner;		/* resowner for holding temp files */
 
 	/*
-	 * These function pointers decouple the routines that must know what kind
-	 * of tuple we are handling from the routines that don't need to know it.
-	 * They are set up by the tuplestore_begin_xxx routines.
-	 *
-	 * (Although tuplestore.c currently only supports heap tuples, I've copied
-	 * this part of tuplesort.c so that extension to other kinds of objects
-	 * will be easy if it's ever needed.)
-	 *
-	 * Function to copy a supplied input tuple into palloc'd space. (NB: we
-	 * assume that a single pfree() is enough to release the tuple later, so
-	 * the representation must be "flat" in one palloc chunk.) state->availMem
-	 * must be decreased by the amount of space used.
-	 */
-	void	   *(*copytup) (Tuplestorestate *state, void *tup);
-
-	/*
-	 * Function to write a stored tuple onto tape.  The representation of the
-	 * tuple on tape need not be the same as it is in memory; requirements on
-	 * the tape representation are given below.  After writing the tuple,
-	 * pfree() it, and increase state->availMem by the amount of memory space
-	 * thereby released.
-	 */
-	void		(*writetup) (Tuplestorestate *state, void *tup);
-
-	/*
-	 * Function to read a stored tuple from tape back into memory. 'len' is
-	 * the already-read length of the stored tuple.  Create and return a
-	 * palloc'd copy, and decrease state->availMem by the amount of memory
-	 * space consumed.
-	 */
-	void	   *(*readtup) (Tuplestorestate *state, unsigned int len);
-
-	/*
 	 * This array holds pointers to tuples in memory if we are in state INMEM.
 	 * In states WRITEFILE and READFILE it's not used.
 	 *
@@ -183,9 +150,6 @@ struct Tuplestorestate
 	pgoff_t		writepos_offset;	/* offset (valid if READFILE state) */
 };
 
-#define COPYTUP(state,tup)	((*(state)->copytup) (state, tup))
-#define WRITETUP(state,tup) ((*(state)->writetup) (state, tup))
-#define READTUP(state,len)	((*(state)->readtup) (state, len))
 #define LACKMEM(state)		((state)->availMem < 0)
 #define USEMEM(state,amt)	((state)->availMem -= (amt))
 #define FREEMEM(state,amt)	((state)->availMem += (amt))
@@ -198,7 +162,7 @@ struct Tuplestorestate
  * on-tape of the tuple, including itself (so it is never zero).
  * The remainder of the stored tuple
  * may or may not match the in-memory representation of the tuple ---
- * any conversion needed is the job of the writetup and readtup routines.
+ * any conversion needed is the job of writetup_heap and readtup_heap.
  *
  * If state->backward is true, then the stored representation of
  * the tuple must be followed by another "unsigned int" that is a copy of the
@@ -207,16 +171,16 @@ struct Tuplestorestate
  * state->backward is not set, the write/read routines may omit the extra
  * length word.
  *
- * writetup is expected to write both length words as well as the tuple
- * data.  When readtup is called, the tape is positioned just after the
- * front length word; readtup must read the tuple data and advance past
+ * writetup_heap is expected to write both length words as well as the tuple
+ * data.  When readtup_heap is called, the tape is positioned just after the
+ * front length word; readtup_heap must read the tuple data and advance past
  * the back length word (if present).
  *
  * The write/read routines can make use of the tuple description data
  * stored in the Tuplestorestate record, if needed. They are also expected
  * to adjust state->availMem by the amount of memory space (not tape space!)
- * released or consumed.  There is no error return from either writetup
- * or readtup; they should ereport() on failure.
+ * released or consumed.  There is no error return from either writetup_heap
+ * or readtup_heap; they should ereport() on failure.
  *
  *
  * NOTES about memory consumption calculations:
@@ -341,10 +305,6 @@ tuplestore_begin_heap(bool randomAccess, bool interXact, int maxKBytes)
 		(EXEC_FLAG_REWIND);
 
 	state = tuplestore_begin_common(eflags, interXact, maxKBytes);
-
-	state->copytup = copytup_heap;
-	state->writetup = writetup_heap;
-	state->readtup = readtup_heap;
 
 	return state;
 }
@@ -766,9 +726,9 @@ tuplestore_puttuple(Tuplestorestate *state, HeapTuple tuple)
 
 	/*
 	 * Copy the tuple.  (Must do this even in WRITEFILE case.  Note that
-	 * COPYTUP includes USEMEM, so we needn't do that here.)
+	 * copytup_heap includes USEMEM, so we needn't do that here.)
 	 */
-	tuple = COPYTUP(state, tuple);
+	tuple = copytup_heap(state, tuple);
 
 	tuplestore_puttuple_common(state, tuple);
 
@@ -901,7 +861,7 @@ tuplestore_puttuple_common(Tuplestorestate *state, void *tuple)
 				}
 			}
 
-			WRITETUP(state, tuple);
+			writetup_heap(state, tuple);
 			break;
 		case TSS_READFILE:
 
@@ -934,7 +894,7 @@ tuplestore_puttuple_common(Tuplestorestate *state, void *tuple)
 				}
 			}
 
-			WRITETUP(state, tuple);
+			writetup_heap(state, tuple);
 			break;
 		default:
 			elog(ERROR, "invalid tuplestore state");
@@ -1031,7 +991,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 			{
 				if ((tuplen = getlen(state, true)) != 0)
 				{
-					tup = READTUP(state, tuplen);
+					tup = readtup_heap(state, tuplen);
 					return tup;
 				}
 				else
@@ -1094,7 +1054,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 
 			/*
 			 * Now we have the length of the prior tuple, back up and read it.
-			 * Note: READTUP expects we are positioned after the initial
+			 * Note: readtup_heap expects we are positioned after the initial
 			 * length word of the tuple, so back up to that point.
 			 */
 			if (BufFileSeek(state->myfile, 0,
@@ -1103,7 +1063,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not seek in tuplestore temporary file")));
-			tup = READTUP(state, tuplen);
+			tup = readtup_heap(state, tuplen);
 			return tup;
 
 		default:
@@ -1303,14 +1263,14 @@ dumptuples(Tuplestorestate *state)
 		}
 		if (i >= state->memtupcount)
 			break;
-		WRITETUP(state, state->memtuples[i]);
+		writetup_heap(state, state->memtuples[i]);
 
 		/*
 		 * Increase memtupdeleted to track the fact that we just deleted that
 		 * tuple.  Think not to remove this on the grounds that we'll reset
 		 * memtupdeleted to zero below.  We might not reach that if some later
-		 * WRITETUP fails (e.g. due to overrunning temp_file_limit).  If so,
-		 * we'd error out leaving an effectively-corrupt tuplestore, which
+		 * writetup_heap fails (e.g. due to overrunning temp_file_limit).  If
+		 * so, we'd error out leaving an effectively-corrupt tuplestore, which
 		 * would be quite bad if it's a persistent data structure such as a
 		 * Portal's holdStore.
 		 */
@@ -1619,12 +1579,16 @@ getlen(Tuplestorestate *state, bool eofOK)
  * Routines specialized for HeapTuple case
  *
  * The stored form is actually a MinimalTuple, but for largely historical
- * reasons we allow COPYTUP to work from a HeapTuple.
+ * reasons we allow copytup_heap to work from a HeapTuple.
  *
  * Since MinimalTuple already has length in its first word, we don't need
  * to write that separately.
  */
 
+/*
+ * Copy a HeapTuple into one palloc'd MinimalTuple, so that a single pfree()
+ * releases it, and charge its space to availMem.
+ */
 static void *
 copytup_heap(Tuplestorestate *state, void *tup)
 {
@@ -1635,6 +1599,10 @@ copytup_heap(Tuplestorestate *state, void *tup)
 	return tuple;
 }
 
+/*
+ * Write a stored tuple to the temp file, then pfree() it and return its space
+ * to availMem.
+ */
 static void
 writetup_heap(Tuplestorestate *state, void *tup)
 {
@@ -1656,6 +1624,10 @@ writetup_heap(Tuplestorestate *state, void *tup)
 	heap_free_minimal_tuple(tuple);
 }
 
+/*
+ * Read a stored tuple, whose length word 'len' has already been read, into a
+ * palloc'd copy.
+ */
 static void *
 readtup_heap(Tuplestorestate *state, unsigned int len)
 {
