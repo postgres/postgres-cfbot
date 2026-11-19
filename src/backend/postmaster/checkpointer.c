@@ -67,6 +67,7 @@
 #include "storage/subsystems.h"
 #include "utils/acl.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "utils/wait_event.h"
@@ -856,6 +857,8 @@ CheckpointWriteDelay(int flags, double progress)
 	/* Check for barrier events. */
 	if (ProcSignalBarrierPending)
 		ProcessProcSignalBarrier();
+
+	INJECTION_POINT("checkpoint-write-delay", NULL);
 }
 
 /*
