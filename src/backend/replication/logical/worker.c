@@ -3820,7 +3820,8 @@ apply_handle_truncate(StringInfo s)
 						relids_logged,
 						DROP_RESTRICT,
 						restart_seqs,
-						!MySubscription->runasowner);
+						!MySubscription->runasowner,
+						InvalidReplOriginId);
 	foreach(lc, remote_rels)
 	{
 		LogicalRepRelMapEntry *rel = lfirst(lc);
