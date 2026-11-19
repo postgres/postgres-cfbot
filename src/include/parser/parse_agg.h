@@ -17,12 +17,12 @@
 
 extern void transformAggregateCall(ParseState *pstate, Aggref *agg,
 								   List *args, List *aggorder,
-								   bool agg_distinct);
+								   bool agg_distinct, Expr *agg_on_empty);
 
 extern Node *transformGroupingFunc(ParseState *pstate, GroupingFunc *p);
 
 extern void transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
-									WindowDef *windef);
+									WindowDef *windef, Expr *agg_on_empty);
 
 extern void parseCheckAggregates(ParseState *pstate, Query *qry);
 
