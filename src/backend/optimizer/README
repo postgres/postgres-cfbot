@@ -1048,8 +1048,8 @@ so that a query that never needs them does not pay for them.
 UniqueKeys are used to detect unique inner sides of joins when the inner
 side is itself a join, and to skip DISTINCT and GROUP BY steps whose input
 is already distinct.  The following describes each of these in turn, and
-then how outer joins, semijoins and appendrel children fit in.  For now
-only plain tables get UniqueKeys.
+then how outer joins, semijoins and other kinds of relations fit in.  For
+now only plain tables get UniqueKeys.
 
 We do not keep UniqueKeys for join relations.  A join relation would
 typically have many of them, most of which would never be used.  And since
@@ -1191,6 +1191,14 @@ about it refers to are those of its parent, with the child's expressions as
 child members.  So a child join is distinct if its parent is, and we just
 ask about the parent.  That misses, for child joins, what could be proven
 from indexes that only individual partitions have.
+
+A relation that is partially aggregated by eager aggregation has no
+UniqueKeys either, but it emits one row for each group, so it is distinct
+for join clauses that cover all its grouping expressions.  That applies
+only where the aggregation is done on top of the ungrouped relation.  A
+grouped join relation is otherwise distinct if the ungrouped one is.  None
+of this holds across workers, so a Parallel Hash join must not treat a
+grouped inner relation as unique.
 
 
 Order of processing for EquivalenceClasses and PathKeys

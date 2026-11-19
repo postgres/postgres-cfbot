@@ -602,6 +602,9 @@ reduce_semijoin_in_jointree(Node *jtnode, Relids syn_righthand)
 static bool
 rel_supports_distinctness(PlannerInfo *root, RelOptInfo *rel)
 {
+	/* A grouped relation can be distinct on its grouping expressions */
+	if (IS_GROUPED_REL(rel) && grouped_rel_supports_distinctness(rel))
+		return true;
 	/* For a join relation, the proof has to come from UniqueKeys */
 	if (IS_JOIN_REL(rel))
 		return joinrel_supports_distinctness(root, rel);
@@ -666,6 +669,11 @@ static bool
 rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list,
 					List **extra_clauses)
 {
+	/* A grouped relation can be distinct on its grouping expressions */
+	if (IS_GROUPED_REL(rel) &&
+		grouped_rel_is_distinct_for(root, rel, clause_list))
+		return true;
+
 	/*
 	 * For a join relation, see if UniqueKeys can prove it.  We can't supply
 	 * extra_clauses that way, but only self-join checks ask for those, and

@@ -546,6 +546,10 @@ build_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	 */
 	grouped_rel->rows = 0;
 
+	/* what is proven for the grouped rel need not hold for the ungrouped */
+	grouped_rel->unique_for_rels = NIL;
+	grouped_rel->non_unique_for_rels = NIL;
+
 	return grouped_rel;
 }
 

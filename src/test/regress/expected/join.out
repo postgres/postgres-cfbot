@@ -2848,13 +2848,13 @@ order by x.thousand desc, x.twothousand;
          Sort Key: x.thousand DESC, x.twothousand
          Presorted Key: x.thousand
          ->  Merge Join
-               Merge Cond: (y.thousand = x.thousand)
-               ->  Partial GroupAggregate
-                     Group Key: y.thousand
-                     ->  Index Only Scan Backward using tenk1_thous_tenthous on tenk1 y
+               Merge Cond: (x.thousand = y.thousand)
                ->  Sort
                      Sort Key: x.thousand DESC
                      ->  Seq Scan on tenk1 x
+               ->  Partial GroupAggregate
+                     Group Key: y.thousand
+                     ->  Index Only Scan Backward using tenk1_thous_tenthous on tenk1 y
 (13 rows)
 
 reset enable_hashagg;

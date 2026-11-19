@@ -299,4 +299,26 @@ reset max_parallel_workers_per_gather;
 reset enable_hashjoin;
 reset enable_mergejoin;
 
+--
+-- Test relations that are partially aggregated by eager aggregation.
+--
+
+create table uk_ea1 (id int primary key, x int);
+create table uk_ea2 (id int, y int, z int);
+insert into uk_ea1 select i, i % 10 from generate_series(1, 1000) i;
+insert into uk_ea2 select i % 100, i, i % 3 from generate_series(1, 1000) i;
+analyze uk_ea1, uk_ea2;
+
+-- uk_ea2 is grouped by the join column
+explain (verbose, costs off)
+select a.x, sum(b.y) from uk_ea1 a join uk_ea2 b on a.id = b.id
+group by a.x;
+
+-- uk_ea2 is grouped by more than the join column
+explain (verbose, costs off)
+select a.x, b.z, sum(b.y) from uk_ea1 a join uk_ea2 b on a.id = b.id
+group by a.x, b.z;
+
+drop table uk_ea1, uk_ea2;
+
 drop table uk_a, uk_b, uk_c, uk_d, uk_n, uk_p, uk_q, uk_r;
