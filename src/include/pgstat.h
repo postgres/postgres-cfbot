@@ -703,6 +703,10 @@ extern instr_time pgstat_prepare_io_time(bool track_io_guc);
 extern void pgstat_count_io_op_time(IOObject io_object, IOContext io_context,
 									IOOp io_op, instr_time start_time,
 									uint32 cnt, uint64 bytes);
+extern void pgstat_count_io_op_time_end(IOObject io_object, IOContext io_context,
+										IOOp io_op, instr_time start_time,
+										instr_time end_time, uint32 cnt,
+										uint64 bytes);
 
 extern PgStat_IO *pgstat_fetch_stat_io(void);
 extern const char *pgstat_get_io_context_name(IOContext io_context);

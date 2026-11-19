@@ -21,6 +21,7 @@
 #include "storage/sync.h"
 
 extern PGDLLIMPORT const PgAioHandleCallbacks aio_md_readv_cb;
+extern PGDLLIMPORT const PgAioHandleCallbacks aio_md_fsync_cb;
 
 /* md storage manager functionality */
 extern void mdinit(void);
@@ -53,12 +54,13 @@ extern void mdtruncate(SMgrRelation reln, ForkNumber forknum,
 extern void mdimmedsync(SMgrRelation reln, ForkNumber forknum);
 extern void mdregistersync(SMgrRelation reln, ForkNumber forknum);
 extern int	mdfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off);
+extern int	mdfsyncfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum);
 
 extern void ForgetDatabaseSyncRequests(Oid dbid);
 extern void DropRelationFiles(RelFileLocator *delrels, int ndelrels, bool isRedo);
 
 /* md sync callbacks */
-extern int	mdsyncfiletag(const FileTag *ftag, char *path);
+extern void mdsyncfiletag(PgAioHandle *ioh, InflightSyncEntry *entry);
 extern int	mdunlinkfiletag(const FileTag *ftag, char *path);
 extern bool mdfiletagmatches(const FileTag *ftag, const FileTag *candidate);
 

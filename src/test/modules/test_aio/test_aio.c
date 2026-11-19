@@ -1145,6 +1145,13 @@ inj_io_short_read_hook(const char *name, const void *private_data, void *arg)
 void
 inj_io_completion_hook(const char *name, const void *private_data, void *arg)
 {
+	PgAioHandle *ioh = (PgAioHandle *) arg;
+
+	/* These hooks inspect SMGR block ranges and read-specific iovecs. */
+	if (pgaio_io_get_op(ioh) != PGAIO_OP_READV ||
+		ioh->target != PGAIO_TID_SMGR)
+		return;
+
 	inj_io_completion_wait_hook(name, private_data, arg);
 	inj_io_short_read_hook(name, private_data, arg);
 }
@@ -1152,6 +1159,13 @@ inj_io_completion_hook(const char *name, const void *private_data, void *arg)
 void
 inj_io_reopen(const char *name, const void *private_data, void *arg)
 {
+	PgAioHandle *ioh = (PgAioHandle *) arg;
+
+	/* Read-error injection must not fail a concurrent checkpoint fsync. */
+	if (pgaio_io_get_op(ioh) != PGAIO_OP_READV ||
+		ioh->target != PGAIO_TID_SMGR)
+		return;
+
 	ereport(LOG,
 			errmsg("reopen injection point called, is enabled: %d",
 				   inj_io_error_state->enabled_reopen),
