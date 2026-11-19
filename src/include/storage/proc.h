@@ -83,6 +83,16 @@ struct XidCache
 #define		PROC_XMIN_FLAGS (PROC_IN_VACUUM | PROC_IN_SAFE_IC)
 
 /*
+ * Flags marking a process whose xmin and xid do not hold back snapshots or
+ * vacuum horizons.  A lazy VACUUM is ok with rows being removed, and a
+ * logical decoding process protects the rows it needs through its
+ * replication slot.  Such a process still counts as running for
+ * pg_subtrans truncation.
+ */
+#define		PROC_HORIZON_EXEMPT_MASK \
+	(PROC_IN_VACUUM | PROC_IN_LOGICAL_DECODING)
+
+/*
  * We allow a limited number of "weak" relation locks (AccessShareLock,
  * RowShareLock, RowExclusiveLock) to be recorded in the PGPROC structure
  * (or rather in shared memory referenced from PGPROC) rather than the main
