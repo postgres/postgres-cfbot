@@ -205,6 +205,46 @@ int main(void)
 	printf("rows with NULL c1 (must be 1) = %d\n", ivar1);
 	exec sql deallocate stmt_null;
 
+	/*
+	 * A value that contains a quote or $n (or ?, with -r questionmarks) must
+	 * not hide the placeholder after it or be taken for one.  A bytea value
+	 * is inserted as a quoted literal, and so is a character value that
+	 * already holds one.  Placeholders from $10 up must be replaced whole.
+	 * All rows must be stored as given.
+	 */
+	{
+		exec sql begin declare section;
+		bytea v_bytea[4];
+		char v_literal[16];
+		exec sql end declare section;
+
+		printf("+++++ Test for a quoted value before another value in EXECUTE(exprlist) +++++\n");
+		exec sql create table test_pos (a text, b int);
+		exec sql prepare stmt_pos_b(bytea,int) as insert into test_pos values(encode($1, 'escape'),$2);
+		v_bytea.len = 2;
+		memcpy(v_bytea.arr, "ab", 2);
+		exec sql execute stmt_pos_b(:v_bytea, :ivar2);
+		exec sql prepare stmt_pos_t(text,int) as insert into test_pos values($1,$2);
+		strcpy(v_literal, "'cd'");
+		exec sql execute stmt_pos_t(:v_literal, :ivar2);
+		strcpy(v_literal, "'x$2'");
+		exec sql execute stmt_pos_t(:v_literal, :ivar2);
+		strcpy(v_literal, "'a?b'");
+		exec sql execute stmt_pos_t(:v_literal, :ivar2);
+		exec sql select count(*) into :ivar1 from test_pos where a in ('ab', 'cd', 'x$2', 'a?b') and b = 2;
+		printf("rows stored (must be 4) = %d\n", ivar1);
+		exec sql prepare stmt_pos_11(int,int,int,int,int,int,int,int,int,int,int) as
+			insert into test_pos values(concat_ws(',',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10),$11);
+		exec sql execute stmt_pos_11(:ivar2, :ivar2, :ivar2, :ivar2, :ivar2, :ivar2,
+									 :ivar2, :ivar2, :ivar2, :ivar2, :ivar2);
+		exec sql select count(*) into :ivar1 from test_pos where a = '2,2,2,2,2,2,2,2,2,2' and b = 2;
+		printf("eleven values stored (must be 1) = %d\n", ivar1);
+		exec sql deallocate stmt_pos_b;
+		exec sql deallocate stmt_pos_t;
+		exec sql deallocate stmt_pos_11;
+		exec sql drop table test_pos;
+	}
+
 	exec sql drop table test;
 	exec sql commit work;
 

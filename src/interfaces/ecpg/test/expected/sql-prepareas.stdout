@@ -66,3 +66,6 @@ execute "include_ _name"(:ivar1,:ivar2)
 1 2
 +++++ Test for a NULL value in EXECUTE(exprlist) +++++
 rows with NULL c1 (must be 1) = 1
++++++ Test for a quoted value before another value in EXECUTE(exprlist) +++++
+rows stored (must be 4) = 4
+eleven values stored (must be 1) = 1

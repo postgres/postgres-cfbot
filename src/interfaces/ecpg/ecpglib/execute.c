@@ -1478,6 +1478,9 @@ ecpg_build_params(struct statement *stmt)
 		}
 		else if (stmt->statement_type == ECPGst_exec_with_exprlist)
 		{
+			int			ph_len;
+			int			inserted_len;
+
 			if (tobeinserted == NULL)
 			{
 				/* A NULL value; insert the keyword NULL. */
@@ -1503,12 +1506,32 @@ ecpg_build_params(struct statement *stmt)
 				tobeinserted = p;
 			}
 
-			if (!insert_tobeinserted(position, 2, stmt, tobeinserted))
+			/*
+			 * Replace the whole placeholder: "?", or "$" followed by all of
+			 * its digits ($10 and up have more than one).
+			 */
+			ph_len = 1;
+			if (stmt->command[position - 1] == '$')
+			{
+				while (isdigit((unsigned char) stmt->command[position - 1 + ph_len]))
+					ph_len++;
+			}
+
+			inserted_len = (int) strlen(tobeinserted);
+			if (!insert_tobeinserted(position, ph_len, stmt, tobeinserted))
 			{
 				ecpg_free_params(stmt, false);
 				return false;
 			}
 			tobeinserted = NULL;
+
+			/*
+			 * Continue the search for the next placeholder after the inserted
+			 * value.  The value can contain quotes, for example a bytea
+			 * literal, and scanning those again would make next_insert() miss
+			 * the next placeholder.
+			 */
+			position += inserted_len - 1;
 		}
 		else
 		{
