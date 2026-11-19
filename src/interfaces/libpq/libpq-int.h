@@ -366,6 +366,16 @@ typedef struct pg_conn_host
 								 * found in password file. */
 } pg_conn_host;
 
+typedef struct msg_buffer
+{
+	char	   *buffer;			/* currently allocated buffer */
+	int			bufSize;		/* allocated size of buffer */
+	int			start;			/* offset to first unconsumed data in buffer */
+	int			cursor;			/* next byte to tentatively consume */
+	int			end;			/* offset to first position after avail data */
+} msg_buffer;
+
+
 /*
  * PGconn stores all the state data associated with a single connection
  * to a backend.
@@ -430,6 +440,7 @@ struct pg_conn
 	char	   *scram_client_key;	/* base64-encoded SCRAM client key */
 	char	   *scram_server_key;	/* base64-encoded SCRAM server key */
 	char	   *sslkeylogfile;	/* where should the client write ssl keylogs */
+	char	   *compression;	/* protocol compression policy */
 
 	bool		cancelRequest;	/* true if this connection is used to send a
 								 * cancel request, instead of being a normal
@@ -572,11 +583,17 @@ struct pg_conn
 	 * pqCheck{In,Out}BufferSpace(), but also a careful audit of all libpq
 	 * code that uses ints during size calculations.
 	 */
-	char	   *inBuffer;		/* currently allocated buffer */
-	int			inBufSize;		/* allocated size of buffer */
-	int			inStart;		/* offset to first unconsumed data in buffer */
-	int			inCursor;		/* next byte to tentatively consume */
-	int			inEnd;			/* offset to first position after avail data */
+	msg_buffer	inBuffer;
+	msg_buffer	decompressBuffer;	/* decompressed ordinary messages */
+	void	   *compression_dctx;
+	void	   *compression_cctx;
+	PQExpBufferData compression_output_buffer;
+	bool		compression_buffers_initialized;
+	bool		compression_in_frame;
+	bool		compression_frame_ended;
+	bool		compression_ready;
+	bool		compression_copy_started;
+	bool		compression_rejected;
 
 	/* Buffer for data not yet sent to backend */
 	char	   *outBuffer;		/* currently allocated buffer */
@@ -769,10 +786,10 @@ extern PGresult *PQnfn(PGconn *conn, int fnid, int *result_buf, int buf_size,
 extern char *pqBuildStartupPacket3(PGconn *conn, int *packetlen,
 								   const PQEnvironmentOption *options);
 extern void pqParseInput3(PGconn *conn);
-extern int	pqGetErrorNotice3(PGconn *conn, bool isError);
+extern int	pqGetErrorNotice3(PGconn *conn, bool isError, msg_buffer *msgBuf);
 extern void pqBuildErrorMessage3(PQExpBuffer msg, const PGresult *res,
 								 PGVerbosity verbosity, PGContextVisibility show_context);
-extern int	pqGetNegotiateProtocolVersion3(PGconn *conn);
+extern int	pqGetNegotiateProtocolVersion3(PGconn *conn, msg_buffer *msgBuf);
 extern int	pqGetCopyData3(PGconn *conn, char **buffer, int async);
 extern int	pqGetline3(PGconn *conn, char *s, int maxlen);
 extern int	pqGetlineAsync3(PGconn *conn, char *buffer, int bufsize);
@@ -787,6 +804,16 @@ extern PGresult *pqFunctionCall3(PGconn *conn, Oid fnid,
 
 extern int	PQsendCancelRequest(PGconn *cancelConn);
 
+/* === in fe-compress.c === */
+extern msg_buffer *pqGetMessageBuffer(PGconn *conn);
+extern int	pqReadCompressedMessage(PGconn *conn, int msgLength);
+extern void pqCompressionReset(PGconn *conn);
+extern void pqCompressionReady(PGconn *conn);
+#ifdef USE_ZSTD
+extern int	pqPutCompressedCopyData(PGconn *conn, const char *buffer, int nbytes);
+extern int	pqEndCompressedCopyData(PGconn *conn);
+#endif
+
 /* === in fe-misc.c === */
 
  /*
@@ -795,17 +822,17 @@ extern int	PQsendCancelRequest(PGconn *cancelConn);
   * necessarily any error.
   */
 extern int	pqCheckOutBufferSpace(size_t bytes_needed, PGconn *conn);
-extern int	pqCheckInBufferSpace(size_t bytes_needed, PGconn *conn);
-extern void pqParseDone(PGconn *conn, int newInStart);
-extern int	pqGetc(char *result, PGconn *conn);
+extern int	pqCheckMsgBufferSpace(size_t bytes_needed, msg_buffer *msgBuffer, PGconn *conn);
+extern void pqParseDone(PGconn *conn, msg_buffer *msgBuf, int newInStart);
+extern int	pqGetc(char *result, PGconn *conn, msg_buffer *msgBuf);
 extern int	pqPutc(char c, PGconn *conn);
-extern int	pqGets(PQExpBuffer buf, PGconn *conn);
-extern int	pqGets_append(PQExpBuffer buf, PGconn *conn);
+extern int	pqGets(PQExpBuffer buf, PGconn *conn, msg_buffer *inBuf);
+extern int	pqGets_append(PQExpBuffer buf, PGconn *conn, msg_buffer *inBuf);
 extern int	pqPuts(const char *s, PGconn *conn);
-extern int	pqGetnchar(void *s, size_t len, PGconn *conn);
-extern int	pqSkipnchar(size_t len, PGconn *conn);
+extern int	pqGetnchar(void *s, size_t len, PGconn *conn, msg_buffer *msgBuf);
+extern int	pqSkipnchar(size_t len, PGconn *conn, msg_buffer *msgBuf);
 extern int	pqPutnchar(const void *s, size_t len, PGconn *conn);
-extern int	pqGetInt(int *result, size_t bytes, PGconn *conn);
+extern int	pqGetInt(int *result, size_t bytes, PGconn *conn, msg_buffer *msgBuf);
 extern int	pqPutInt(int value, size_t bytes, PGconn *conn);
 extern int	pqPutMsgStart(char msg_type, PGconn *conn);
 extern int	pqPutMsgEnd(PGconn *conn);
@@ -915,7 +942,7 @@ extern ssize_t pg_GSS_bytes_pending(PGconn *conn);
 /* === in fe-trace.c === */
 
 extern void pqTraceOutputMessage(PGconn *conn, const char *message,
-								 bool toServer);
+								 bool toServer, bool compressed);
 extern void pqTraceOutputNoTypeByteMessage(PGconn *conn, const char *message);
 extern void pqTraceOutputCharResponse(PGconn *conn, const char *responseType,
 									  char response);
