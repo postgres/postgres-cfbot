@@ -608,7 +608,6 @@ CtlCommand
 CtxtHandle
 CurrentOfExpr
 CustomExecMethods
-CustomOutPtrType
 CustomPath
 CustomScan
 CustomScanMethods

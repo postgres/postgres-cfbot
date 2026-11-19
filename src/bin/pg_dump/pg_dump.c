@@ -896,13 +896,11 @@ main(int argc, char **argv)
 
 	/* archiveFormat specific setup */
 	if (archiveFormat == archNull)
-		plainText = 1;
-	if (archiveFormat == archNull ||
-		archiveFormat == archTar)
 	{
+		plainText = 1;
+
 		/*
 		 * If you don't provide a restrict key, one will be appointed for you.
-		 * tar format uses this for its undocumented restore.sql file.
 		 */
 		if (!dopt.restrict_key)
 			dopt.restrict_key = generate_restrict_key();
@@ -912,8 +910,8 @@ main(int argc, char **argv)
 			pg_fatal("invalid restrict key");
 	}
 	else if (dopt.restrict_key)
-		pg_fatal("option %s can only be used with %s or %s",
-				 "--restrict-key", "--format=plain", "--format=tar");
+		pg_fatal("option %s can only be used with %s",
+				 "--restrict-key", "--format=plain");
 
 	/*
 	 * Custom and directory formats are compressed by default with gzip when
@@ -11031,26 +11029,11 @@ fetchAttributeStats(Archive *fout)
 	int			count = 0;
 	PGresult   *res = NULL;
 	static TocEntry *te;
-	static bool restarted;
 	int			max_rels = MAX_ATTR_STATS_RELS;
 
 	/* If we're just starting, set our TOC pointer. */
 	if (!te)
 		te = AH->toc->next;
-
-	/*
-	 * We can't easily avoid a second TOC scan for the tar format because it
-	 * writes restore.sql separately, which means we must execute the queries
-	 * twice.  This feels risky, but there is no known reason it should
-	 * generate different output than the first pass.  Even if it does, the
-	 * worst-case scenario is that restore.sql might have different statistics
-	 * data than the archive.
-	 */
-	if (!restarted && te == AH->toc && AH->format == archTar)
-	{
-		te = AH->toc->next;
-		restarted = true;
-	}
 
 	appendPQExpBufferChar(relids, '{');
 	appendPQExpBufferChar(nspnames, '{');
