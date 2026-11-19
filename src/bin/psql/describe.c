@@ -5201,20 +5201,27 @@ listSchemas(const char *pattern, bool verbose, bool showSystem)
 	myopt.title = _("List of schemas");
 	myopt.translate_header = true;
 
-	if (pattern && pset.sversion >= 150000)
+	/*
+	 * \dn returns a LIST of schemas, so adding a publications footer to the
+	 * describe output makes sense only if the list has a single row.
+	 */
+	if (pattern && pset.sversion >= 150000 && PQntuples(res) == 1)
 	{
 		PGresult   *result;
 		int			i;
+		const char *schema_name = PQgetvalue(res, 0, 0);
 
 		addQueryComment(&buf, "Get publications that publish this schema");
-		appendPQExpBuffer(&buf,
-						  "SELECT pubname \n"
-						  "FROM pg_catalog.pg_publication p\n"
-						  "     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid\n"
-						  "     JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid \n"
-						  "WHERE n.nspname = '%s'\n"
-						  "ORDER BY 1",
-						  pattern);
+
+		appendPQExpBufferStr(&buf,
+							 "SELECT pubname \n"
+							 "FROM pg_catalog.pg_publication p\n"
+							 "     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid\n"
+							 "     JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid \n"
+							 "WHERE n.nspname = ");
+		appendStringLiteralConn(&buf, schema_name, pset.db);
+		appendPQExpBufferStr(&buf, "\nORDER BY 1;");
+
 		result = PSQLexec(buf.data);
 		if (!result)
 			goto error_return;
