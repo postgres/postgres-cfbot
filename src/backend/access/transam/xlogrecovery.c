@@ -363,6 +363,7 @@ static void verifyBackupPageConsistency(XLogReaderState *record);
 static bool recoveryStopsBefore(XLogReaderState *record);
 static bool recoveryStopsAfter(XLogReaderState *record);
 static char *getRecoveryStopReason(void);
+static void PerformRecoveryTargetAction(void);
 static void recoveryPausesHere(bool endOfRecovery);
 static bool recoveryApplyDelay(XLogReaderState *record);
 static void ConfirmRecoveryPaused(void);
@@ -1832,38 +1833,7 @@ PerformWalRecovery(void)
 		 */
 
 		if (reachedRecoveryTarget)
-		{
-			if (!reachedConsistency)
-				ereport(FATAL,
-						(errmsg("requested recovery stop point is before consistent recovery point")));
-
-			/*
-			 * This is the last point where we can restart recovery with a new
-			 * recovery target, if we shutdown and begin again. After this,
-			 * Resource Managers may choose to do permanent corrective actions
-			 * at end of recovery.
-			 */
-			switch (recoveryTargetAction)
-			{
-				case RECOVERY_TARGET_ACTION_SHUTDOWN:
-
-					/*
-					 * exit with special return code to request shutdown of
-					 * postmaster.  Log messages issued from postmaster.
-					 */
-					proc_exit(3);
-
-				case RECOVERY_TARGET_ACTION_PAUSE:
-					SetRecoveryPause(true);
-					recoveryPausesHere(true);
-
-					/* drop into promote */
-					pg_fallthrough;
-
-				case RECOVERY_TARGET_ACTION_PROMOTE:
-					break;
-			}
-		}
+			PerformRecoveryTargetAction();
 
 		RmgrCleanup();
 
@@ -1884,6 +1854,21 @@ PerformWalRecovery(void)
 		/* there are no WAL records following the checkpoint */
 		ereport(LOG,
 				(errmsg("redo is not required")));
+
+		/*
+		 * If we were consistent before replaying anything, an immediate
+		 * recovery target has been reached, even though there is no record
+		 * for recoveryStopsBefore() to stop at.
+		 */
+		if (ArchiveRecoveryRequested &&
+			recoveryTarget == RECOVERY_TARGET_IMMEDIATE &&
+			reachedConsistency)
+		{
+			ereport(LOG,
+					(errmsg("recovery stopping after reaching consistency")));
+			reachedRecoveryTarget = true;
+			PerformRecoveryTargetAction();
+		}
 	}
 
 	/*
@@ -1896,6 +1881,45 @@ PerformWalRecovery(void)
 		ereport(FATAL,
 				(errcode(ERRCODE_CONFIG_FILE_ERROR),
 				 errmsg("recovery ended before configured recovery target was reached")));
+}
+
+/*
+ * Perform the action requested by recovery_target_action, once the recovery
+ * target has been reached.
+ */
+static void
+PerformRecoveryTargetAction(void)
+{
+	if (!reachedConsistency)
+		ereport(FATAL,
+				(errmsg("requested recovery stop point is before consistent recovery point")));
+
+	/*
+	 * This is the last point where we can restart recovery with a new
+	 * recovery target, if we shutdown and begin again. After this, Resource
+	 * Managers may choose to do permanent corrective actions at end of
+	 * recovery.
+	 */
+	switch (recoveryTargetAction)
+	{
+		case RECOVERY_TARGET_ACTION_SHUTDOWN:
+
+			/*
+			 * exit with special return code to request shutdown of
+			 * postmaster.  Log messages issued from postmaster.
+			 */
+			proc_exit(3);
+
+		case RECOVERY_TARGET_ACTION_PAUSE:
+			SetRecoveryPause(true);
+			recoveryPausesHere(true);
+
+			/* drop into promote */
+			pg_fallthrough;
+
+		case RECOVERY_TARGET_ACTION_PROMOTE:
+			break;
+	}
 }
 
 /*
