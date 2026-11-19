@@ -7,7 +7,8 @@
  * relation agree on.  Plain relations get them from their unique indexes.
  * Join relations have no UniqueKeys of their own: whether a join relation is
  * distinct is worked out when needed, from the UniqueKeys of the base
- * relations it consists of.
+ * relations it consists of.  Appendrel children have none either; see
+ * joinrel_is_distinct_for().
  *
  * There are two kinds of question.  Mergejoinable join clauses are assumed
  * to be strict, so when matching them we need not care about rows that have
@@ -88,6 +89,10 @@ joinrel_supports_distinctness(PlannerInfo *root, RelOptInfo *joinrel)
 
 	Assert(IS_JOIN_REL(joinrel));
 
+	/* For a child join, we look at its parent; see joinrel_is_distinct_for */
+	if (IS_OTHER_REL(joinrel))
+		joinrel = joinrel->top_parent;
+
 	/* A grouped join rel's rows are not combinations of base rel rows */
 	if (IS_GROUPED_REL(joinrel))
 		return false;
@@ -126,6 +131,14 @@ joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
 
 	if (!joinrel_supports_distinctness(root, joinrel))
 		return false;
+
+	/*
+	 * A child join's rows are a subset of its parent's rows, and its clauses
+	 * use the same ECs as its parent's.  So it is distinct if its parent is,
+	 * and we need no UniqueKeys for child relations.
+	 */
+	if (IS_OTHER_REL(joinrel))
+		joinrel = joinrel->top_parent;
 
 	foreach_node(RestrictInfo, rinfo, clause_list)
 	{

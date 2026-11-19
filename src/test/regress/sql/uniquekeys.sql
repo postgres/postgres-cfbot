@@ -259,4 +259,44 @@ select distinct id, sum(x) over (partition by y) from uk_a;
 explain (costs off)
 select distinct x, sum(x) over (partition by y) from uk_a;
 
-drop table uk_a, uk_b, uk_c, uk_d, uk_n;
+--
+-- Test child relations under partitionwise join.
+--
+
+create table uk_p (id int primary key, x int, y int) partition by range (id);
+create table uk_p1 partition of uk_p for values from (0) to (100);
+create table uk_p2 partition of uk_p for values from (100) to (200);
+create table uk_q (id int primary key, x int, y int) partition by range (id);
+create table uk_q1 partition of uk_q for values from (0) to (100);
+create table uk_q2 partition of uk_q for values from (100) to (200);
+create table uk_r (id int, x int, y int) partition by range (id);
+create table uk_r1 partition of uk_r for values from (0) to (100);
+create table uk_r2 partition of uk_r for values from (100) to (200);
+
+-- Disable hash and merge joins, so that the nullable side of a left join is
+-- the inner side.
+set enable_partitionwise_join = on;
+set max_parallel_workers_per_gather = 0;
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+
+-- a child relation is unique through its own index
+explain (verbose, costs off)
+select * from uk_p p join uk_q q on p.id = q.id;
+
+-- a child join is unique if its parent is
+explain (verbose, costs off)
+select * from uk_p p left join
+  (uk_q q join uk_p p2 on q.id = p2.id) on p.id = q.id;
+
+-- but not if its parent is not
+explain (verbose, costs off)
+select * from uk_p p left join
+  (uk_q q join uk_r r on q.id = r.id) on p.id = q.id;
+
+reset enable_partitionwise_join;
+reset max_parallel_workers_per_gather;
+reset enable_hashjoin;
+reset enable_mergejoin;
+
+drop table uk_a, uk_b, uk_c, uk_d, uk_n, uk_p, uk_q, uk_r;

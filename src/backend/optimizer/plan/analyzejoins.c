@@ -605,8 +605,8 @@ rel_supports_distinctness(PlannerInfo *root, RelOptInfo *rel)
 	/* For a join relation, the proof has to come from UniqueKeys */
 	if (IS_JOIN_REL(rel))
 		return joinrel_supports_distinctness(root, rel);
-	/* Otherwise we only know about baserels ... */
-	if (rel->reloptkind != RELOPT_BASEREL)
+	/* Otherwise we only know about baserels and their appendrel children */
+	if (!IS_SIMPLE_REL(rel))
 		return false;
 	if (rel->rtekind == RTE_RELATION)
 	{
@@ -680,7 +680,7 @@ rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list,
 	 * rel_supports_distinctness first, but it doesn't seem worth taking any
 	 * risk for.
 	 */
-	if (rel->reloptkind != RELOPT_BASEREL)
+	if (!IS_SIMPLE_REL(rel))
 		return false;
 	if (rel->rtekind == RTE_RELATION)
 	{
