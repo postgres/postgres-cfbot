@@ -473,6 +473,13 @@ ean2ISSN(char *isn)
 {
 	unsigned	check;
 
+	/*
+	 * If the issue publication code is non-zero, we shouldn't
+	 * perform any truncation
+	 */
+	if (strncmp(isn + 13, "00", 2) != 0)
+		return;
+
 	/* the number should come in this format: 977-0000-000-00-0 */
 	/* Strip the first part, crop, and calculate the new check digit */
 	hyphenate(isn, isn + 4, NULL, NULL);
