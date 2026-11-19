@@ -1505,6 +1505,41 @@ ecpg_build_params(struct statement *stmt)
 				}
 				tobeinserted = p;
 			}
+			else
+			{
+				/*
+				 * Write the value as a quoted literal, so that quotes or
+				 * other SQL in it are read as part of the value.
+				 * PQescapeLiteral() takes the connection's client encoding
+				 * and standard_conforming_strings into account.  Its result
+				 * is allocated by libpq, so copy it into memory that
+				 * insert_tobeinserted() can free.
+				 */
+				char	   *escaped;
+
+				escaped = PQescapeLiteral(stmt->connection->connection,
+										  tobeinserted, strlen(tobeinserted));
+				ecpg_free(tobeinserted);
+				if (escaped == NULL)
+				{
+					/*
+					 * This fails, for example, on a string that is not valid
+					 * in the client encoding.  Report libpq's message.
+					 */
+					ecpg_raise_backend(stmt->lineno, NULL,
+									   stmt->connection->connection,
+									   stmt->compat);
+					ecpg_free_params(stmt, false);
+					return false;
+				}
+				tobeinserted = ecpg_strdup(escaped, stmt->lineno, NULL);
+				PQfreemem(escaped);
+				if (tobeinserted == NULL)
+				{
+					ecpg_free_params(stmt, false);
+					return false;
+				}
+			}
 
 			/*
 			 * Replace the whole placeholder: "?", or "$" followed by all of

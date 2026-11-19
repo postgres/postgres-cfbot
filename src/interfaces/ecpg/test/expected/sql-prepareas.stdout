@@ -69,3 +69,6 @@ rows with NULL c1 (must be 1) = 1
 +++++ Test for a quoted value before another value in EXECUTE(exprlist) +++++
 rows stored (must be 4) = 4
 eleven values stored (must be 1) = 1
++++++ Test for quoting values in EXECUTE(exprlist) +++++
+rows in test_marker (must be 0) = 0
+rows stored (must be 2) = 2
