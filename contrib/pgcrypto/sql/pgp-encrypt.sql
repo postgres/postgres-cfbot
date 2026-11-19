@@ -62,6 +62,11 @@ select pgp_sym_decrypt(
 	pgp_sym_encrypt('Secret.', 'key', 's2k-count=65000000'),
 	'key', 'expect-s2k-count=65000000');
 
+-- integer options must be valid integers
+select pgp_sym_encrypt('Secret.', 'key', 's2k-mode=not_a_number');
+select pgp_sym_encrypt('Secret.', 'key', 's2k-mode=3x');
+select pgp_sym_encrypt('Secret.', 'key', 's2k-count=4294968320');
+
 -- s2k digest change
 select pgp_sym_decrypt(
 		pgp_sym_encrypt('Secret.', 'key', 's2k-digest-algo=sha1'),

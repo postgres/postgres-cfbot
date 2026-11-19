@@ -114,6 +114,9 @@ enum PGP_DIGEST_TYPE
 #define PGP_MAX_DIGEST (512/8)
 #define PGP_S2K_SALT   8
 
+#define PGP_S2K_COUNT_MIN 1024
+#define PGP_S2K_COUNT_MAX 65011712
+
 typedef struct PGP_MPI PGP_MPI;
 typedef struct PGP_PubKey PGP_PubKey;
 typedef struct PGP_Context PGP_Context;
