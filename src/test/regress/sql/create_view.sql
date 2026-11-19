@@ -855,3 +855,22 @@ reset restrict_nonsystem_relation_kind;
 -- clean up all the random objects we made above
 DROP SCHEMA temp_view_test CASCADE;
 DROP SCHEMA testviewschm2 CASCADE;
+
+--
+-- Deparsing of ORDER BY ALL in view definitions
+--
+create temp table order_all_vtbl (a int, b text);
+
+create view order_all_v1 as select * from order_all_vtbl order by all;
+create view order_all_v2 as select * from order_all_vtbl order by all desc;
+create view order_all_v3 as select * from order_all_vtbl order by all nulls first;
+create view order_all_v4 as select * from order_all_vtbl order by all asc nulls last;
+create view order_all_v5 as select * from order_all_vtbl order by all desc nulls first;
+create view order_all_v6 as select * from order_all_vtbl order by all desc nulls last;
+
+select viewname, definition from pg_views
+  where viewname like 'order\_all\_v%' order by viewname;
+
+drop view order_all_v1, order_all_v2, order_all_v3,
+          order_all_v4, order_all_v5, order_all_v6;
+drop table order_all_vtbl;

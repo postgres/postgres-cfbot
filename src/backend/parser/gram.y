@@ -13506,6 +13506,21 @@ opt_sort_clause:
 
 sort_clause:
 			ORDER BY sortby_list					{ $$ = $3; }
+			| ORDER BY ALL opt_asc_desc opt_nulls_order
+				{
+					/*
+					 * Create a special marker SortBy node for ORDER BY ALL.
+					 * We use a SortBy with node=NULL as the marker, and store
+					 * the sort direction and nulls ordering to apply to all columns.
+					 */
+					SortBy *sortby = makeNode(SortBy);
+					sortby->node = NULL;  /* NULL node indicates ORDER BY ALL */
+					sortby->sortby_dir = $4;
+					sortby->sortby_nulls = $5;
+					sortby->useOp = NIL;
+					sortby->location = @2;
+					$$ = list_make1(sortby);
+				}
 		;
 
 sortby_list:
@@ -19437,6 +19452,7 @@ insertSelectOptions(SelectStmt *stmt,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("multiple ORDER BY clauses not allowed"),
 					 parser_errposition(exprLocation((Node *) sortClause))));
+
 		stmt->sortClause = sortClause;
 	}
 	/* We can handle multiple locking clauses, though */

@@ -6319,3 +6319,22 @@ SELECT last_value FROM null_treatment_seq;
 --cleanup
 DROP TABLE planets CASCADE;
 NOTICE:  drop cascades to view planets_view
+-- ORDER BY ALL is only valid for a query's ORDER BY, not in window definitions
+SELECT rank() OVER (ORDER BY ALL) FROM tenk1;
+ERROR:  ORDER BY ALL is only allowed in a query's ORDER BY clause
+LINE 1: SELECT rank() OVER (ORDER BY ALL) FROM tenk1;
+                                  ^
+SELECT four FROM tenk1 WINDOW w AS (ORDER BY ALL DESC);
+ERROR:  ORDER BY ALL is only allowed in a query's ORDER BY clause
+LINE 1: SELECT four FROM tenk1 WINDOW w AS (ORDER BY ALL DESC);
+                                                  ^
+-- ... but it is fine in the query's own ORDER BY, next to window functions
+SELECT four, ten, row_number() OVER (PARTITION BY four ORDER BY ten) AS rn
+  FROM tenk1 ORDER BY ALL LIMIT 3;
+ four | ten | rn 
+------+-----+----
+    0 |   0 |  1
+    0 |   0 |  2
+    0 |   0 |  3
+(3 rows)
+

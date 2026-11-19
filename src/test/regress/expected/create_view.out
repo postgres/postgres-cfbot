@@ -2425,3 +2425,58 @@ drop cascades to operator ||(xml,xml)
 drop cascades to view tt261v
 drop cascades to table tt27v_tbl
 drop cascades to view tt27v
+--
+-- Deparsing of ORDER BY ALL in view definitions
+--
+create temp table order_all_vtbl (a int, b text);
+create view order_all_v1 as select * from order_all_vtbl order by all;
+NOTICE:  view "order_all_v1" will be a temporary view
+DETAIL:  It depends on temporary table order_all_vtbl.
+create view order_all_v2 as select * from order_all_vtbl order by all desc;
+NOTICE:  view "order_all_v2" will be a temporary view
+DETAIL:  It depends on temporary table order_all_vtbl.
+create view order_all_v3 as select * from order_all_vtbl order by all nulls first;
+NOTICE:  view "order_all_v3" will be a temporary view
+DETAIL:  It depends on temporary table order_all_vtbl.
+create view order_all_v4 as select * from order_all_vtbl order by all asc nulls last;
+NOTICE:  view "order_all_v4" will be a temporary view
+DETAIL:  It depends on temporary table order_all_vtbl.
+create view order_all_v5 as select * from order_all_vtbl order by all desc nulls first;
+NOTICE:  view "order_all_v5" will be a temporary view
+DETAIL:  It depends on temporary table order_all_vtbl.
+create view order_all_v6 as select * from order_all_vtbl order by all desc nulls last;
+NOTICE:  view "order_all_v6" will be a temporary view
+DETAIL:  It depends on temporary table order_all_vtbl.
+select viewname, definition from pg_views
+  where viewname like 'order\_all\_v%' order by viewname;
+   viewname   |                    definition                    
+--------------+--------------------------------------------------
+ order_all_v1 |  SELECT a,                                      +
+              |     b                                           +
+              |    FROM order_all_vtbl                          +
+              |   ORDER BY a, b;
+ order_all_v2 |  SELECT a,                                      +
+              |     b                                           +
+              |    FROM order_all_vtbl                          +
+              |   ORDER BY a DESC, b DESC;
+ order_all_v3 |  SELECT a,                                      +
+              |     b                                           +
+              |    FROM order_all_vtbl                          +
+              |   ORDER BY a NULLS FIRST, b NULLS FIRST;
+ order_all_v4 |  SELECT a,                                      +
+              |     b                                           +
+              |    FROM order_all_vtbl                          +
+              |   ORDER BY a, b;
+ order_all_v5 |  SELECT a,                                      +
+              |     b                                           +
+              |    FROM order_all_vtbl                          +
+              |   ORDER BY a DESC, b DESC;
+ order_all_v6 |  SELECT a,                                      +
+              |     b                                           +
+              |    FROM order_all_vtbl                          +
+              |   ORDER BY a DESC NULLS LAST, b DESC NULLS LAST;
+(6 rows)
+
+drop view order_all_v1, order_all_v2, order_all_v3,
+          order_all_v4, order_all_v5, order_all_v6;
+drop table order_all_vtbl;

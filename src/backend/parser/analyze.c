@@ -1490,6 +1490,7 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 	 */
 	qry->sortClause = transformSortClause(pstate,
 										  stmt->sortClause,
+										  sortClauseIsAll(stmt->sortClause),
 										  &qry->targetList,
 										  EXPR_KIND_ORDER_BY,
 										  false /* allow SQL92 rules */ );
@@ -1753,6 +1754,7 @@ transformValuesClause(ParseState *pstate, SelectStmt *stmt)
 	 */
 	qry->sortClause = transformSortClause(pstate,
 										  stmt->sortClause,
+										  sortClauseIsAll(stmt->sortClause),
 										  &qry->targetList,
 										  EXPR_KIND_ORDER_BY,
 										  false /* allow SQL92 rules */ );
@@ -1996,6 +1998,7 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 
 	qry->sortClause = transformSortClause(pstate,
 										  sortClause,
+										  sortClauseIsAll(sortClause),
 										  &qry->targetList,
 										  EXPR_KIND_ORDER_BY,
 										  false /* allow SQL92 rules */ );

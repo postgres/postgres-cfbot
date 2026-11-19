@@ -1722,8 +1722,14 @@ exprLocation(const Node *expr)
 			loc = exprLocation(((const CollateClause *) expr)->arg);
 			break;
 		case T_SortBy:
-			/* just use argument's location (ignore operator, if any) */
-			loc = exprLocation(((const SortBy *) expr)->node);
+			/*
+			 * Just use argument's location (ignore operator, if any).  The
+			 * ORDER BY ALL marker has no argument, so use its own location.
+			 */
+			if (((const SortBy *) expr)->node != NULL)
+				loc = exprLocation(((const SortBy *) expr)->node);
+			else
+				loc = ((const SortBy *) expr)->location;
 			break;
 		case T_WindowDef:
 			loc = ((const WindowDef *) expr)->location;

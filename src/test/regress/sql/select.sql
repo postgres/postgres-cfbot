@@ -271,3 +271,83 @@ create table list_parted_tbl1 partition of list_parted_tbl
   for values in (1) partition by list(b);
 explain (costs off) select * from list_parted_tbl;
 drop table list_parted_tbl;
+
+--
+-- ORDER BY ALL
+--
+
+create temp table order_all_tbl (a int, b text, c float8);
+insert into order_all_tbl values
+  (3, 'foo', 1.5), (1, 'bar', null), (2, 'baz', 1.5), (1, 'qux', 1.5),
+  (null, 'nul', 3.0), (2, null, 2.0), (3, 'foo', null);
+
+-- direction and NULLS variants
+select * from order_all_tbl order by all;
+select * from order_all_tbl order by all asc;
+select * from order_all_tbl order by all desc;
+select * from order_all_tbl order by all nulls first;
+select * from order_all_tbl order by all nulls last;
+select * from order_all_tbl order by all asc nulls first;
+select * from order_all_tbl order by all asc nulls last;
+select * from order_all_tbl order by all desc nulls first;
+select * from order_all_tbl order by all desc nulls last;
+
+-- equivalent to listing every select-list column
+select * from order_all_tbl order by a desc, b desc, c desc;
+
+-- subset of columns, expressions, duplicate columns, aggregates
+select a, b from order_all_tbl order by all;
+select a + 1 as x, b || '_t' as y from order_all_tbl order by all desc;
+select a, a from order_all_tbl order by all;
+select a, count(*) from order_all_tbl group by a order by all;
+
+-- interaction with other clauses
+select distinct a, b from order_all_tbl order by all;
+select distinct on (a) a, b from order_all_tbl order by all;
+select * from order_all_tbl order by all desc limit 3;
+select * from order_all_tbl where a > 1 order by all;
+
+-- subqueries, CTEs, joins, VALUES
+select * from (select a, b from order_all_tbl order by all) sq;
+with cte as (select a, b from order_all_tbl where a > 1)
+  select * from cte order by all desc;
+select t1.a, t1.b, t2.b as b2
+  from order_all_tbl t1 join order_all_tbl t2 on t1.a = t2.a and t1.b < t2.b
+  order by all;
+select * from (values (3, 'foo'), (1, 'bar'), (2, 'baz')) as t(x, y) order by all;
+values (3, 'foo'), (1, 'bar'), (2, 'baz') order by all desc;
+
+-- not allowed: ALL combined with other sort items or a USING operator
+select * from order_all_tbl order by all, a;
+select * from order_all_tbl order by a, all;
+select * from order_all_tbl order by all, all;
+select * from order_all_tbl order by all using <;
+
+-- ORDER BY ALL together with GROUP BY and DISTINCT must behave exactly like
+-- the equivalent explicit ORDER BY (compare each pair of results)
+create temp table order_all_num (n numeric, g int);
+insert into order_all_num values
+  (1.5, 1), (1.5, 1), (2.5, 2), (2.5, 2), (1.5, 3), (null, 4), (null, 4);
+
+select n, count(*) from order_all_num group by n order by all desc;
+select n, count(*) from order_all_num group by n order by n desc, count(*) desc;
+select distinct n from order_all_num order by all;
+select distinct n from order_all_num order by n;
+select g, max(n), count(*) from order_all_num group by g
+  order by all desc nulls last;
+select g, max(n), count(*) from order_all_num group by g
+  order by g desc nulls last, max(n) desc nulls last, count(*) desc nulls last;
+select g, n, count(*) from order_all_num group by rollup (g, n)
+  order by all nulls last;
+select g, n, count(*) from order_all_num group by rollup (g, n)
+  order by g nulls last, n nulls last, count(*) nulls last;
+
+-- an ungrouped select-list column is still an error
+select n, g from order_all_num group by n order by all;
+
+-- a second ORDER BY on a parenthesized query is an error
+(select n from order_all_num order by n) order by all;
+
+drop table order_all_num;
+
+drop table order_all_tbl;

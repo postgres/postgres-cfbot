@@ -1842,3 +1842,9 @@ drop table agg_hash_1;
 drop table agg_hash_2;
 drop table agg_hash_3;
 drop table agg_hash_4;
+
+--
+-- ORDER BY ALL is not allowed inside aggregate calls
+--
+select array_agg(unique1 order by all) from tenk1;
+select percentile_disc(0.5) within group (order by all) from tenk1;
