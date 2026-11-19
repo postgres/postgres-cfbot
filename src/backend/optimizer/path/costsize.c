@@ -4436,6 +4436,57 @@ initial_cost_hashjoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 }
 
 /*
+ * hash_join_joint_ndistinct
+ *		Estimate the joint ndistinct of the inner-side hash key columns of a
+ *		multi-clause hash join.
+ *
+ * The per-clause loop in final_cost_hashjoin() keeps the smallest bucket
+ * fraction seen for any one clause, i.e. the largest ndistinct of any single
+ * key column.  For a compound hash key that answers the wrong question: a
+ * bucket holds the rows that match *all* the clauses, and under the same
+ * independence assumption that calc_joinrel_size_estimate() already makes
+ * there are inner_rows / (nd1 * nd2 * ...) of them.  estimate_num_groups()
+ * implements exactly that estimate, and unlike a bare product it bounds the
+ * result by the number of input rows.
+ *
+ * Returns -1.0, which no valid ndistinct can match, when the estimate cannot
+ * be formed: fewer than two clauses, a clause whose inner-side operand is
+ * not a plain Var of the inner relation, or a non-OpExpr clause.
+ */
+static double
+hash_join_joint_ndistinct(PlannerInfo *root, RelOptInfo *innerrel,
+						  List *hashclauses)
+{
+	List	   *exprs = NIL;
+	ListCell   *lc;
+
+	if (list_length(hashclauses) < 2)
+		return -1.0;
+
+	foreach(lc, hashclauses)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		Node	   *expr;
+
+		if (!IsA(rinfo->clause, OpExpr))
+			return -1.0;
+
+		if (bms_is_subset(rinfo->right_relids, innerrel->relids))
+			expr = get_rightop((OpExpr *) rinfo->clause);
+		else
+			expr = get_leftop((OpExpr *) rinfo->clause);
+
+		if (expr == NULL || !IsA(expr, Var) ||
+			!bms_is_member(((Var *) expr)->varno, innerrel->relids))
+			return -1.0;
+
+		exprs = lappend(exprs, expr);
+	}
+
+	return estimate_num_groups(root, exprs, innerrel->tuples, NULL, NULL);
+}
+
+/*
  * final_cost_hashjoin
  *	  Final estimate of the cost and result size of a hashjoin path.
  *
@@ -4469,6 +4520,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	double		virtualbuckets;
 	Selectivity innerbucketsize;
 	Selectivity innermcvfreq;
+	double		joint_ndistinct;
 	ListCell   *hcl;
 
 	/* Set the number of disabled nodes. */
@@ -4583,6 +4635,39 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 			/* Disregard zero for MCV freq, it means we have no data */
 			if (thismcvfreq > 0.0 && innermcvfreq > thismcvfreq)
 				innermcvfreq = thismcvfreq;
+		}
+
+		/*
+		 * Having more than one hash clause means the bucket is selected by the
+		 * whole compound key, so the duplicate factor is the joint ndistinct,
+		 * not the largest single-column one.  Take whichever fraction is
+		 * smaller; extended statistics, when they exist, have already had
+		 * their say and only the clauses they did not cover are left here.
+		 *
+		 * Only for joins that look at the whole bucket, though.  Semi and anti
+		 * joins, in either direction, stop at the first match, and the probe
+		 * charge below already says so through inner_scan_frac, so the bucket
+		 * fraction is not what the executor pays for there; re-pricing it would
+		 * not describe cheaper work, it would only move the path down the same
+		 * cost table.  A join whose inner side is merely unique still has to
+		 * look at its bucket until the first row passes the join filter, and
+		 * that bucket really does hold about one row per key, so the correction
+		 * is applied there.
+		 */
+		if (path->jpath.jointype == JOIN_SEMI ||
+			path->jpath.jointype == JOIN_ANTI ||
+			path->jpath.jointype == JOIN_RIGHT_SEMI ||
+			path->jpath.jointype == JOIN_RIGHT_ANTI)
+			joint_ndistinct = -1.0;
+		else
+			joint_ndistinct = hash_join_joint_ndistinct(root, inner_path->parent,
+														otherclauses);
+		if (joint_ndistinct > 0.0)
+		{
+			Selectivity joint_bucketsize = 1.0 / joint_ndistinct;
+
+			if (innerbucketsize > joint_bucketsize)
+				innerbucketsize = joint_bucketsize;
 		}
 	}
 
