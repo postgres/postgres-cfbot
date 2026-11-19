@@ -148,8 +148,6 @@ typedef void (*DeClonePtrType) (ArchiveHandle *AH);
 typedef int (*WorkerJobDumpPtrType) (ArchiveHandle *AH, TocEntry *te);
 typedef int (*WorkerJobRestorePtrType) (ArchiveHandle *AH, TocEntry *te);
 
-typedef size_t (*CustomOutPtrType) (ArchiveHandle *AH, const void *buf, size_t len);
-
 typedef enum
 {
 	SQL_SCAN = 0,				/* normal */
@@ -280,8 +278,6 @@ struct _archiveHandle
 	PrepParallelRestorePtrType PrepParallelRestorePtr;
 	ClonePtrType ClonePtr;		/* Clone format-specific fields */
 	DeClonePtrType DeClonePtr;	/* Clean up cloned fields */
-
-	CustomOutPtrType CustomOutPtr;	/* Alternative script output routine */
 
 	/* Stuff for direct DB connection */
 	char	   *archdbname;		/* DB name *read* from archive */

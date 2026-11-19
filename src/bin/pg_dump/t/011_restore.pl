@@ -5,7 +5,6 @@
 use strict;
 use warnings FATAL => 'all';
 
-use Carp;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -21,9 +20,7 @@ $node->safe_psql(
 		TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'});
 
 # Verify that pg_restore can restore a small database from each dump format,
-# with or without each option that has format-specific code.  Currently,
-# --inserts is the option having format-specific code.  (Search pg_backup*.c
-# for "--inserts".)  Test more --inserts variants while here.
+# with and without --inserts and its variants.
 my $setup = <<'EOSQL';
 CREATE ROLE pubowner;
 ALTER SCHEMA public OWNER TO pubowner;
@@ -169,64 +166,6 @@ foreach my $case (@fmt_cases)
 	);
 	is($stderr, '',
 		"restore$space_rextra via $fmt$space_dextra => plain: no stderr");
-
-	# tar fmt: test restore.sql
-	next unless $fmt eq 'tar';
-  SKIP:
-	{
-		my $unpacked = $dump_file . '.unpacked';
-		my $tar = $ENV{TAR};
-		skip "no tar program available", 1
-		  if (!defined $tar || $tar eq '');
-
-		# Unpack tar; fetch and transform restore.sql from its root.  $$PATH$$
-		# will appear in a line like:
-		#
-		#	-- default settings
-		#	COPY public.t (c) FROM '$$PATH$$/4162.dat';
-		#	-- inserts
-		#	\i $$PATH$$/4162.dat
-		#
-		# We don't support a build directory containing a single quote.
-		# Hence, the former needs no escaping, and plain single quotes suffice
-		# for the latter.
-		mkdir($unpacked) || croak "mkdir $unpacked: $!";
-		system_or_bail($tar, 'xf' => $dump_file, '-C' => $unpacked);
-		my $restore_dot_sql = slurp_file("$unpacked/restore.sql");
-		$restore_dot_sql =~ s/'\$\$PATH\$\$/'$unpacked/g;
-		$restore_dot_sql =~ s/\\i \$\$PATH\$\$/\\i '$unpacked'/g;
-
-		Test::More->builder->todo_start(
-			"--inserts restore.sql not updated for CVE-2025-8714 fix: data rows not restored"
-		) if $space_dextra =~ /inserts/;
-
-		# restore.sql drops and creates the database like "pg_dump --clean
-		# --create", so connect to some other database.
-		($result, $stdout, $stderr) =
-		  $node->psql('postgres', $restore_dot_sql);
-		is($result, 0, "restore.sql$space_dextra: succeeds");
-		like($stdout, $want_psql_stdout,
-			"restore.sql$space_dextra: expected stdout");
-		is($stderr, '', "restore.sql$space_dextra: no stderr");
-
-		# compare round trip
-		$result = run_log [
-			'pg_dump', '--clean',
-			'--restrict-key' => 'test',
-			$node->connstr('regression_utf8')
-		  ],
-		  '>' => \$stdout,
-		  '2>' => \$stderr;
-		ok($result,
-			"comparison dump after restore.sql$space_dextra: succeeds");
-		is($stdout, $want_dump_sql,
-			"comparison dump after restore.sql$space_dextra: expected stdout"
-		);
-		is($stderr, '',
-			"comparison dump after restore.sql$space_dextra: no stderr");
-
-		Test::More->builder->todo_end if $space_dextra =~ /inserts/;
-	}
 }
 
 # Confirm that a "pg_dumpall --clean" can be restored cleanly.
