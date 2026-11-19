@@ -3300,6 +3300,24 @@ ReorderBufferCleanupAbortedTupleCids(ReorderBuffer *rb,
 
 	/* Get the top-level transaction whose tuplecid list we're to clean */
 	toptxn = rbtxn_get_toptxn(txn);
+	if (dlist_is_empty(&toptxn->tuplecids))
+		return;
+
+	/*
+	 * Skip the scan if none of the aborting xids has catalog changes (the
+	 * flag is set before queueing tuplecids and never cleared).
+	 */
+	if (!rbtxn_has_catalog_changes(txn))
+	{
+		bool		subtxn_has_catalog_changes = false;
+
+		for (int i = 0; !subtxn_has_catalog_changes && i < nsubxacts; i++)
+			subtxn_has_catalog_changes =
+				ReorderBufferXidHasCatalogChanges(rb, subxacts[i]);
+
+		if (!subtxn_has_catalog_changes)
+			return;
+	}
 
 	dlist_foreach_modify(it, &toptxn->tuplecids)
 	{
@@ -3599,6 +3617,9 @@ ReorderBufferAddNewTupleCids(ReorderBuffer *rb,
 {
 	ReorderBufferChange *change = ReorderBufferAllocChange(rb);
 	ReorderBufferTXN *txn;
+
+	/* ReorderBufferCleanupAbortedTupleCids() relies on this flag being set */
+	Assert(ReorderBufferXidHasCatalogChanges(rb, subxid));
 
 	txn = ReorderBufferTXNByXid(rb, xid, true, NULL, lsn, true);
 

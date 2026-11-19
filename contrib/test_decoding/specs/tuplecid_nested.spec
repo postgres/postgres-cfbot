@@ -54,6 +54,7 @@ setup { SET synchronous_commit=on; }
 step "s0_begin" { BEGIN; }
 step "s0_topwrite" { INSERT INTO tbl1 VALUES (0); }
 step "s0_outer" { SAVEPOINT outer_sp; }
+step "s0_outerwrite" { INSERT INTO tbl1 VALUES (1); }
 step "s0_inner" { SAVEPOINT inner_sp; }
 step "s0_catinsert1" { INSERT INTO user_cat VALUES (5, 'e'); }
 step "s0_release_inner" { RELEASE SAVEPOINT inner_sp; }
@@ -75,3 +76,7 @@ step "s2_vacuum" { VACUUM user_cat; }
 # The slot is created before the transaction begins, so the final
 # s1_get_changes decodes the whole transaction through its commit.
 permutation "s1_init" "s0_begin" "s0_topwrite" "s0_outer" "s0_inner" "s0_catinsert1" "s0_release_inner" "s0_rollback_outer" "s2_vacuum" "s0_catinsert2" "s0_commit" "s1_get_changes"
+
+# Same as above, but outer_sp also does a regular write so it exists in
+# reorderbuffer without RBTXN_HAS_CATALOG_CHANGES.
+permutation "s1_init" "s0_begin" "s0_topwrite" "s0_outer" "s0_outerwrite" "s0_inner" "s0_catinsert1" "s0_release_inner" "s0_rollback_outer" "s2_vacuum" "s0_catinsert2" "s0_commit" "s1_get_changes"
