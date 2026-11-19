@@ -178,10 +178,11 @@ ORDER BY 1, 2;
  bigint                      | xid8
  text                        | character
  text                        | character varying
+ json                        | json5
  timestamp without time zone | timestamp with time zone
  bit                         | bit varying
  txid_snapshot               | pg_snapshot
-(6 rows)
+(7 rows)
 
 SELECT DISTINCT p1.proargtypes[1]::regtype, p2.proargtypes[1]::regtype
 FROM pg_proc AS p1, pg_proc AS p2
@@ -1041,11 +1042,12 @@ WHERE c.castmethod = 'b' AND
  text              | character         |        0 | i
  xml               | character         |        0 | a
  pg_mcv_list       | bytea             |        0 | i
+ json              | json5             |        0 | i
  cidr              | inet              |        0 | i
  pg_dependencies   | bytea             |        0 | i
  pg_node_tree      | text              |        0 | i
  pg_ndistinct      | bytea             |        0 | i
-(10 rows)
+(11 rows)
 
 -- **************** pg_conversion ****************
 -- Look for illegal values in pg_conversion fields.
