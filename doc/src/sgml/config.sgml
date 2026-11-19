@@ -12891,6 +12891,44 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-debug-disable-indexscan-prefetch" xreflabel="debug_disable_indexscan_prefetch">
+      <term><varname>debug_disable_indexscan_prefetch</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>debug_disable_indexscan_prefetch</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Disables I/O prefetching of table pages during the execution of
+        index scans and index-only scans.  The default is
+        <literal>off</literal>.
+       </para>
+       <para>
+        This parameter is a developer option.  Setting it to
+        <literal>on</literal> stops index scans from reading table pages
+        through a read stream.  Each table page is read synchronously, at
+        the point where it is needed.  This is useful for isolating the
+        effects of prefetching, but it is not intended as a way of tuning
+        performance.  Scans also lose the read stream's combining of
+        neighboring table page reads, so they need more system calls to read
+        the same table pages.
+       </para>
+       <para>
+        Users who wish to limit or disable asynchronous I/O during index
+        scans should set <xref linkend="guc-io-method"/> to
+        <literal>sync</literal> instead.  Another option is to lower
+        <xref linkend="guc-effective-io-concurrency"/> (or the corresponding
+        tablespace parameter); setting
+        <varname>effective_io_concurrency</varname> to <literal>0</literal>
+        disables the issuance of asynchronous I/O requests without otherwise
+        changing how index scans are executed.  Index scans still use a read
+        stream with either setting, so neighboring table page reads continue
+        to be combined into larger I/O operations (see
+        <xref linkend="guc-io-combine-limit"/>).
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-debug-discard-caches" xreflabel="debug_discard_caches">
       <term><varname>debug_discard_caches</varname> (<type>integer</type>)
       <indexterm>

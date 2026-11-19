@@ -89,6 +89,53 @@ sub test_repeated_blocks
 		   ARRAY[0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1, 0]);/);
 	ok(1, "$io_method: stream accessing same block");
 
+	# The same sequences with READ_STREAM_DEDUP_RECENT, where a repeat of
+	# a block that is still in flight or was consumed a moment ago is pinned
+	# afresh when its turn comes, instead of being read again.
+	$psql->query_safe(qq/SELECT evict_rel('largeish');/);
+	$psql->query_safe(
+		qq/SELECT * FROM read_stream_for_blocks('largeish',
+		   ARRAY[0, 2, 2, 4, 4], true);/);
+	ok(1, "$io_method: dedup stream missing the same block repeatedly");
+
+	# Repeats interleaved with new blocks, some of which are still in flight
+	$psql->query_safe(qq/SELECT evict_rel('largeish');/);
+	$psql->query_safe(
+		qq/SELECT * FROM read_stream_for_blocks('largeish',
+		   ARRAY[0, 1, 0, 2, 1, 3, 2, 4, 3, 5, 4, 6, 5, 0, 6, 1], true);/);
+	ok(1, "$io_method: dedup stream missing jittered blocks");
+
+	# More repeats than the stream has repeat entries (two pinned buffers
+	# allowed, so 16 repeat entries), so that look-ahead has to stop and
+	# resume as they are consumed
+	$psql->query_safe(qq/SET effective_io_concurrency = 1;/);
+	$psql->query_safe(qq/SELECT evict_rel('largeish');/);
+	$psql->query_safe(
+		qq/SELECT * FROM read_stream_for_blocks('largeish',
+		   (SELECT array_agg(i % 2) FROM generate_series(0, 99) i), true);/);
+	ok(1, "$io_method: dedup stream with more repeats than repeat entries");
+	$psql->query_safe(qq/RESET effective_io_concurrency;/);
+
+	# The same kinds of sequences with I/O combining, so that a pending read
+	# of several blocks grows past repeat entries queued in the middle of it
+	$psql->query_safe(qq/SET io_combine_limit = 16;/);
+	$psql->query_safe(qq/SELECT evict_rel('largeish');/);
+	$psql->query_safe(
+		qq/SELECT * FROM read_stream_for_blocks('largeish',
+		   ARRAY[0, 1, 2, 0, 3, 4, 1, 5, 6, 2, 7, 8, 5, 9, 3], true);/);
+	ok(1, "$io_method: dedup stream combining reads past repeats");
+	$psql->query_safe(qq/SET io_combine_limit = 1;/);
+
+	# A repeat entry holds no pin, so the block it repeats can be evicted
+	# before its turn comes.  evict_before evicts the block of the request it
+	# names, just before that request is pulled from the stream, leaving the
+	# repeat entry to read the block again for itself.
+	$psql->query_safe(qq/SELECT evict_rel('largeish');/);
+	$psql->query_safe(
+		qq/SELECT * FROM read_stream_for_blocks('largeish',
+		   ARRAY[0, 7, 7], true, evict_before=>2);/);
+	ok(1, "$io_method: dedup stream repeating an evicted block");
+
 	# Test repeated blocks with a temp table, using invalidate_rel_block()
 	# to evict individual local buffers.
 	$psql->query_safe(
@@ -111,6 +158,14 @@ sub test_repeated_blocks
 		   ARRAY[0, 2, 2, 4, 4]);/);
 	ok(1, "$io_method: temp stream hitting the same block repeatedly");
 
+	# And with READ_STREAM_DEDUP_RECENT, missing and hitting local buffers
+	$psql->query_safe(qq/SELECT invalidate_rel_block('largeish_temp', 0);/);
+	$psql->query_safe(qq/SELECT invalidate_rel_block('largeish_temp', 2);/);
+	$psql->query_safe(qq/SELECT invalidate_rel_block('largeish_temp', 4);/);
+	$psql->query_safe(
+		qq/SELECT * FROM read_stream_for_blocks('largeish_temp',
+		   ARRAY[0, 2, 0, 4, 2, 4, 0], true);/);
+	ok(1, "$io_method: temp dedup stream missing recent blocks");
 	$psql->quit();
 }
 
