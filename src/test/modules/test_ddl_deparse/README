@@ -6,3 +6,12 @@ it.
 The functions in this extension are intended to be able to process some
 part of the struct and produce some readable output, preferably handling
 all possible cases so that SQL test code can be written.
+
+The module also tests the DDL deparser.  With
+test_ddl_deparse.execute_deparsed_ddl on, each supported command is run in
+a subtransaction that is rolled back, deparsed from a ddl_command_end event
+trigger, and the deparsed command is executed instead.
+test_ddl_deparse.print_deparsed_ddl prints the deparsed command as a
+NOTICE, and test_ddl_deparse.log_declined_commands logs the commands the
+deparser does not support.  t/001_deparse_regress.pl runs the core
+regression tests this way.

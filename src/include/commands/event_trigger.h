@@ -64,7 +64,7 @@ extern void EventTriggerSQLDrop(Node *parsetree);
 extern void EventTriggerTableRewrite(Node *parsetree, Oid tableOid, int reason);
 extern void EventTriggerOnLogin(void);
 
-extern bool EventTriggerBeginCompleteQuery(void);
+extern bool EventTriggerBeginCompleteQuery(const Node *parsetree);
 extern void EventTriggerEndCompleteQuery(void);
 extern bool trackDroppedObjectsNeeded(void);
 extern void EventTriggerSQLDropAddObject(const ObjectAddress *object,
@@ -72,6 +72,10 @@ extern void EventTriggerSQLDropAddObject(const ObjectAddress *object,
 
 extern void EventTriggerInhibitCommandCollection(void);
 extern void EventTriggerUndoInhibitCommandCollection(void);
+extern bool EventTriggerCommandCollectionActive(void);
+extern const Node *EventTriggerGetParsetree(void);
+extern List *EventTriggerGetCollectedCommands(void);
+extern List *EventTriggerGetDroppedObjects(void);
 
 extern void EventTriggerCollectSimpleCommand(ObjectAddress address,
 											 ObjectAddress secondaryObject,
@@ -81,6 +85,10 @@ extern void EventTriggerAlterTableStart(const Node *parsetree);
 extern void EventTriggerAlterTableRelid(Oid objectId);
 extern void EventTriggerCollectAlterTableSubcmd(const Node *subcmd,
 												ObjectAddress address);
+extern void EventTriggerCollectColumnDefault(Node *expr);
+extern void EventTriggerCollectAlterColumnTypeUsing(Oid relid,
+													const char *colName,
+													const char *usingText);
 extern void EventTriggerAlterTableEnd(void);
 
 extern void EventTriggerCollectGrant(InternalGrant *istmt);
