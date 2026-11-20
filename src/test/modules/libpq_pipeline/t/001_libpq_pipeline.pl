@@ -44,9 +44,16 @@ for my $testname (@tests)
 	# For a bunch of tests, generate a libpq trace file too.
 	my $traceout =
 	  "$PostgreSQL::Test::Utils::tmp_check/traces/$testname.trace";
+
+	local $ENV{PQTRACE};
+	local $ENV{PQTRACEFLAGS};
 	if ($cmptrace)
 	{
-		push @extraargs, "-t" => $traceout;
+		$ENV{PQTRACE} = $traceout;
+		# Set trace flags to PQTRACE_SUPPRESS_TIMESTAMPS | PQTRACE_REGRESS_MODE
+		$ENV{PQTRACEFLAGS} = 3;
+	} else {
+		delete $ENV{PQTRACE};
 	}
 
 	# Execute the test using the latest protocol version.
