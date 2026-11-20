@@ -15,7 +15,7 @@ PGFILEDESC = "amcheck - function for verifying relation integrity"
 
 REGRESS = check check_btree check_gin check_heap
 
-EXTRA_INSTALL = contrib/pg_walinspect
+EXTRA_INSTALL = contrib/pageinspect contrib/pg_walinspect
 TAP_TESTS = 1
 
 ifdef USE_PGXS

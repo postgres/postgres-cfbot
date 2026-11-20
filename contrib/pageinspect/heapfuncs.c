@@ -25,6 +25,7 @@
 
 #include "postgres.h"
 
+#include "access/hot_indexed.h"
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "catalog/pg_am_d.h"
@@ -334,6 +335,24 @@ tuple_data_split_internal(Oid relid, char *tupdata,
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("number of attributes in tuple header is greater than number of attributes in tuple descriptor")));
+
+	/*
+	 * A HOT-indexed tuple ends with its modified-attrs bitmap, which is not
+	 * attribute data.  A collapse stub (natts 0) holds no attributes at all.
+	 */
+	if ((t_infomask2 & HEAP_INDEXED_UPDATED) != 0)
+	{
+		Size		bmbytes = HotIndexedBitmapBytes(t_infomask2 & HEAP_NATTS_MASK);
+
+		if ((t_infomask2 & HEAP_NATTS_MASK) == 0)
+			tupdata_len = 0;
+		else if (bmbytes > tupdata_len)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("unexpected end of tuple data")));
+		else
+			tupdata_len -= bmbytes;
+	}
 
 	for (i = 0; i < nattrs; i++)
 	{

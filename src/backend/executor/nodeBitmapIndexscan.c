@@ -50,6 +50,7 @@ ExecBitmapIndexScan(PlanState *pstate)
 Node *
 MultiExecBitmapIndexScan(BitmapIndexScanState *node)
 {
+	BitmapIndexScan *plan = (BitmapIndexScan *) node->ss.ps.plan;
 	TIDBitmap  *tbm;
 	IndexScanDesc scandesc;
 	double		nTuples = 0;
@@ -97,6 +98,17 @@ MultiExecBitmapIndexScan(BitmapIndexScanState *node)
 						 ((BitmapIndexScan *) node->ss.ps.plan)->isshared ?
 						 node->ss.ps.state->es_query_dsa : NULL);
 	}
+
+	/*
+	 * Every bitmap that a BitmapAnd or BitmapOr combines, at any depth, is
+	 * filled here (BitmapOr passes its own down through biss_result), so
+	 * recording the heap relation here lets every combine consult the table
+	 * AM; see tbm_set_relation.  The ancestor BitmapHeapScan has already
+	 * opened the relation.
+	 */
+	tbm_set_relation(tbm, ExecGetRangeTableRelation(node->ss.ps.state,
+													plan->scan.scanrelid,
+													false));
 
 	/*
 	 * Get TIDs from index and insert into bitmap

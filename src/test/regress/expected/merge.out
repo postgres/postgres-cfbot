@@ -467,6 +467,14 @@ SELECT * FROM target ORDER BY tid;
 (3 rows)
 
 BEGIN;
+-- Assign a parent XID before the MERGE writes in a child transaction.
+SELECT pg_current_xact_id() IS NOT NULL;
+ ?column? 
+----------
+ t
+(1 row)
+
+SAVEPOINT child;
 MERGE INTO target t
 USING source AS s
 ON t.tid = s.sid
@@ -474,6 +482,15 @@ WHEN MATCHED THEN
 	UPDATE SET balance = 0;
 ERROR:  MERGE command cannot affect row a second time
 HINT:  Ensure that not more than one source row matches any one target row.
+ROLLBACK TO child;
+SELECT * FROM target ORDER BY tid;
+ tid | balance 
+-----+---------
+   1 |      10
+   2 |      20
+   3 |      30
+(3 rows)
+
 ROLLBACK;
 BEGIN;
 MERGE INTO target t

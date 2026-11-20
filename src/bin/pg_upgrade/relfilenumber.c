@@ -500,6 +500,8 @@ transfer_single_new_db(FileNameMap *maps, int size,
 	/* --swap has its own subroutine */
 	if (user_opts.transfer_mode == TRANSFER_MODE_SWAP)
 	{
+		/* check_new_cluster() rejects swap mode if the VM needs a rewrite */
+		Assert(old_cluster.controldata.cat_ver >= VISIBILITYMAP_WIDTH_CHANGE_CAT_VER);
 		do_swap(maps, size, old_tablespace, new_tablespace);
 		return;
 	}
@@ -586,6 +588,23 @@ transfer_relfile(FileNameMap *map, const char *type_suffix)
 
 		/* Copying files might take some time, so give feedback. */
 		pg_log(PG_STATUS, "%s", old_file);
+
+		/*
+		 * A _vm fork from a cluster that predates the 2->4 bit visibility-map
+		 * widening must be rewritten into the new layout rather than
+		 * copied/linked verbatim; see rewriteVisibilityMap() and
+		 * VISIBILITYMAP_WIDTH_CHANGE_CAT_VER.  The rewrite handles every
+		 * segment of the fork, since the new fork is twice as long.
+		 */
+		if (strcmp(type_suffix, "_vm") == 0 &&
+			old_cluster.controldata.cat_ver < VISIBILITYMAP_WIDTH_CHANGE_CAT_VER)
+		{
+			Assert(segno == 0);
+			pg_log(PG_VERBOSE, "rewriting \"%s\" to \"%s\"",
+				   old_file, new_file);
+			rewriteVisibilityMap(old_file, new_file, map->nspname, map->relname);
+			return;
+		}
 
 		switch (user_opts.transfer_mode)
 		{

@@ -1,0 +1,47 @@
+Parsed test spec with 2 sessions
+
+starting permutation: repack changes wakeup check
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step repack: 
+	REPACK (CONCURRENTLY) repack_hi USING INDEX repack_hi_pkey;
+ <waiting ...>
+step changes: 
+	UPDATE repack_hi SET i = 100 WHERE i = 1;
+	INSERT INTO repack_hi VALUES (1, 1001, 'new');
+	UPDATE repack_hi SET j = 2001 WHERE i = 1;
+	DELETE FROM repack_hi WHERE i = 2;
+	UPDATE repack_hi SET i = 101 WHERE i = 100;
+
+step wakeup: 
+	SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step repack: <... completed>
+step check: 
+	SELECT i, j FROM repack_hi WHERE i IN (1, 2, 100, 101) ORDER BY i;
+	SELECT count(*) AS rows FROM repack_hi;
+
+  i|   j
+---+----
+  1|2001
+101|   1
+(2 rows)
+
+rows
+----
+  20
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+

@@ -302,8 +302,11 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
       <link linkend="sql-createsubscription-params-with-two-phase"><literal>two_phase</literal></link>,
       <link linkend="sql-createsubscription-params-with-retain-dead-tuples"><literal>retain_dead_tuples</literal></link>,
       <link linkend="sql-createsubscription-params-with-max-retention-duration"><literal>max_retention_duration</literal></link>,
-      <link linkend="sql-createsubscription-params-with-wal-receiver-timeout"><literal>wal_receiver_timeout</literal></link>, and
-      <link linkend="sql-createsubscription-params-with-conflict-log-destination"><literal>conflict_log_destination</literal></link>.
+      <link linkend="sql-createsubscription-params-with-wal-receiver-timeout"><literal>wal_receiver_timeout</literal></link>,
+      <link linkend="sql-createsubscription-params-with-conflict-log-destination"><literal>conflict_log_destination</literal></link>, and
+      <link linkend="sql-createsubscription-params-with-hot-indexed-on-apply"><literal>hot_indexed_on_apply</literal></link>.
+      For <literal>hot_indexed_on_apply</literal>, the new value takes effect
+      at the apply worker's next catalog reload.
       Only a superuser can set <literal>password_required = false</literal>.
      </para>
 

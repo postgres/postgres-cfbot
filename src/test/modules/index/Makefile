@@ -8,7 +8,10 @@ EXTENSION = test_indexscan
 DATA = test_indexscan--1.0.sql
 PGFILEDESC = "test_indexscan - test index scan internals"
 
-EXTRA_INSTALL = contrib/btree_gin contrib/btree_gist
+EXTRA_INSTALL = contrib/btree_gin contrib/btree_gist contrib/pageinspect src/test/modules/injection_points
+
+TAP_TESTS = 1
+export enable_injection_points
 
 REGRESS = hot_chain
 
