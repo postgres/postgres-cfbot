@@ -115,7 +115,45 @@ my $restored_count =
 is($restored_count, $rows_after_truncation,
 	'Restored backup has correct row count');
 
+my $relpath =
+  $primary->safe_psql('postgres', "SELECT pg_relation_filepath('t');");
+
 $primary->stop;
 $restored->stop;
+
+# Test that blocks truncated away in an intermediate incremental backup are
+# not resurrected from an earlier backup when a later backup extends the
+# relation with unwritten zero-filled pages (for example, via bulk relation
+# extension).  Append a zero-filled block directly to the heap file on disk
+# rather than relying on COPY or bulk-extension heuristics so that block 7 is
+# guaranteed to exist past incr's truncation point without any WAL record
+# referencing it.
+my $segfile = $primary->data_dir . "/$relpath";
+$segfile .= ".1" if -f "$segfile.1";
+open(my $fh, '>>:raw', $segfile) or die "open $segfile: $!";
+print $fh ("\0" x $block_size);
+close($fh) or die "close $segfile: $!";
+
+$primary->start;
+
+my $incr_backup = "$backup_path/incr";
+$primary->backup('incr2',
+	backup_options => [ '--incremental', "$incr_backup/backup_manifest" ]);
+
+$primary->stop;
+
+my $restored2 = PostgreSQL::Test::Cluster->new('node3');
+$restored2->init_from_backup(
+	$primary, 'incr2',
+	combine_with_prior => [ 'full', 'incr' ]);
+$restored2->start();
+
+$restored_count =
+  $restored2->safe_psql('postgres', "SELECT count(*) FROM t;");
+is($restored_count, $rows_after_truncation,
+	'Restored backup does not resurrect blocks truncated in an intermediate backup'
+);
+
+$restored2->stop;
 
 done_testing();
