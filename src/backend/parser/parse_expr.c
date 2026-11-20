@@ -4790,12 +4790,22 @@ transformJsonPassingArgs(ParseState *pstate, const char *constructName,
 	foreach(lc, args)
 	{
 		JsonArgument *arg = castNode(JsonArgument, lfirst(lc));
-		Node	   *expr = transformJsonValueExpr(pstate, constructName,
-												  arg->val, format,
-												  InvalidOid, true);
+		String	   *name = makeString(arg->name);
+		Node	   *expr;
+
+		if (list_member(*passing_names, name))
+			ereport(ERROR,
+					errcode(ERRCODE_DUPLICATE_ALIAS),
+					errmsg("PASSING argument name \"%s\" is not unique", arg->name),
+					parser_errposition(pstate,
+									   exprLocation((Node *) arg->val->raw_expr)));
+
+		expr = transformJsonValueExpr(pstate, constructName,
+									  arg->val, format,
+									  InvalidOid, true);
 
 		*passing_values = lappend(*passing_values, expr);
-		*passing_names = lappend(*passing_names, makeString(arg->name));
+		*passing_names = lappend(*passing_names, name);
 	}
 }
 
