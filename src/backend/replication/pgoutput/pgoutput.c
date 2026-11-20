@@ -185,6 +185,9 @@ typedef struct RelationSyncEntry
 	 * row filter expressions, column list, etc.
 	 */
 	MemoryContext entry_cxt;
+
+	/* Hash value of schema OID. Used for pg_namespace syscache callback */
+	uint32		schema_hashvalue;
 } RelationSyncEntry;
 
 /*
@@ -227,8 +230,8 @@ static void send_relation_and_attrs(Relation relation, TransactionId xid,
 									LogicalDecodingContext *ctx,
 									RelationSyncEntry *relentry);
 static void rel_sync_cache_relation_cb(Datum arg, Oid relid);
-static void rel_sync_cache_publication_cb(Datum arg, SysCacheIdentifier cacheid,
-										  uint32 hashvalue);
+static void rel_sync_cache_schema_cb(Datum arg, SysCacheIdentifier cacheid,
+									 uint32 hashvalue);
 static void set_schema_sent_in_streamed_txn(RelationSyncEntry *entry,
 											TransactionId xid);
 static bool get_schema_sent_in_streamed_txn(RelationSyncEntry *entry,
@@ -2003,18 +2006,11 @@ init_rel_sync_cache(MemoryContext cachectx)
 	CacheRegisterRelcacheCallback(rel_sync_cache_relation_cb, (Datum) 0);
 
 	/*
-	 * Flush all cache entries after a pg_namespace change, in case it was a
+	 * Flush related entries after a pg_namespace change, in case it was a
 	 * schema rename affecting a relation being replicated.
-	 *
-	 * XXX: It is not a good idea to invalidate all the relation entries in
-	 * RelationSyncCache on schema rename. We can optimize it to invalidate
-	 * only the required relations by either having a specific invalidation
-	 * message containing impacted relations or by having schema information
-	 * in each RelationSyncCache entry and using hashvalue of pg_namespace.oid
-	 * passed to the callback.
 	 */
 	CacheRegisterSyscacheCallback(NAMESPACEOID,
-								  rel_sync_cache_publication_cb,
+								  rel_sync_cache_schema_cb,
 								  (Datum) 0);
 
 	relation_callbacks_registered = true;
@@ -2086,6 +2082,7 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 		entry->publish_as_relid = InvalidOid;
 		entry->columns = NULL;
 		entry->attrmap = NULL;
+		entry->schema_hashvalue = 0;
 	}
 
 	/* Validate the entry */
@@ -2374,6 +2371,10 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 		list_free(rel_publications);
 		list_free(ancestors);
 
+		entry->schema_hashvalue =
+			GetSysCacheHashValue1(NAMESPACEOID,
+								  ObjectIdGetDatum(RelationGetNamespace(relation)));
+
 		entry->replicate_valid = true;
 	}
 
@@ -2472,13 +2473,13 @@ rel_sync_cache_relation_cb(Datum arg, Oid relid)
 }
 
 /*
- * Publication relation/schema map syscache invalidation callback
+ * Schema syscache invalidation callback
  *
  * Called for invalidations on pg_namespace.
  */
 static void
-rel_sync_cache_publication_cb(Datum arg, SysCacheIdentifier cacheid,
-							  uint32 hashvalue)
+rel_sync_cache_schema_cb(Datum arg, SysCacheIdentifier cacheid,
+						 uint32 hashvalue)
 {
 	HASH_SEQ_STATUS status;
 	RelationSyncEntry *entry;
@@ -2492,13 +2493,15 @@ rel_sync_cache_publication_cb(Datum arg, SysCacheIdentifier cacheid,
 		return;
 
 	/*
-	 * We have no easy way to identify which cache entries this invalidation
-	 * event might have affected, so just mark them all invalid.
+	 * Identify entries which belongs to the specified schema, and invalidate
+	 * it.
 	 */
 	hash_seq_init(&status, RelationSyncCache);
 	while ((entry = (RelationSyncEntry *) hash_seq_search(&status)) != NULL)
 	{
-		entry->replicate_valid = false;
+		/* hashvalue == 0 means a cache reset, must clear all state */
+		if (hashvalue == 0 || entry->schema_hashvalue == hashvalue)
+			entry->replicate_valid = false;
 	}
 }
 
