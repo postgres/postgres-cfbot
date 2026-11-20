@@ -848,7 +848,7 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 				 * only updated by the calling process.
 				 */
 				appendStringInfo(&buf, _("delay time: %.3f ms\n"),
-								 (double) MyBEEntry->st_progress_param[PROGRESS_ANALYZE_DELAY_TIME] / 1000000.0);
+								 (double) MyBEEntry->st_progress.param[PROGRESS_ANALYZE_DELAY_TIME] / 1000000.0);
 			}
 			if (track_io_timing)
 			{

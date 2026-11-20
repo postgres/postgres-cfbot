@@ -36,6 +36,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
+#include "utils/backend_status.h"
 #include "utils/acl.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -118,6 +119,16 @@ typedef struct FileFdwExecutionState
 								 * is_program */
 	CopyFromState cstate;		/* COPY execution state */
 } FileFdwExecutionState;
+
+/*
+ * Since progress tracking of multiple COPY commands is not supported, the
+ * first file_fdw node of the plan needs to set pgstat_track_progress to false
+ * during startup, and the last active node needs to restore the original
+ * value during shutdown.
+ */
+static bool save_pgstat_track_progress = false;
+static int	fdw_nodes = 0;
+static int	active_fdw_nodes = 0;
 
 /*
  * SQL functions
@@ -617,6 +628,12 @@ fileGetForeignPlan(PlannerInfo *root,
 	Index		scan_relid = baserel->relid;
 
 	/*
+	 * This seems to be the appropriate place to count file_fdw nodes in the
+	 * plan.
+	 */
+	fdw_nodes++;
+
+	/*
 	 * We have no native ability to evaluate restriction clauses, so we just
 	 * put all the scan_clauses into the plan node's qual list for the
 	 * executor to check.  So all we have to do here is strip RestrictInfo
@@ -694,6 +711,18 @@ fileBeginForeignScan(ForeignScanState *node, int eflags)
 
 	/* Add any options from the plan (currently only convert_selectively) */
 	options = list_concat(options, plan->fdw_private);
+
+	/*
+	 * Save the value of pgstat_track_progress if this is the first file_fdw
+	 * node of a plan containing multiple file_fdw nodes, and disable the
+	 * progress tracking. The monitoring infrastructure currently does not
+	 * support monitoring of multiple COPY commands.
+	 */
+	if (fdw_nodes > 1 && active_fdw_nodes++ == 0)
+	{
+		save_pgstat_track_progress = pgstat_track_progress;
+		pgstat_track_progress = false;
+	}
 
 	/*
 	 * Create CopyState from FDW options.  We always acquire all columns, so
@@ -861,6 +890,21 @@ fileEndForeignScan(ForeignScanState *node)
 							  festate->cstate->num_errors));
 
 	EndCopyFrom(festate->cstate);
+
+
+	/*
+	 * Restore the value of pgstat_track_progress if this is the last file_fdw
+	 * node of a plan containing multiple file_fdw nodes, and enable progress
+	 * tracking if we disabled it earlier.
+	 */
+	if (active_fdw_nodes > 0)
+	{
+		if (--active_fdw_nodes == 0)
+		{
+			pgstat_track_progress = save_pgstat_track_progress;
+			fdw_nodes = 0;
+		}
+	}
 }
 
 /*

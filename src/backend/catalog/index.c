@@ -715,8 +715,6 @@ UpdateIndexRelation(Oid indexoid,
  *			already exists.
  *		INDEX_CREATE_PARTITIONED:
  *			create a partitioned index (table must be partitioned)
- *		INDEX_CREATE_SUPPRESS_PROGRESS:
- *			don't report progress during the index build.
  *		INDEX_CREATE_DEFERRABLE:
  *			index supports a deferrable constraint, mark it as
  *			non-immediate (indimmediate = false).
@@ -769,7 +767,6 @@ index_create(Relation heapRelation,
 	bool		invalid = (flags & INDEX_CREATE_INVALID) != 0;
 	bool		concurrent = (flags & INDEX_CREATE_CONCURRENT) != 0;
 	bool		partitioned = (flags & INDEX_CREATE_PARTITIONED) != 0;
-	bool		progress = (flags & INDEX_CREATE_SUPPRESS_PROGRESS) == 0;
 	char		relkind;
 	TransactionId relfrozenxid;
 	MultiXactId relminmxid;
@@ -1287,8 +1284,7 @@ index_create(Relation heapRelation,
 	}
 	else
 	{
-		index_build(heapRelation, indexRelation, indexInfo, false, true,
-					progress);
+		index_build(heapRelation, indexRelation, indexInfo, false, true);
 	}
 
 	/*
@@ -1555,7 +1551,7 @@ index_concurrently_build(Oid heapRelationId,
 	indexInfo->ii_BrokenHotChain = false;
 
 	/* Now build the index */
-	index_build(heapRel, indexRelation, indexInfo, false, true, true);
+	index_build(heapRel, indexRelation, indexInfo, false, true);
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
@@ -2236,6 +2232,8 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 	 */
 	if (concurrent)
 	{
+		bool		progress;
+
 		/*
 		 * We must commit our transaction in order to make the first pg_index
 		 * state update visible to other sessions.  If the DROP machinery has
@@ -2306,11 +2304,12 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 		 * to acquire an exclusive lock on our table.  The lock code will
 		 * detect deadlock and error out properly.
 		 *
-		 * Note: we report progress through WaitForLockers() unconditionally
-		 * here, even though it will only be used when we're called by REINDEX
-		 * CONCURRENTLY and not when called by DROP INDEX CONCURRENTLY.
+		 * Note: we report progress through WaitForLockers() only when the
+		 * command is REINDEX CONCURRENTLY. There's no progress reporting for
+		 * DROP INDEX CONCURRENTLY.
 		 */
-		WaitForLockers(heaplocktag, AccessExclusiveLock, true);
+		progress = MyBEEntry->st_progress.command == PROGRESS_COMMAND_CREATE_INDEX;
+		WaitForLockers(heaplocktag, AccessExclusiveLock, progress);
 
 		/*
 		 * Updating pg_index might involve TOAST table access, so ensure we
@@ -2334,7 +2333,7 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 		 * Wait till every transaction that saw the old index state has
 		 * finished.  See above about progress reporting.
 		 */
-		WaitForLockers(heaplocktag, AccessExclusiveLock, true);
+		WaitForLockers(heaplocktag, AccessExclusiveLock, progress);
 
 		/*
 		 * Re-open relations to allow us to complete our actions.
@@ -3113,7 +3112,6 @@ index_update_stats(Relation rel,
  *
  * isreindex indicates we are recreating a previously-existing index.
  * parallel indicates if parallelism may be useful.
- * progress indicates if the backend should update its progress info.
  *
  * Note: before Postgres 8.2, the passed-in heap and index Relations
  * were automatically closed by this routine.  This is no longer the case.
@@ -3124,8 +3122,7 @@ index_build(Relation heapRelation,
 			Relation indexRelation,
 			IndexInfo *indexInfo,
 			bool isreindex,
-			bool parallel,
-			bool progress)
+			bool parallel)
 {
 	IndexBuildResult *stats;
 	Oid			save_userid;
@@ -3176,7 +3173,6 @@ index_build(Relation heapRelation,
 	RestrictSearchPath();
 
 	/* Set up initial progress report status */
-	if (progress)
 	{
 		const int	progress_index[] = {
 			PROGRESS_CREATEIDX_PHASE,
@@ -3742,7 +3738,6 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 	IndexInfo  *indexInfo;
 	bool		skipped_constraint = false;
 	PGRUsage	ru0;
-	bool		progress = ((params->options & REINDEXOPT_REPORT_PROGRESS) != 0);
 	bool		set_tablespace = false;
 
 	pg_rusage_init(&ru0);
@@ -3777,7 +3772,6 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 	save_nestlevel = NewGUCNestLevel();
 	RestrictSearchPath();
 
-	if (progress)
 	{
 		const int	progress_cols[] = {
 			PROGRESS_CREATEIDX_COMMAND,
@@ -3816,9 +3810,8 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 		return;
 	}
 
-	if (progress)
-		pgstat_progress_update_param(PROGRESS_CREATEIDX_ACCESS_METHOD_OID,
-									 iRel->rd_rel->relam);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_ACCESS_METHOD_OID,
+								 iRel->rd_rel->relam);
 
 	/*
 	 * If a statement is available, telling that this comes from a REINDEX
@@ -3935,7 +3928,7 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 
 	/* Initialize the index and rebuild */
 	/* Note: we do not need to re-establish pkey setting */
-	index_build(heapRelation, iRel, indexInfo, true, true, progress);
+	index_build(heapRelation, iRel, indexInfo, true, true);
 
 	/* Re-allow use of target index */
 	ResetReindexProcessing();
@@ -4029,8 +4022,7 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 	index_close(iRel, NoLock);
 	table_close(heapRelation, NoLock);
 
-	if (progress)
-		pgstat_progress_end_command();
+	pgstat_progress_end_command();
 }
 
 /*
@@ -4202,9 +4194,15 @@ reindex_relation(const ReindexStmt *stmt, Oid relid, int flags,
 		/* Index should no longer be in the pending list */
 		Assert(!ReindexIsProcessingIndex(indexOid));
 
-		/* Set index rebuild count */
-		pgstat_progress_update_param(PROGRESS_REPACK_INDEX_REBUILD_COUNT,
-									 i);
+		/*
+		 * Set index rebuild count - only interesting for REPACK.
+		 *
+		 * XXX Shouldn't we add an argument indicating that the function is
+		 * being called from REPACK (or its subroutine)?
+		 */
+		if (MyBEEntry->st_progress.command == PROGRESS_COMMAND_REPACK)
+			pgstat_progress_update_param(PROGRESS_REPACK_INDEX_REBUILD_COUNT,
+										 i);
 		i++;
 	}
 
