@@ -59,3 +59,9 @@ SELECT 'à'::citext ~<=~ 'À'::citext AS t;
 -- Test ~>~ and ~>=~
 SELECT 'à'::citext ~>~  'À'::citext AS f;
 SELECT 'à'::citext ~>=~ 'À'::citext AS t;
+
+-- split_part() positions with a multibyte delimiter, and a titlecase letter
+-- (U+01C5) used as the delimiter: the regex engine may not match it
+-- case-insensitively against itself, but the split is still found
+SELECT split_part('aΔbδc'::citext, 'δ'::citext, -2) = 'b' AS t;
+SELECT split_part('aǅb'::citext, 'ǅ'::citext, 2) = 'b' AS t;
