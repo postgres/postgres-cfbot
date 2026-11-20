@@ -1058,6 +1058,23 @@ max_parallel_hazard_walker(Node *node, max_parallel_hazard_context *context)
  *****************************************************************************/
 
 /*
+ * contain_var_or_param_walker
+ *	  Does the expression contain a Var, PlaceHolderVar, or Param, that is,
+ *	  any input that could be NULL at run time?
+ */
+static bool
+contain_var_or_param_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var) ||
+		IsA(node, PlaceHolderVar) ||
+		IsA(node, Param))
+		return true;
+	return expression_tree_walker(node, contain_var_or_param_walker, context);
+}
+
+/*
  * contain_nonstrict_functions
  *	  Recursively search for nonstrict functions within a clause.
  *
@@ -1201,6 +1218,41 @@ contain_nonstrict_functions_walker(Node *node, void *context)
 		return true;
 	else if (IsA(node, JsonConstructorExpr))
 		return true;
+	else if (IsA(node, JsonExpr))
+	{
+		JsonExpr   *jsexpr = (JsonExpr *) node;
+
+		/*
+		 * A NULL context item or path specification yields a NULL result
+		 * without consulting the ON EMPTY / ON ERROR behaviors, so JsonExpr
+		 * is strict in those inputs.  The exception is a domain RETURNING
+		 * type: the NULL is still checked against the domain's constraints,
+		 * and if they reject it, the result is an error or the ON ERROR
+		 * value.  Since the constraints may change after planning, treat any
+		 * domain as non-strict.
+		 */
+		if (get_typtype(jsexpr->returning->typid) == TYPTYPE_DOMAIN)
+			return true;
+
+		/*
+		 * A NULL PASSING value does not force a NULL result; it merely
+		 * becomes a jsonpath variable holding a JSON null.
+		 */
+		if (contain_var_or_param_walker((Node *) jsexpr->passing_values,
+										NULL))
+			return true;
+	}
+	else if (IsA(node, JsonBehavior))
+	{
+		/*
+		 * An ON EMPTY / ON ERROR expression is evaluated only when that
+		 * behavior applies, so a NULL input to it does not force a NULL
+		 * result.  An expression with no such input cannot make the JsonExpr
+		 * non-strict, so there is nothing more to check.
+		 */
+		return contain_var_or_param_walker(((JsonBehavior *) node)->expr,
+										   NULL);
+	}
 	else
 	{
 		/* Check other function-containing nodes */
