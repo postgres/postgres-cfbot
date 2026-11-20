@@ -440,6 +440,8 @@ extern void _hash_init_metabuffer(Buffer buf, double num_tuples,
 								  RegProcedure procid, uint16 ffactor, bool initpage);
 extern void _hash_pageinit(Page page, Size size);
 extern void _hash_expandtable(Relation rel, Buffer metabuf);
+extern bool _hash_alloc_buckets(Relation rel, BlockNumber firstblock,
+								uint32 nblocks);
 extern void _hash_finish_split(Relation rel, Buffer metabuf, Buffer obuf,
 							   Bucket obucket, uint32 maxbucket, uint32 highmask,
 							   uint32 lowmask);
