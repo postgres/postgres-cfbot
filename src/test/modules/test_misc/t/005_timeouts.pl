@@ -139,4 +139,107 @@ $node->wait_for_log('terminating connection due to idle-session timeout',
 
 ok($psql_session->quit);
 
+#
+# 4. Test transaction timeout while blocked writing to the client.
+#
+$node->safe_psql('postgres',
+	"SELECT injection_points_detach('transaction-timeout');");
+
+$psql_session = $node->background_psql('postgres');
+my $pid = $psql_session->query_safe('SELECT pg_backend_pid()');
+$log_offset = -s $node->logfile;
+
+# Stop draining psql's stdout at the marker. COPY streams its output, so psql
+# will stop reading from the server once its stdout pipe fills up.
+$psql_session->query_until(
+	qr/copy_starting/, q(
+   \echo copy_starting
+   BEGIN;
+   SET LOCAL transaction_timeout = '5s';
+   COPY (SELECT repeat('x', 8192) FROM generate_series(1, 100000)) TO STDOUT;
+));
+$node->wait_for_event('client backend', 'ClientWrite');
+
+$node->wait_for_log(
+	qr/\[$pid\].*FATAL:\s+terminating connection due to transaction timeout/,
+	$log_offset);
+ok( $node->poll_query_until(
+		'postgres', qq[
+		SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE pid = $pid);
+	]),
+	'transaction timeout terminates the backend during ClientWrite');
+$psql_session->{run}->finish;
+
+#
+# 5. Test transaction timeout while blocked reading COPY data from the client.
+#
+$psql_session = $node->background_psql('postgres');
+$pid = $psql_session->query_safe('SELECT pg_backend_pid()');
+$log_offset = -s $node->logfile;
+
+# Leave COPY waiting for input until the backend exits.
+$psql_session->query_until(
+	qr/copy_starting/, q(
+   \echo copy_starting
+   CREATE TEMP TABLE copy_in (v int);
+   BEGIN;
+   SET LOCAL transaction_timeout = '5s';
+   COPY copy_in FROM STDIN;
+));
+$node->poll_query_until(
+	'postgres', qq[
+	SELECT EXISTS (SELECT FROM pg_stat_activity
+				   WHERE pid = $pid AND state = 'active'
+					 AND wait_event = 'ClientRead');
+]) or die "backend did not block reading COPY data from the client";
+
+$node->wait_for_log(
+	qr/\[$pid\].*FATAL:\s+terminating connection due to transaction timeout/,
+	$log_offset);
+ok( $node->poll_query_until(
+		'postgres', qq[
+		SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE pid = $pid);
+	]),
+	'transaction timeout terminates the backend during ClientRead');
+$psql_session->{run}->finish;
+
+#
+# 6. Test that sending a FATAL error cannot block backend exit.
+#
+$psql_session = $node->background_psql('postgres');
+$pid = $psql_session->query_safe('SELECT pg_backend_pid()');
+$log_offset = -s $node->logfile;
+
+# Send a query in pipeline mode and leave its results unread. The dynamic
+# query text makes the FATAL error context larger than the socket buffers.
+# Turn off ON_ERROR_STOP for \flush, since psql treats PQflush's successful
+# return of zero as a failure.
+$psql_session->query_until(
+	qr/sleep_sent/, q[
+   BEGIN;
+   SET LOCAL log_error_verbosity = 'terse';
+   SET LOCAL max_parallel_workers_per_gather = 0;
+   SET LOCAL transaction_timeout = '5s';
+   \startpipeline
+   DO $$
+   BEGIN
+     EXECUTE 'SELECT pg_sleep(60) /*' || repeat('x', 8 * 1024 * 1024) || '*/';
+   END;
+   $$;
+   \set ON_ERROR_STOP off
+   \flush
+   \echo sleep_sent
+]);
+$node->wait_for_event('client backend', 'PgSleep');
+
+$node->wait_for_log(
+	qr/\[$pid\].*FATAL:\s+terminating connection due to transaction timeout/,
+	$log_offset);
+ok( $node->poll_query_until(
+		'postgres', qq[
+		SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE pid = $pid);
+	]),
+	'backend exits even when the client does not read the FATAL error');
+$psql_session->{run}->kill_kill;
+
 done_testing();
