@@ -61,6 +61,7 @@ use Config;
 use IPC::Run;
 use PostgreSQL::Test::Utils qw(pump_until);
 use Test::More;
+use Time::HiRes qw(usleep);
 
 =pod
 
@@ -91,6 +92,7 @@ sub new
 		'stderr' => '',
 		'query_timer_restart' => undef,
 		'query_cnt' => 1,
+		'backend_pid' => undef,
 	};
 	my $run;
 
@@ -141,6 +143,7 @@ sub new
 
 Returns once psql has started up and is ready to consume input. This is called
 automatically for clients unless requested otherwise in the constructor.
+The backend PID is saved for use by C<quit>.
 
 =cut
 
@@ -173,24 +176,48 @@ sub wait_connect
 	$self->{stderr} = '';
 
 	die "psql startup timed out" if $self->{timeout}->is_expired;
+
+	# Remember the backend PID so quit() can wait for it to exit.
+	my $output = $self->query_safe("SELECT pg_backend_pid()");
+	$output =~ /^([1-9][0-9]*)\r?$/m
+	  or croak "could not determine backend PID: $output";
+	$self->{backend_pid} = $1;
 }
 
 =pod
 
-=item $session->quit
+=item $session->quit()
 
 Close the session and clean up resources. Each test run must be closed with
-C<quit>.
+C<quit>. By default, also wait for the backend process to exit. Set C<$wait>
+to 0 to skip it.
 
 =cut
 
 sub quit
 {
-	my ($self) = @_;
+	my ($self, $wait) = @_;
 
 	$self->{stdin} .= "\\q\n";
 
-	return $self->{run}->finish;
+	my $ret = $self->{run}->finish;
+	$wait = 1 unless defined($wait);
+
+	if ($wait)
+	{
+		my $pid = $self->{backend_pid};
+		my $max_attempts = 10 * $PostgreSQL::Test::Utils::timeout_default;
+		my $attempts = 0;
+
+		while (kill(0, $pid))
+		{
+			croak "timed out waiting for backend $pid to exit"
+			  if $attempts++ >= $max_attempts;
+			usleep(100_000);
+		}
+	}
+
+	return $ret;
 }
 
 =pod
@@ -204,6 +231,8 @@ Terminate the current session and connect again.
 sub reconnect_and_clear
 {
 	my ($self) = @_;
+
+	$self->{backend_pid} = undef;
 
 	# If psql isn't dead already, tell it to quit as \q, when already dead,
 	# causes IPC::Run to unhelpfully error out with "ack Broken pipe:".

@@ -249,7 +249,7 @@ $psql2->query_safe(
 # owner will try to acquire deletion lock all its temp objects via
 # findDependentObjects.
 my $log_offset = -s $node->logfile;
-$psql1->quit;
+$psql1->quit(0);
 
 # Check whether session-exit cleanup is blocked.
 $node->wait_for_log(qr/waiting for AccessExclusiveLock on relation $foo2_oid/,
