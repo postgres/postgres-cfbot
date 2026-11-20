@@ -142,7 +142,7 @@ $node->safe_psql(
 $node->wait_for_event('autovacuum worker',
 	'autovacuum-start-parallel-vacuum');
 
-# Update the shared cost-based delay parameters.
+# Update the shared cost-based delay parameters and the failsafe ages.
 $node->safe_psql(
 	'postgres', qq{
 	ALTER SYSTEM SET autovacuum_vacuum_cost_limit = 500;
@@ -151,6 +151,8 @@ $node->safe_psql(
 	ALTER SYSTEM SET vacuum_cost_page_dirty = 10;
 	ALTER SYSTEM SET vacuum_cost_page_hit = 10;
 	ALTER SYSTEM SET track_cost_delay_timing = on;
+	ALTER SYSTEM SET vacuum_failsafe_age = 1500000000;
+	ALTER SYSTEM SET vacuum_multixact_failsafe_age = 1500000000;
 	SELECT pg_reload_conf();
 });
 
@@ -165,7 +167,7 @@ $node->safe_psql(
 # Check whether parallel worker successfully updated all parameters during
 # index processing.
 $node->wait_for_log(
-	qr/parallel autovacuum worker updated cost params: cost_limit=500, cost_delay=5, cost_page_miss=10, cost_page_dirty=10, cost_page_hit=10, track_cost_delay_timing=yes/,
+	qr/parallel autovacuum worker updated cost params: cost_limit=500, cost_delay=5, cost_page_miss=10, cost_page_dirty=10, cost_page_hit=10, track_cost_delay_timing=yes, failsafe_age=1500000000, multixact_failsafe_age=1500000000/,
 	$log_offset);
 
 # Cleanup
