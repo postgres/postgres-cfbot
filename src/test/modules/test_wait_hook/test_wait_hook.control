@@ -1,0 +1,4 @@
+comment = 'Test code for the wait event hook contract'
+default_version = '1.0'
+module_pathname = '$libdir/test_wait_hook'
+relocatable = true

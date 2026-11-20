@@ -1,0 +1,4 @@
+comment = 'Producer for the pg_wait_event_tracing instance-totals tests'
+default_version = '1.0'
+module_pathname = '$libdir/test_wait_totals'
+relocatable = true

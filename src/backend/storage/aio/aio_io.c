@@ -124,18 +124,18 @@ pgaio_io_perform_synchronously(PgAioHandle *ioh)
 	switch ((PgAioOp) ioh->op)
 	{
 		case PGAIO_OP_READV:
-			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_READ);
+			pgstat_report_wait_start_timed(WAIT_EVENT_DATA_FILE_READ);
 			result = pg_preadv(ioh->op_data.read.fd, iov,
 							   ioh->op_data.read.iov_length,
 							   ioh->op_data.read.offset);
-			pgstat_report_wait_end();
+			pgstat_report_wait_end_timed();
 			break;
 		case PGAIO_OP_WRITEV:
-			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_WRITE);
+			pgstat_report_wait_start_timed(WAIT_EVENT_DATA_FILE_WRITE);
 			result = pg_pwritev(ioh->op_data.write.fd, iov,
 								ioh->op_data.write.iov_length,
 								ioh->op_data.write.offset);
-			pgstat_report_wait_end();
+			pgstat_report_wait_end_timed();
 			break;
 		case PGAIO_OP_INVALID:
 			elog(ERROR, "trying to execute invalid IO operation");
