@@ -59,6 +59,7 @@
 <!ENTITY ecpg       SYSTEM "ecpg.sgml">
 <!ENTITY extend     SYSTEM "extend.sgml">
 <!ENTITY external-projects SYSTEM "external-projects.sgml">
+<!ENTITY binaryformat SYSTEM "binary-format.sgml">
 <!ENTITY func-ref   SYSTEM "func-ref.sgml">
 <!ENTITY infoschema SYSTEM "information_schema.sgml">
 <!ENTITY libpq      SYSTEM "libpq.sgml">
