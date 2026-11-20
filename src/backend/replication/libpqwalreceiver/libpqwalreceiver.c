@@ -664,6 +664,16 @@ libpqrcv_startstreaming(WalReceiverConn *conn,
 			appendQuotedLiteral(&cmd, options->proto.logical.origin);
 		}
 
+		/*
+		 * Publishers before v20 report a message emitted in a subtransaction
+		 * with the top-level transaction's XID, so a streamed message would
+		 * survive the rollback of its subtransaction.  Don't request messages
+		 * from them.
+		 */
+		if (options->proto.logical.messages &&
+			PQserverVersion(conn->streamConn) >= 200000)
+			appendStringInfo(&cmd, ", messages 'on'");
+
 		pubnames = options->proto.logical.publication_names;
 		pubnames_str = stringlist_to_identifierstr(pubnames);
 		appendStringInfoString(&cmd, ", publication_names ");
