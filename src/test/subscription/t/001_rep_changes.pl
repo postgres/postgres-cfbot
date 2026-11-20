@@ -187,12 +187,13 @@ $result =
   $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM tab_no_col");
 is($result, qq(2), 'check replicated changes for table having no columns');
 
-# Wait for the logical WAL sender to update its IO statistics.  This is
-# done before the next restart, which would force a flush of its stats, and
-# far enough from the reset done above to not impact the run time.
+# Wait for the logical WAL sender to update its IO statistics (WAL reads from
+# buffers and file). This is done before the next restart, which would force a
+# flush of its stats, and far enough from the reset done above to not impact
+# the run time.
 $node_publisher->poll_query_until(
 	'postgres',
-	qq[SELECT sum(reads) > 0
+	qq[SELECT sum(reads) + sum(hits) > 0
        FROM pg_catalog.pg_stat_io
        WHERE backend_type = 'walsender'
        AND object = 'wal']
