@@ -195,6 +195,16 @@ typedef void (*ForeignAsyncConfigureWait_function) (AsyncRequest *areq);
 
 typedef void (*ForeignAsyncNotify_function) (AsyncRequest *areq);
 
+typedef Size (*EstimateDSMInstrumentationForeignScan_function) (ForeignScanState *node,
+																ParallelContext *pcxt);
+typedef void (*InitializeDSMInstrumentationForeignScan_function) (ForeignScanState *node,
+																  ParallelContext *pcxt,
+																  void *coordinate);
+typedef void (*InitializeWorkerInstrumentationForeignScan_function) (ForeignScanState *node,
+																	 ParallelWorkerContext *pwcxt,
+																	 void *coordinate);
+typedef void (*RetrieveInstrumentationForeignScan_function) (ForeignScanState *node);
+
 /*
  * FdwRoutine is the struct returned by a foreign-data wrapper's handler
  * function.  It provides pointers to the callback functions needed by the
@@ -274,6 +284,11 @@ typedef struct FdwRoutine
 	ReInitializeDSMForeignScan_function ReInitializeDSMForeignScan;
 	InitializeWorkerForeignScan_function InitializeWorkerForeignScan;
 	ShutdownForeignScan_function ShutdownForeignScan;
+
+	EstimateDSMInstrumentationForeignScan_function EstimateDSMInstrumentationForeignScan;
+	InitializeDSMInstrumentationForeignScan_function InitializeDSMInstrumentationForeignScan;
+	InitializeWorkerInstrumentationForeignScan_function InitializeWorkerInstrumentationForeignScan;
+	RetrieveInstrumentationForeignScan_function RetrieveInstrumentationForeignScan;
 
 	/* Support functions for path reparameterization. */
 	ReparameterizeForeignPathByChild_function ReparameterizeForeignPathByChild;
