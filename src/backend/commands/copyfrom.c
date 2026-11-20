@@ -1884,6 +1884,8 @@ BeginCopyFrom(ParseState *pstate,
 		if (cstate->is_program)
 		{
 			progress_vals[1] = PROGRESS_COPY_TYPE_PROGRAM;
+			/* Report these before starting the program, which may block */
+			pgstat_progress_update_multi_param(2, progress_cols, progress_vals);
 			cstate->copy_file = OpenPipeStream(cstate->filename, PG_BINARY_R);
 			if (cstate->copy_file == NULL)
 				ereport(ERROR,
@@ -1896,6 +1898,8 @@ BeginCopyFrom(ParseState *pstate,
 			struct stat st;
 
 			progress_vals[1] = PROGRESS_COPY_TYPE_FILE;
+			/* Report these before opening, which blocks for a FIFO */
+			pgstat_progress_update_multi_param(2, progress_cols, progress_vals);
 			cstate->copy_file = AllocateFile(cstate->filename, PG_BINARY_R);
 			if (cstate->copy_file == NULL)
 			{
