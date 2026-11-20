@@ -443,7 +443,7 @@ select pg_create_logical_replication_slot('slot_1', 'test_decoding');
 		qq[select injection_points_wakeup('logical-decoding-activation')]);
 
 	# Let the released backend finish creating its slot.
-	$psql_create_slot->quit(1);
+	$psql_create_slot->quit;
 
 	# Decode from slot_2, whose start point precedes where a redundant
 	# status-change record would have been written; this fails in xlog_decode()
@@ -497,7 +497,7 @@ select pg_cancel_backend(pid) from pg_stat_activity where query ~ 'slot_canceled
 	wait_for_logical_decoding_disabled($primary);
 	pass("the activation process aborted");
 
-	$psql_create_slot->quit(1);
+	$psql_create_slot->quit;
 
 	# Test concurrent activation processes run and one is interrupted.
 	$psql_create_slot =
@@ -540,7 +540,7 @@ select pg_cancel_backend(pid) from pg_stat_activity where query ~ 'slot_canceled
 		"effective_wal_level remains 'logical' even after the concurrent activation is interrupted"
 	);
 
-	$psql_create_slot->quit(1);
+	$psql_create_slot->quit;
 
 	# Test races between the deactivation of logical decoding and slot
 	# creation during recovery. Logical decoding can be deactivated while a
@@ -622,7 +622,7 @@ select pg_sync_replication_slots();
 		qq[select injection_points_wakeup('replication-slot-create-begin')]);
 	$standby5->wait_for_log(
 		qr/could not synchronize replication slot "sync_slot"/, $log_offset);
-	$psql_sync_slot->quit(1);
+	$psql_sync_slot->quit;
 	is( $standby5->safe_psql(
 			'postgres', qq[select count(*) from pg_replication_slots]),
 		'0',
@@ -696,7 +696,7 @@ select pg_create_logical_replication_slot('test_slot4', 'test_decoding');
 select pg_drop_replication_slot('sync_slot');
 ]);
 	$primary->wait_for_replay_catchup($standby5);
-	$psql_sync_slot->quit(1);
+	$psql_sync_slot->quit;
 
 	# The slot created on retry may or may not have been persisted by the
 	# time the remote slot was dropped. One more synchronization cycle
@@ -761,7 +761,7 @@ select pg_create_logical_replication_slot('standby5_slot', 'test_decoding');
 	$standby5->wait_for_log(
 		qr/ERROR: .* logical decoding on standby requires "effective_wal_level" >= "logical" on the primary/,
 		$log_offset);
-	$psql_create_slot->quit(1);
+	$psql_create_slot->quit;
 	is( $standby5->safe_psql(
 			'postgres', qq[select count(*) from pg_replication_slots]),
 		'0',

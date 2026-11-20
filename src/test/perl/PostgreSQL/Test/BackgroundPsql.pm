@@ -189,7 +189,8 @@ sub wait_connect
 =item $session->quit()
 
 Close the session and clean up resources. Each test run must be closed with
-C<quit>. Also wait for the saved backend PID to exit if C<$wait> is true.
+C<quit>. By default, also wait for the backend process to exit. Set C<$wait>
+to 0 to skip it.
 
 =cut
 
@@ -200,8 +201,9 @@ sub quit
 	$self->{stdin} .= "\\q\n";
 
 	my $ret = $self->{run}->finish;
+	$wait = 1 unless defined($wait);
 
-	if ($wait && defined($self->{backend_pid}))
+	if ($wait)
 	{
 		my $pid = $self->{backend_pid};
 		my $max_attempts = 10 * $PostgreSQL::Test::Utils::timeout_default;
