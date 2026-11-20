@@ -1476,6 +1476,13 @@ transformFuncCall(ParseState *pstate, FuncCall *fn)
 		{
 			SortBy	   *arg = (SortBy *) lfirst(args);
 
+			/* ORDER BY ALL marker (NULL node) is not valid here */
+			if (arg->node == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("ORDER BY ALL is only allowed in a query's ORDER BY clause"),
+						 parser_errposition(pstate, arg->location)));
+
 			targs = lappend(targs, transformExpr(pstate, arg->node,
 												 EXPR_KIND_ORDER_BY));
 		}

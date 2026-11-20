@@ -718,3 +718,32 @@ select null::int[] union all select null::int[] union all select null::bigint[];
 explain (costs off)
 select * from tenk1 t
 join (select ten from tenk1 union select ten from onek) s on s.ten = t.unique1;
+
+--
+-- ORDER BY ALL on set operations
+--
+
+create temp table union_order_all (a int, b text);
+insert into union_order_all values (3, 'foo'), (1, 'bar'), (2, null), (1, 'qux');
+
+select a, b from union_order_all union select a, b from union_order_all
+  order by all;
+select a, b from union_order_all union all select a, b from union_order_all
+  order by all desc nulls last;
+select a, b from union_order_all intersect select a, b from union_order_all
+  order by all desc;
+select a, b from union_order_all except select 1, 'bar'
+  order by all nulls first;
+select * from (select a, b from union_order_all
+               union all select a, b from union_order_all) s
+  order by all;
+
+-- a view over a set operation must deparse with ORDER BY ALL
+create view union_order_all_v as
+  select a, b from union_order_all union select a, b from union_order_all
+  order by all desc nulls last;
+select pg_get_viewdef('union_order_all_v'::regclass, true);
+select * from union_order_all_v;
+
+drop view union_order_all_v;
+drop table union_order_all;
