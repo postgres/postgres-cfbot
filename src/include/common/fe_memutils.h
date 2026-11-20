@@ -62,6 +62,13 @@ pg_attribute_alloc_size(2, 3) pg_attribute_returns_nonnull extern void *pg_reall
 #define pg_malloc0_object(type) ((type *) pg_malloc0(sizeof(type)))
 
 /*
+ * Allocate space for a struct of type "type" whose flexible array member
+ * "member" holds "count" elements.  See flex_size() for details.
+ */
+#define pg_malloc_flex_array(type, member, count) ((type *) pg_malloc(flex_size(type, member, count)))
+#define pg_malloc0_flex_array(type, member, count) ((type *) pg_malloc0(flex_size(type, member, count)))
+
+/*
  * Allocate space for "count" objects of type "type"
  */
 #define pg_malloc_array(type, count) ((type *) pg_malloc_mul(sizeof(type), count))
@@ -91,6 +98,8 @@ pg_attribute_alloc_size(2, 3) pg_attribute_returns_nonnull extern void *repalloc
 #define palloc0_object(type) ((type *) palloc0(sizeof(type)))
 #define palloc_array(type, count) ((type *) palloc_mul(sizeof(type), count))
 #define palloc0_array(type, count) ((type *) palloc0_mul(sizeof(type), count))
+#define palloc_flex_array(type, member, count) ((type *) palloc(flex_size(type, member, count)))
+#define palloc0_flex_array(type, member, count) ((type *) palloc0(flex_size(type, member, count)))
 #define palloc_array_extended(type, count, flags) ((type *) palloc_mul_extended(sizeof(type), count, flags))
 #define repalloc_array(pointer, type, count) ((type *) repalloc_mul(pointer, sizeof(type), count))
 

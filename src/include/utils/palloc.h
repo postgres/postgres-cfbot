@@ -108,6 +108,13 @@ pg_nodiscard pg_attribute_alloc_size(2, 3) extern void *repalloc_mul_extended(vo
 #define palloc0_object(type) ((type *) palloc0(sizeof(type)))
 
 /*
+ * Allocate space for a struct of type "type" whose flexible array member
+ * "member" holds "count" elements.  See flex_size() for details.
+ */
+#define palloc_flex_array(type, member, count) ((type *) palloc(flex_size(type, member, count)))
+#define palloc0_flex_array(type, member, count) ((type *) palloc0(flex_size(type, member, count)))
+
+/*
  * Allocate space for "count" objects of type "type"
  */
 #define palloc_array(type, count) ((type *) palloc_mul(sizeof(type), count))

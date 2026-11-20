@@ -1226,6 +1226,24 @@ pg_noreturn extern void ExceptionalCondition(const char *conditionName,
  */
 #define Min(x, y)		((x) < (y) ? (x) : (y))
 
+/*
+ * flex_size
+ *		Return the size of a struct "type" whose flexible array member
+ *		"member" holds "count" elements.
+ *
+ * The result is never less than sizeof(type), so that any trailing padding
+ * of the struct is covered.  "count" is evaluated only once.
+ */
+#define flex_size(type, member, count) \
+	flex_size_impl(sizeof(type), offsetof(type, member), \
+				   sizeof(((type *) 0)->member[0]), (count))
+
+static inline size_t
+flex_size_impl(size_t structsz, size_t offset, size_t elemsz, size_t count)
+{
+	return Max(structsz, offset + count * elemsz);
+}
+
 
 /* Get a bit mask of the bits set in non-size_t aligned addresses */
 #define SIZE_T_ALIGN_MASK (sizeof(size_t) - 1)

@@ -56,9 +56,8 @@ extern int	(*CMPTRGM) (const void *a, const void *b);
 														 * meta-character */
 
 /*
- * Note: This structure has trailing padding. When allocating a header-only
- * value, at least sizeof(TRGM) must be allocated, to avoid -Warray-bounds
- * compiler warnings.
+ * Note: This structure has trailing padding, so palloc_flex_array() should
+ * be used.
  */
 typedef struct
 {

@@ -80,8 +80,7 @@ gtrgm_alloc(bool isalltrue, int siglen, BITVECP sign)
 	int			size = CALCGTSIZE(flag, siglen);
 	TRGM	   *res;
 
-	/* allocate at least sizeof(TRGM), to cover padding */
-	res = palloc(Max(size, sizeof(TRGM)));
+	res = palloc_flex_array(TRGM, data, size - TRGMHDRSIZE);
 
 	SET_VARSIZE(res, size);
 	res->flag = flag;
