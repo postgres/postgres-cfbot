@@ -131,3 +131,18 @@ begin
   -- overflow during expression evaluation step does get an extra context line
   select x*x*x into y;
 end $$;
+
+-- Check case where the type name passed to pg_input_is_valid() and
+-- pg_input_error_info() changes between evaluations
+do $$
+declare r record;
+begin
+  for r in select * from (values ('42', 'integer'), ('hello', 'text'),
+                                 ('100000', 'smallint'),
+                                 ('abcdefg', 'varchar(5)'),
+                                 ('abcdefg', 'varchar(10)'),
+                                 ('abcdefghijk', 'varchar(10)')) as v(val, typ) loop
+    raise notice '% as %: % %', r.val, r.typ, pg_input_is_valid(r.val, r.typ),
+      (pg_input_error_info(r.val, r.typ)).message;
+  end loop;
+end $$;
