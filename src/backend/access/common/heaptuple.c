@@ -59,6 +59,7 @@
 
 #include "access/heaptoast.h"
 #include "access/sysattr.h"
+#include "access/toast_compression.h"
 #include "access/tupdesc_details.h"
 #include "access/xlogdefs.h"
 #include "catalog/pg_type_d.h"
@@ -399,6 +400,17 @@ fill_val(CompactAttribute *att,
 			data = (char *) att_nominal_alignby(data, att->attalignby);
 			data_length = VARSIZE(val);
 			memcpy(data, val, data_length);
+
+			/*
+			 * A value compressed with a dictionary depends on catalog state
+			 * of the column it belongs to, like a TOAST pointer does on its
+			 * TOAST table, so flag it the same way.  Code that makes a tuple
+			 * self-contained (toast_flatten_tuple and friends) tests
+			 * HEAP_HASEXTERNAL and then detoast_external_attr() on each
+			 * field, which decompresses it.
+			 */
+			if (VARATT_IS_COMPRESSED_DICT(val))
+				*infomask |= HEAP_HASEXTERNAL;
 		}
 	}
 	else if (att->attlen == -2)

@@ -22,6 +22,7 @@
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "access/toast_dictionary.h"
 #include "access/transam.h"
 #include "access/tupconvert.h"
 #include "access/visibilitymap.h"
@@ -612,6 +613,16 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 				if (n_distinct != 0.0)
 					stats->stadistinct = n_distinct;
 			}
+
+			/*
+			 * Automatic TOAST dictionary evolution: for an opted-in column
+			 * that uses a dictionary compression method, consider retraining
+			 * from the sample rows we already fetched.  Only on the table's
+			 * own rows, not inherited stats.
+			 */
+			if (!inh)
+				toast_dictionary_maybe_evolve(onerel, stats->tupattnum,
+											  rows, numrows, totalrows);
 
 			MemoryContextReset(col_context);
 		}

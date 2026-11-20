@@ -34,6 +34,7 @@
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "access/toast_dictionary.h"
 #include "access/xlog.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
@@ -76,6 +77,7 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_lsn.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
 
@@ -2203,6 +2205,11 @@ heap_drop_with_catalog(Oid relid)
 	RemoveStatistics(relid, 0);
 
 	/*
+	 * delete compression dictionaries
+	 */
+	RemoveToastDictionaries(relid, 0);
+
+	/*
 	 * delete attribute tuples
 	 */
 	DeleteAttributeTuples(relid);
@@ -3934,7 +3941,11 @@ heap_truncate(List *relids)
 	/* Don't allow truncate on tables that are referenced by foreign keys */
 	heap_truncate_check_FKs(relations, true);
 
-	/* OK to do it */
+	/*
+	 * OK to do it.  Retiring compression dictionaries may delete toasted
+	 * catalog entries, so ensure we have a valid snapshot.
+	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
 	foreach(cell, relations)
 	{
 		Relation	rel = lfirst(cell);
@@ -3942,9 +3953,13 @@ heap_truncate(List *relids)
 		/* Truncate the relation */
 		heap_truncate_one_rel(rel);
 
+		/* No value references its old compression dictionaries any more */
+		toast_dictionary_retire(RelationGetRelid(rel), true);
+
 		/* Close the relation, but keep exclusive lock on it until commit */
 		table_close(rel, NoLock);
 	}
+	PopActiveSnapshot();
 }
 
 /*
