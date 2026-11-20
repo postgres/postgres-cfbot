@@ -944,7 +944,7 @@ sub safe_quit
 	$stderr =~ s/$banner_match//;
 
 	# Close the session
-	$session->quit;
+	$session->quit(1);
 
 	return $stderr;
 }
