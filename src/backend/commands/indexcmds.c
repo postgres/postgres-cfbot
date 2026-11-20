@@ -1461,6 +1461,20 @@ DefineIndex(ParseState *pstate,
 						continue;
 
 					cldidx = index_open(cldidxid, lockmode);
+
+					/*
+					 * Can't use an invalid regular index (e.g., left behind
+					 * by a failed CREATE INDEX CONCURRENTLY).  Partitioned
+					 * indexes made with ON ONLY are invalid until their
+					 * partitions are attached, so we still allow those.
+					 */
+					if (cldidx->rd_rel->relkind != RELKIND_PARTITIONED_INDEX &&
+						!cldidx->rd_index->indisvalid)
+					{
+						index_close(cldidx, lockmode);
+						continue;
+					}
+
 					cldIdxInfo = BuildIndexInfo(cldidx);
 					if (CompareIndexInfo(cldIdxInfo, indexInfo,
 										 cldidx->rd_indcollation,
