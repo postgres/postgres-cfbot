@@ -199,6 +199,64 @@ select * from uk_a a left join
 (12 rows)
 
 reset join_collapse_limit;
+-- a subquery in the join relation is asked whether it is distinct
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b join (select distinct x, y from uk_c) s
+   on b.x = s.x and b.y = s.y) on a.x = b.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, uk_c.x, uk_c.y
+   Inner Unique: true
+   Join Filter: (a.x = b.id)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Materialize
+         Output: b.id, b.x, b.y, uk_c.x, uk_c.y
+         ->  Nested Loop
+               Output: b.id, b.x, b.y, uk_c.x, uk_c.y
+               Inner Unique: true
+               Join Filter: ((b.x = uk_c.x) AND (b.y = uk_c.y))
+               ->  Index Scan using uk_b_pkey on public.uk_b b
+                     Output: b.id, b.x, b.y
+               ->  Materialize
+                     Output: uk_c.x, uk_c.y
+                     ->  HashAggregate
+                           Output: uk_c.x, uk_c.y
+                           Group Key: uk_c.x, uk_c.y
+                           ->  Seq Scan on public.uk_c
+                                 Output: uk_c.id, uk_c.x, uk_c.y
+(21 rows)
+
+-- which takes clauses on all of its DISTINCT columns
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b join (select distinct x, y from uk_c) s
+   on b.x = s.x) on a.x = b.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, uk_c.x, uk_c.y
+   Join Filter: (a.x = b.id)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Materialize
+         Output: b.id, b.x, b.y, uk_c.x, uk_c.y
+         ->  Nested Loop
+               Output: b.id, b.x, b.y, uk_c.x, uk_c.y
+               Join Filter: (b.x = uk_c.x)
+               ->  Index Scan using uk_b_pkey on public.uk_b b
+                     Output: b.id, b.x, b.y
+               ->  Materialize
+                     Output: uk_c.x, uk_c.y
+                     ->  HashAggregate
+                           Output: uk_c.x, uk_c.y
+                           Group Key: uk_c.x, uk_c.y
+                           ->  Seq Scan on public.uk_c
+                                 Output: uk_c.id, uk_c.x, uk_c.y
+(19 rows)
+
 -- the right-hand side of a semijoin or antijoin need not be unique
 explain (verbose, costs off)
 select * from uk_a a left join
@@ -702,6 +760,80 @@ from (select * from uk_n where v > 0) n1 full join
                ->  Bitmap Index Scan on uk_n_v_idx
                      Index Cond: (v > 0)
 (11 rows)
+
+-- subqueries
+explain (costs off)
+select distinct x, y from (select distinct x, y from uk_c) s;
+         QUERY PLAN          
+-----------------------------
+ HashAggregate
+   Group Key: uk_c.x, uk_c.y
+   ->  Seq Scan on uk_c
+(3 rows)
+
+explain (costs off)
+select distinct b.id, s.y
+from uk_b b join (select x, y from uk_c group by x, y) s on b.x = s.x;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Hash Join
+   Hash Cond: (b.x = s.x)
+   ->  Seq Scan on uk_b b
+   ->  Hash
+         ->  Subquery Scan on s
+               ->  HashAggregate
+                     Group Key: uk_c.x, uk_c.y
+                     ->  Seq Scan on uk_c
+(8 rows)
+
+explain (costs off)
+select distinct b.id, s.y
+from uk_b b join (select id, x, y from uk_c group by id, x, y) s on b.x = s.x;
+                QUERY PLAN                
+------------------------------------------
+ HashAggregate
+   Group Key: b.id, s.y
+   ->  Merge Join
+         Merge Cond: (b.x = s.x)
+         ->  Sort
+               Sort Key: b.x
+               ->  Seq Scan on uk_b b
+         ->  Sort
+               Sort Key: s.x
+               ->  Subquery Scan on s
+                     ->  Seq Scan on uk_c
+(11 rows)
+
+-- a lateral subquery needs the relations it refers to
+explain (costs off)
+select distinct a.id, s.x
+from uk_a a, lateral (select distinct b.x from uk_b b where b.y = a.y) s;
+                 QUERY PLAN                 
+--------------------------------------------
+ Nested Loop
+   ->  Index Scan using uk_a_pkey on uk_a a
+   ->  Unique
+         ->  Sort
+               Sort Key: b.x
+               ->  Seq Scan on uk_b b
+                     Filter: (y = a.y)
+(7 rows)
+
+explain (costs off)
+select distinct a.x, s.x
+from uk_a a, lateral (select distinct b.x from uk_b b where b.y = a.y) s;
+                 QUERY PLAN                  
+---------------------------------------------
+ HashAggregate
+   Group Key: a.x, b.x
+   ->  Nested Loop
+         ->  Seq Scan on uk_a a
+         ->  Unique
+               ->  Sort
+                     Sort Key: b.x
+                     ->  Seq Scan on uk_b b
+                           Filter: (y = a.y)
+(9 rows)
 
 -- semijoins and antijoins
 explain (costs off)

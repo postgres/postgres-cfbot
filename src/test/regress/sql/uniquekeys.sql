@@ -63,6 +63,18 @@ select * from uk_a a left join
 
 reset join_collapse_limit;
 
+-- a subquery in the join relation is asked whether it is distinct
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b join (select distinct x, y from uk_c) s
+   on b.x = s.x and b.y = s.y) on a.x = b.id;
+
+-- which takes clauses on all of its DISTINCT columns
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b join (select distinct x, y from uk_c) s
+   on b.x = s.x) on a.x = b.id;
+
 -- the right-hand side of a semijoin or antijoin need not be unique
 explain (verbose, costs off)
 select * from uk_a a left join
@@ -199,6 +211,27 @@ explain (costs off)
 select distinct n1.v, n2.v
 from (select * from uk_n where v > 0) n1 full join
   (select * from uk_n where v > 0) n2 on n1.w = n2.w;
+
+-- subqueries
+explain (costs off)
+select distinct x, y from (select distinct x, y from uk_c) s;
+
+explain (costs off)
+select distinct b.id, s.y
+from uk_b b join (select x, y from uk_c group by x, y) s on b.x = s.x;
+
+explain (costs off)
+select distinct b.id, s.y
+from uk_b b join (select id, x, y from uk_c group by id, x, y) s on b.x = s.x;
+
+-- a lateral subquery needs the relations it refers to
+explain (costs off)
+select distinct a.id, s.x
+from uk_a a, lateral (select distinct b.x from uk_b b where b.y = a.y) s;
+
+explain (costs off)
+select distinct a.x, s.x
+from uk_a a, lateral (select distinct b.x from uk_b b where b.y = a.y) s;
 
 -- semijoins and antijoins
 explain (costs off)

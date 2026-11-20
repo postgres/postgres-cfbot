@@ -4,8 +4,9 @@
  *	  Utilities for proving relations distinct using UniqueKeys
  *
  * A UniqueKey is a set of EquivalenceClasses that no two rows of a base
- * relation agree on.  Plain relations get them from their unique indexes.
- * Join relations have no UniqueKeys of their own: whether a join relation is
+ * relation agree on.  Plain relations get them from their unique indexes,
+ * and subquery relations from what makes the subquery distinct.  Join
+ * relations have no UniqueKeys of their own: whether a join relation is
  * distinct is worked out when needed, from the UniqueKeys of the base
  * relations it consists of.  Appendrel children and relations that are
  * partially aggregated by eager aggregation have none either; see
@@ -36,12 +37,15 @@
 #include "postgres.h"
 
 #include "access/sysattr.h"
+#include "nodes/makefuncs.h"
 #include "nodes/multibitmapset.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/tlist.h"
+#include "parser/parse_agg.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
 
@@ -56,6 +60,10 @@ static Bitmapset *get_joined_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 static void build_base_rel_uniquekeys(PlannerInfo *root);
 static void build_base_eclasses(PlannerInfo *root);
 static void build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel);
+static void build_subquery_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel);
+static void add_subquery_uniquekey(PlannerInfo *root, RelOptInfo *rel,
+								   List *sgc_tlist, List *out_tlist,
+								   List *clauses);
 static void build_notnull_eclass_indexes(PlannerInfo *root, RelOptInfo *rel);
 static void add_uniquekey(RelOptInfo *rel, Bitmapset *eclass_indexes,
 						  bool null_aware);
@@ -389,6 +397,14 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 											 nulls_equal))
 				continue;
 
+			/*
+			 * A relation with lateral references is scanned anew for each row
+			 * of the relations it refers to, and its UniqueKeys hold only
+			 * within one scan.  So those relations have to come first.
+			 */
+			if (bms_overlap(rel->lateral_relids, remaining))
+				continue;
+
 			if (!rel_has_uniquekey_in(root, rel, known_ecs, joined_ecs,
 									  nulls_equal))
 				continue;
@@ -601,7 +617,7 @@ build_base_rel_uniquekeys(PlannerInfo *root)
 		if (rel == NULL)
 			continue;
 
-		/* Currently we only know about plain relations */
+		/* Currently we only know about plain relations ... */
 		if (rel->reloptkind == RELOPT_BASEREL &&
 			rel->rtekind == RTE_RELATION)
 		{
@@ -612,6 +628,12 @@ build_base_rel_uniquekeys(PlannerInfo *root)
 				bms_overlap(rel->nulling_relids, full_join_relids))
 				build_notnull_eclass_indexes(root, rel);
 		}
+
+		/* ... and subqueries, though not the parents of appendrels */
+		if (rel->reloptkind == RELOPT_BASEREL &&
+			rel->rtekind == RTE_SUBQUERY &&
+			!root->simple_rte_array[rti]->inh)
+			build_subquery_rel_uniquekeys(root, rel);
 
 		if (rel->uniquekeys == NIL)
 			no_uniquekey_relids = bms_add_member(no_uniquekey_relids, rti);
@@ -770,6 +792,127 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 		if (c == ind->nkeycolumns)
 			add_uniquekey(rel, key_ecs, null_aware);
 	}
+}
+
+/*
+ * build_subquery_rel_uniquekeys
+ *		Build UniqueKeys for a subquery relation.
+ *
+ * A subquery can be distinct by construction: on its DISTINCT columns, on
+ * its GROUP BY columns, on all its output columns if it is a set operation
+ * without ALL, or because it returns at most one row.  We make a UniqueKey
+ * for each of these.
+ *
+ * Those constructs consider NULLs equal to each other, so the UniqueKeys are
+ * null_aware.
+ */
+static void
+build_subquery_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
+{
+	Query	   *subquery = root->simple_rte_array[rel->relid]->subquery;
+
+	/* DISTINCT, though not DISTINCT ON if there are SRFs in the tlist */
+	if (subquery->distinctClause &&
+		!(subquery->hasTargetSRFs && subquery->hasDistinctOn))
+		add_subquery_uniquekey(root, rel, subquery->targetList, NIL,
+							   subquery->distinctClause);
+
+	/* Otherwise, SRFs in the tlist can duplicate rows after any grouping */
+	if (subquery->hasTargetSRFs)
+		return;
+
+	if (subquery->groupClause && !subquery->groupingSets)
+	{
+		/* GROUP BY without grouping sets */
+		add_subquery_uniquekey(root, rel, subquery->targetList, NIL,
+							   subquery->groupClause);
+	}
+	else if (subquery->groupingSets)
+	{
+		/* A single empty grouping set yields at most one row */
+		if (subquery->groupClause == NIL &&
+			(subquery->groupDistinct ||
+			 list_length(expand_grouping_sets(subquery->groupingSets,
+											  false, -1)) == 1))
+			add_uniquekey(rel, NULL, true);
+		return;
+	}
+	else if (subquery->hasAggs || subquery->havingQual)
+	{
+		/* Aggregation without GROUP BY yields at most one row */
+		add_uniquekey(rel, NULL, true);
+	}
+
+	/* UNION, INTERSECT and EXCEPT, except with ALL */
+	if (subquery->setOperations)
+	{
+		SetOperationStmt *topop = castNode(SetOperationStmt,
+										   subquery->setOperations);
+
+		if (!topop->all)
+			add_subquery_uniquekey(root, rel, NIL, subquery->targetList,
+								   topop->groupClauses);
+	}
+}
+
+/*
+ * add_subquery_uniquekey
+ *		Subroutine for build_subquery_rel_uniquekeys: add a UniqueKey for the
+ *		output columns that the subquery is made distinct on.
+ *
+ * The columns are those that the given SortGroupClauses refer to in
+ * sgc_tlist, or if out_tlist is given instead, its non-junk entries, which
+ * the clauses then match one by one.
+ *
+ * Each column must be in an EC that uses the opfamilies of the clause's
+ * equality operator and the column's collation; otherwise there is no
+ * UniqueKey.  A column that is equal to a constant has the same value in all
+ * the rows of interest, so it needs no place in the UniqueKey.
+ */
+static void
+add_subquery_uniquekey(PlannerInfo *root, RelOptInfo *rel,
+					   List *sgc_tlist, List *out_tlist, List *clauses)
+{
+	Bitmapset  *key_ecs = NULL;
+	ListCell   *lc = list_head(out_tlist);
+
+	foreach_node(SortGroupClause, sgc, clauses)
+	{
+		TargetEntry *tle;
+		EquivalenceClass *ec;
+		Var		   *var;
+		int			ec_index;
+
+		if (out_tlist != NIL)
+		{
+			/* skip resjunk columns, which have no grouping clauses */
+			while (lfirst_node(TargetEntry, lc)->resjunk)
+				lc = lnext(out_tlist, lc);
+			tle = lfirst_node(TargetEntry, lc);
+			lc = lnext(out_tlist, lc);
+		}
+		else
+		{
+			tle = get_sortgroupclause_tle(sgc, sgc_tlist);
+
+			/* a column that is not output cannot be matched */
+			if (tle->resjunk)
+				return;
+		}
+
+		var = makeVarFromTargetEntry(rel->relid, tle);
+		ec_index = find_ec_index(root, rel, (Expr *) var,
+								 get_mergejoin_opfamilies(sgc->eqop),
+								 exprCollation((Node *) tle->expr));
+		if (ec_index < 0)
+			return;
+
+		ec = list_nth_node(EquivalenceClass, root->eq_classes, ec_index);
+		if (!ec->ec_has_const)
+			key_ecs = bms_add_member(key_ecs, ec_index);
+	}
+
+	add_uniquekey(rel, key_ecs, true);
 }
 
 /*

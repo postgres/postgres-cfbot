@@ -1048,8 +1048,8 @@ so that a query that never needs them does not pay for them.
 UniqueKeys are used to detect unique inner sides of joins when the inner
 side is itself a join, and to skip DISTINCT and GROUP BY steps whose input
 is already distinct.  The following describes each of these in turn, and
-then how outer joins, semijoins and other kinds of relations fit in.  For
-now only plain tables get UniqueKeys.
+then how outer joins, semijoins, subqueries and other kinds of relations
+fit in.
 
 We do not keep UniqueKeys for join relations.  A join relation would
 typically have many of them, most of which would never be used.  And since
@@ -1182,6 +1182,15 @@ they need UniqueKeys at all.  The one case we do not try to handle is a
 join relation that includes the right-hand side of a semijoin but only part
 of its left-hand side, which can only be formed by making the right-hand
 side unique first.
+
+A subquery that could not be flattened into the query is a base relation
+too, and gets UniqueKeys if it is distinct by construction, through
+DISTINCT, GROUP BY, a set operation and so on.  A UniqueKey then consists
+of the ECs of the output columns in question.  Since those constructs
+consider NULLs equal, such UniqueKeys are marked null_aware.  A relation
+with LATERAL references is scanned anew for each row of the relations it
+refers to, and its UniqueKeys hold only within one scan, so those relations
+have to be shown to have only one possible row first.
 
 Appendrel children have no UniqueKeys.  A child relation that is by itself
 the inner side of a join is checked through its own unique indexes, like
