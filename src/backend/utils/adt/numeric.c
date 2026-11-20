@@ -507,7 +507,7 @@ static bool set_var_from_non_decimal_integer_str(const char *str,
 												 const char **endptr,
 												 Node *escontext);
 static void set_var_from_num(Numeric num, NumericVar *dest);
-static void init_var_from_num(Numeric num, NumericVar *dest);
+static void init_var_from_num(const Numeric num, NumericVar *dest);
 static void set_var_from_var(const NumericVar *value, NumericVar *dest);
 static char *get_str_from_var(const NumericVar *var);
 static char *get_str_from_var_sci(const NumericVar *var, int rscale);
@@ -2285,8 +2285,8 @@ numeric_abbrev_abort(int memtupcount, SortSupport ssup)
 static int
 numeric_fast_cmp(Datum x, Datum y, SortSupport ssup)
 {
-	Numeric		nx = DatumGetNumeric(x);
-	Numeric		ny = DatumGetNumeric(y);
+	Numeric		nx = DatumGetNumericPacked(x);
+	Numeric		ny = DatumGetNumericPacked(y);
 	int			result;
 
 	result = cmp_numerics(nx, ny);
@@ -2418,14 +2418,11 @@ numeric_abbrev_convert_var(const NumericVar *var, NumericSortSupport *nss)
 Datum
 numeric_cmp(PG_FUNCTION_ARGS)
 {
-	Numeric		num1 = PG_GETARG_NUMERIC(0);
-	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	Numeric		num1 = PG_GETARG_NUMERIC_PACKED(0);
+	Numeric		num2 = PG_GETARG_NUMERIC_PACKED(1);
 	int			result;
 
 	result = cmp_numerics(num1, num2);
-
-	PG_FREE_IF_COPY(num1, 0);
-	PG_FREE_IF_COPY(num2, 1);
 
 	PG_RETURN_INT32(result);
 }
@@ -2434,14 +2431,11 @@ numeric_cmp(PG_FUNCTION_ARGS)
 Datum
 numeric_eq(PG_FUNCTION_ARGS)
 {
-	Numeric		num1 = PG_GETARG_NUMERIC(0);
-	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	Numeric		num1 = PG_GETARG_NUMERIC_PACKED(0);
+	Numeric		num2 = PG_GETARG_NUMERIC_PACKED(1);
 	bool		result;
 
 	result = cmp_numerics(num1, num2) == 0;
-
-	PG_FREE_IF_COPY(num1, 0);
-	PG_FREE_IF_COPY(num2, 1);
 
 	PG_RETURN_BOOL(result);
 }
@@ -2449,14 +2443,11 @@ numeric_eq(PG_FUNCTION_ARGS)
 Datum
 numeric_ne(PG_FUNCTION_ARGS)
 {
-	Numeric		num1 = PG_GETARG_NUMERIC(0);
-	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	Numeric		num1 = PG_GETARG_NUMERIC_PACKED(0);
+	Numeric		num2 = PG_GETARG_NUMERIC_PACKED(1);
 	bool		result;
 
 	result = cmp_numerics(num1, num2) != 0;
-
-	PG_FREE_IF_COPY(num1, 0);
-	PG_FREE_IF_COPY(num2, 1);
 
 	PG_RETURN_BOOL(result);
 }
@@ -2464,14 +2455,11 @@ numeric_ne(PG_FUNCTION_ARGS)
 Datum
 numeric_gt(PG_FUNCTION_ARGS)
 {
-	Numeric		num1 = PG_GETARG_NUMERIC(0);
-	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	Numeric		num1 = PG_GETARG_NUMERIC_PACKED(0);
+	Numeric		num2 = PG_GETARG_NUMERIC_PACKED(1);
 	bool		result;
 
 	result = cmp_numerics(num1, num2) > 0;
-
-	PG_FREE_IF_COPY(num1, 0);
-	PG_FREE_IF_COPY(num2, 1);
 
 	PG_RETURN_BOOL(result);
 }
@@ -2479,14 +2467,11 @@ numeric_gt(PG_FUNCTION_ARGS)
 Datum
 numeric_ge(PG_FUNCTION_ARGS)
 {
-	Numeric		num1 = PG_GETARG_NUMERIC(0);
-	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	Numeric		num1 = PG_GETARG_NUMERIC_PACKED(0);
+	Numeric		num2 = PG_GETARG_NUMERIC_PACKED(1);
 	bool		result;
 
 	result = cmp_numerics(num1, num2) >= 0;
-
-	PG_FREE_IF_COPY(num1, 0);
-	PG_FREE_IF_COPY(num2, 1);
 
 	PG_RETURN_BOOL(result);
 }
@@ -2494,14 +2479,11 @@ numeric_ge(PG_FUNCTION_ARGS)
 Datum
 numeric_lt(PG_FUNCTION_ARGS)
 {
-	Numeric		num1 = PG_GETARG_NUMERIC(0);
-	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	Numeric		num1 = PG_GETARG_NUMERIC_PACKED(0);
+	Numeric		num2 = PG_GETARG_NUMERIC_PACKED(1);
 	bool		result;
 
 	result = cmp_numerics(num1, num2) < 0;
-
-	PG_FREE_IF_COPY(num1, 0);
-	PG_FREE_IF_COPY(num2, 1);
 
 	PG_RETURN_BOOL(result);
 }
@@ -2509,14 +2491,11 @@ numeric_lt(PG_FUNCTION_ARGS)
 Datum
 numeric_le(PG_FUNCTION_ARGS)
 {
-	Numeric		num1 = PG_GETARG_NUMERIC(0);
-	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	Numeric		num1 = PG_GETARG_NUMERIC_PACKED(0);
+	Numeric		num2 = PG_GETARG_NUMERIC_PACKED(1);
 	bool		result;
 
 	result = cmp_numerics(num1, num2) <= 0;
-
-	PG_FREE_IF_COPY(num1, 0);
-	PG_FREE_IF_COPY(num2, 1);
 
 	PG_RETURN_BOOL(result);
 }
@@ -2525,51 +2504,55 @@ static int
 cmp_numerics(Numeric num1, Numeric num2)
 {
 	int			result;
+	NumericVar	var1, var2;
+
+	init_var_from_num(num1, &var1);
+	init_var_from_num(num2, &var2);
 
 	/*
 	 * We consider all NANs to be equal and larger than any non-NAN (including
 	 * Infinity).  This is somewhat arbitrary; the important thing is to have
 	 * a consistent sort order.
 	 */
-	if (NUMERIC_IS_SPECIAL(num1))
+	if (var1.sign == NUMERIC_PINF || var1.sign == NUMERIC_NINF || var1.sign == NUMERIC_NAN)
 	{
-		if (NUMERIC_IS_NAN(num1))
+		if (var1.sign == NUMERIC_NAN)
 		{
-			if (NUMERIC_IS_NAN(num2))
+			if (var2.sign == NUMERIC_NAN)
 				result = 0;		/* NAN = NAN */
 			else
 				result = 1;		/* NAN > non-NAN */
 		}
-		else if (NUMERIC_IS_PINF(num1))
+		else if (var1.sign == NUMERIC_PINF)
 		{
-			if (NUMERIC_IS_NAN(num2))
+			if (var2.sign == NUMERIC_NAN)
 				result = -1;	/* PINF < NAN */
-			else if (NUMERIC_IS_PINF(num2))
+			else if (var2.sign == NUMERIC_POS)
 				result = 0;		/* PINF = PINF */
 			else
 				result = 1;		/* PINF > anything else */
 		}
 		else					/* num1 must be NINF */
 		{
-			if (NUMERIC_IS_NINF(num2))
+			if (var2.sign == NUMERIC_NINF)
 				result = 0;		/* NINF = NINF */
 			else
 				result = -1;	/* NINF < anything else */
 		}
 	}
-	else if (NUMERIC_IS_SPECIAL(num2))
+	else if (var2.sign == NUMERIC_PINF || var2.sign == NUMERIC_NINF || var2.sign == NUMERIC_NAN)
 	{
-		if (NUMERIC_IS_NINF(num2))
+		if (var2.sign == NUMERIC_NINF)
 			result = 1;			/* normal > NINF */
 		else
 			result = -1;		/* normal < NAN or PINF */
 	}
 	else
 	{
-		result = cmp_var_common(NUMERIC_DIGITS(num1), NUMERIC_NDIGITS(num1),
-								NUMERIC_WEIGHT(num1), NUMERIC_SIGN(num1),
-								NUMERIC_DIGITS(num2), NUMERIC_NDIGITS(num2),
-								NUMERIC_WEIGHT(num2), NUMERIC_SIGN(num2));
+		result = cmp_var_common(var1.digits, var1.ndigits,
+								var1.weight, var1.sign,
+								var2.digits, var2.ndigits,
+								var2.weight, var2.sign);
 	}
 
 	return result;
@@ -3453,8 +3436,8 @@ numeric_inc(PG_FUNCTION_ARGS)
 Datum
 numeric_smaller(PG_FUNCTION_ARGS)
 {
-	Numeric		num1 = PG_GETARG_NUMERIC(0);
-	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	Numeric		num1 = PG_GETARG_NUMERIC_PACKED(0);
+	Numeric		num2 = PG_GETARG_NUMERIC_PACKED(1);
 
 	/*
 	 * Use cmp_numerics so that this will agree with the comparison operators,
@@ -3475,8 +3458,8 @@ numeric_smaller(PG_FUNCTION_ARGS)
 Datum
 numeric_larger(PG_FUNCTION_ARGS)
 {
-	Numeric		num1 = PG_GETARG_NUMERIC(0);
-	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	Numeric		num1 = PG_GETARG_NUMERIC_PACKED(0);
+	Numeric		num2 = PG_GETARG_NUMERIC_PACKED(1);
 
 	/*
 	 * Use cmp_numerics so that this will agree with the comparison operators,
@@ -7270,15 +7253,42 @@ set_var_from_num(Numeric num, NumericVar *dest)
  *	propagate to the original Numeric! It's OK to use it as the destination
  *	argument of one of the calculational functions, though.
  */
-static void
-init_var_from_num(Numeric num, NumericVar *dest)
+inline static void
+init_var_from_num(const Numeric num, NumericVar *dest)
 {
-	dest->ndigits = NUMERIC_NDIGITS(num);
-	dest->weight = NUMERIC_WEIGHT(num);
-	dest->sign = NUMERIC_SIGN(num);
-	dest->dscale = NUMERIC_DSCALE(num);
-	dest->digits = NUMERIC_DIGITS(num);
-	dest->buf = NULL;			/* digits array is not palloc'd */
+	uint16 header;
+	bool isHeaderShort;
+	const char *varData = VARDATA_ANY(num);
+	const int varSize = VARSIZE_ANY_EXHDR(num);
+
+	memcpy(&header, varData, sizeof(header));
+	isHeaderShort = ((header & 0x8000) != 0);
+
+	dest->buf = NULL; /* digits array is not palloc'd */
+
+	if (isHeaderShort)
+	{
+		dest->ndigits = ((varSize - sizeof(uint16)) / sizeof(NumericDigit));
+		dest->weight = (header & NUMERIC_SHORT_WEIGHT_SIGN_MASK ? ~NUMERIC_SHORT_WEIGHT_MASK : 0) | (header & NUMERIC_SHORT_WEIGHT_MASK);
+
+		dest->sign = (header & NUMERIC_SIGN_MASK) ==  NUMERIC_SHORT ? 
+			((header & NUMERIC_SHORT_SIGN_MASK) ? 
+			NUMERIC_NEG : NUMERIC_POS) : (header & NUMERIC_EXT_SIGN_MASK);
+
+		dest->dscale = (header & NUMERIC_SHORT_DSCALE_MASK) >> NUMERIC_SHORT_DSCALE_SHIFT;
+		dest->digits = (NumericDigit *)(varData + sizeof(header));
+	}
+	else
+	{
+		int16 weight;
+		memcpy(&weight, varData+sizeof(header), sizeof(weight));
+
+		dest->ndigits = ((varSize - sizeof(uint16) - sizeof(int16)) / sizeof(NumericDigit));
+		dest->weight = weight;
+		dest->sign = ((header & NUMERIC_SIGN_MASK) == NUMERIC_SPECIAL ? (header & NUMERIC_EXT_SIGN_MASK) : (header & NUMERIC_SIGN_MASK));
+		dest->dscale = header & NUMERIC_DSCALE_MASK;
+		dest->digits = (NumericDigit *)(varData + sizeof(header) + sizeof(weight));
+	}
 }
 
 
