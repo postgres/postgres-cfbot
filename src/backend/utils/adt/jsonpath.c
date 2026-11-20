@@ -575,7 +575,14 @@ printJsonPathItem(StringInfo buf, JsonPathItem *v, bool inKey,
 		case jpiDiv:
 		case jpiMod:
 		case jpiStartsWith:
-			if (printBracketes)
+
+			/*
+			 * An operation followed by an accessor, as in "($ + 1).abs()",
+			 * must be parenthesized whatever its priority, or the accessor
+			 * would be read as applying to the right operand only.  The same
+			 * goes for the other operations below.
+			 */
+			if (printBracketes || jspHasNext(v))
 				appendStringInfoChar(buf, '(');
 			jspGetLeftArg(v, &elem);
 			printJsonPathItem(buf, &elem, false,
@@ -588,31 +595,39 @@ printJsonPathItem(StringInfo buf, JsonPathItem *v, bool inKey,
 			printJsonPathItem(buf, &elem, false,
 							  operationPriority(elem.type) <=
 							  operationPriority(v->type));
-			if (printBracketes)
+			if (printBracketes || jspHasNext(v))
 				appendStringInfoChar(buf, ')');
 			break;
 		case jpiNot:
+			if (jspHasNext(v))
+				appendStringInfoChar(buf, '(');
 			appendStringInfoString(buf, "!(");
 			jspGetArg(v, &elem);
 			printJsonPathItem(buf, &elem, false, false);
 			appendStringInfoChar(buf, ')');
+			if (jspHasNext(v))
+				appendStringInfoChar(buf, ')');
 			break;
 		case jpiIsUnknown:
+			if (jspHasNext(v))
+				appendStringInfoChar(buf, '(');
 			appendStringInfoChar(buf, '(');
 			jspGetArg(v, &elem);
 			printJsonPathItem(buf, &elem, false, false);
 			appendStringInfoString(buf, ") is unknown");
+			if (jspHasNext(v))
+				appendStringInfoChar(buf, ')');
 			break;
 		case jpiPlus:
 		case jpiMinus:
-			if (printBracketes)
+			if (printBracketes || jspHasNext(v))
 				appendStringInfoChar(buf, '(');
 			appendStringInfoChar(buf, v->type == jpiPlus ? '+' : '-');
 			jspGetArg(v, &elem);
 			printJsonPathItem(buf, &elem, false,
 							  operationPriority(elem.type) <=
 							  operationPriority(v->type));
-			if (printBracketes)
+			if (printBracketes || jspHasNext(v))
 				appendStringInfoChar(buf, ')');
 			break;
 		case jpiAnyArray:
@@ -696,10 +711,14 @@ printJsonPathItem(StringInfo buf, JsonPathItem *v, bool inKey,
 			appendStringInfoChar(buf, ')');
 			break;
 		case jpiExists:
+			if (jspHasNext(v))
+				appendStringInfoChar(buf, '(');
 			appendStringInfoString(buf, "exists (");
 			jspGetArg(v, &elem);
 			printJsonPathItem(buf, &elem, false, false);
 			appendStringInfoChar(buf, ')');
+			if (jspHasNext(v))
+				appendStringInfoChar(buf, ')');
 			break;
 		case jpiType:
 			appendStringInfoString(buf, ".type()");
@@ -735,7 +754,7 @@ printJsonPathItem(StringInfo buf, JsonPathItem *v, bool inKey,
 			appendStringInfoString(buf, "last");
 			break;
 		case jpiLikeRegex:
-			if (printBracketes)
+			if (printBracketes || jspHasNext(v))
 				appendStringInfoChar(buf, '(');
 
 			jspInitByBuffer(&elem, v->base, v->content.like_regex.expr);
@@ -767,7 +786,7 @@ printJsonPathItem(StringInfo buf, JsonPathItem *v, bool inKey,
 				appendStringInfoChar(buf, '"');
 			}
 
-			if (printBracketes)
+			if (printBracketes || jspHasNext(v))
 				appendStringInfoChar(buf, ')');
 			break;
 		case jpiBigint:
