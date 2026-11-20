@@ -852,6 +852,13 @@ static bool socket_has_input(socket_set *sa, int fd, int idx);
 /* callback used to build rows for COPY during data loading */
 typedef void (*initRowMethod) (PQExpBufferData *sql, int64 curr);
 
+/* per-thread state for loading pgbench_accounts partitions in parallel */
+typedef struct PartitionWorker
+{
+	int			thread_id;
+	bool		use_freeze;
+} PartitionWorker;
+
 /* callback functions for our flex lexer */
 static const PsqlScanCallbacks pgbench_callbacks = {
 	NULL,						/* don't need get_variable functionality */
@@ -880,6 +887,28 @@ get_table_relkind(PGconn *con, const char *table)
 	PQclear(res);
 
 	return relkind;
+}
+
+static bool
+accounts_referenced_by_fkey(PGconn *con)
+{
+	PGresult   *res;
+	bool		has_referencing_fkey;
+	const char *sql =
+		"SELECT 1 FROM pg_catalog.pg_constraint "
+		"WHERE contype = 'f' AND confrelid = 'pgbench_accounts'::pg_catalog.regclass";
+
+	res = PQexec(con, sql);
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+	{
+		pg_log_error("query failed: %s", PQerrorMessage(con));
+		pg_log_error_detail("Query was: %s", sql);
+		exit(1);
+	}
+	has_referencing_fkey = PQntuples(res) > 0;
+	PQclear(res);
+
+	return has_referencing_fkey;
 }
 
 static inline pg_time_usec_t
@@ -4830,6 +4859,16 @@ initDropTables(PGconn *con)
 }
 
 /*
+ * Number of rows in each range partition of "pgbench_accounts".  With many
+ * partitions, the last ones may receive fewer rows, or none.
+ */
+static int64
+rangePartitionSize(void)
+{
+	return (naccounts * (int64) scale + partitions - 1) / partitions;
+}
+
+/*
  * Create "pgbench_accounts" partitions if needed.
  *
  * This is the larger table of pgbench default tpc-b like schema
@@ -4851,7 +4890,7 @@ createPartitions(PGconn *con)
 	{
 		if (partition_method == PART_RANGE)
 		{
-			int64		part_size = (naccounts * (int64) scale + partitions - 1) / partitions;
+			int64		part_size = rangePartitionSize();
 
 			printfPQExpBuffer(&query,
 							  "create%s table pgbench_accounts_%d\n"
@@ -5154,20 +5193,140 @@ initPopulateTable(PGconn *con, const char *table, int64 base,
 	termPQExpBuffer(&sql);
 }
 
+static void
+initPopulatePartition(PGconn *con, int partno, bool use_freeze)
+{
+	/* Rows belonging to this partition, matching createPartitions() */
+	int64		part_size = rangePartitionSize();
+	int64		start_row = (partno - 1) * part_size;
+	int64		end_row = Min(partno * part_size, naccounts * (int64) scale);
+	PGresult   *res;
+	PQExpBufferData sql;
+	int64		rowno;
+
+	initPQExpBuffer(&sql);
+
+	/*
+	 * COPY FREEZE requires the table to have been created or truncated in the
+	 * current transaction, so truncate the partition first.
+	 */
+	if (use_freeze)
+	{
+		printfPQExpBuffer(&sql, "truncate table pgbench_accounts_%d", partno);
+		executeStatement(con, sql.data);
+	}
+
+	printfPQExpBuffer(&sql, "copy pgbench_accounts_%d from stdin%s",
+					  partno, use_freeze ? " with (freeze on)" : "");
+
+	res = PQexec(con, sql.data);
+	if (PQresultStatus(res) != PGRES_COPY_IN)
+		pg_fatal("unexpected copy in result: %s", PQerrorMessage(con));
+	PQclear(res);
+
+	for (rowno = start_row; rowno < end_row; rowno++)
+	{
+		initAccount(&sql, rowno);
+		if (PQputCopyData(con, sql.data, sql.len) <= 0)
+			pg_fatal("PQputCopyData failed for partition %d", partno);
+
+		/*
+		 * The cancel handler can only cancel the main connection, which is
+		 * idle while the workers load, so abort the COPY from here.
+		 */
+		if (CancelRequested)
+			break;
+	}
+
+	if (PQputCopyEnd(con, CancelRequested ? "canceled by user" : NULL) <= 0)
+		pg_fatal("PQputCopyEnd failed for partition %d", partno);
+
+	res = PQgetResult(con);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("COPY failed for partition %d: %s", partno, PQerrorMessage(con));
+	PQclear(res);
+
+	termPQExpBuffer(&sql);
+}
+
+static THREAD_FUNC_RETURN_TYPE THREAD_FUNC_CC
+initPartitionWorkerThread(void *arg)
+{
+	PartitionWorker *worker = (PartitionWorker *) arg;
+	PGconn	   *con = doConnect();
+	int			partno;
+
+	if (con == NULL)
+		pg_fatal("could not create connection for partition worker %d",
+				 worker->thread_id);
+
+	executeStatement(con, "begin");
+
+	/* Each thread loads every nthreads-th partition, starting from its own */
+	for (partno = worker->thread_id + 1; partno <= partitions;
+		 partno += nthreads)
+		initPopulatePartition(con, partno, worker->use_freeze);
+
+	executeStatement(con, "commit");
+
+	PQfinish(con);
+	THREAD_FUNC_RETURN;
+}
+
+static void
+initLoadAccountsParallel(bool use_freeze)
+{
+	THREAD_T   *threads;
+	PartitionWorker *workers;
+	int			i;
+
+	fprintf(stderr, "loading pgbench_accounts with %d threads...\n", nthreads);
+
+	threads = pg_malloc_array(THREAD_T, nthreads);
+	workers = pg_malloc_array(PartitionWorker, nthreads);
+
+	for (i = 0; i < nthreads; i++)
+	{
+		workers[i].thread_id = i;
+		workers[i].use_freeze = use_freeze;
+
+		errno = THREAD_CREATE(&threads[i], initPartitionWorkerThread,
+							  &workers[i]);
+		if (errno != 0)
+			pg_fatal("could not create thread: %m");
+	}
+
+	for (i = 0; i < nthreads; i++)
+		THREAD_JOIN(threads[i]);
+
+	pg_free(threads);
+	pg_free(workers);
+}
+
 /*
  * Fill the standard tables with some data generated and sent from the client.
  *
  * The filler column is NULL in pgbench_branches and pgbench_tellers, and is
  * a blank-padded string in pgbench_accounts.
+ *
+ * tables_created tells whether the tables were created by this run's
+ * initialization steps.
  */
 static void
-initGenerateDataClientSide(PGconn *con)
+initGenerateDataClientSide(PGconn *con, bool tables_created)
 {
 	fprintf(stderr, "generating data (client-side)...\n");
 
 	/*
-	 * we do all of this in one transaction to enable the backend's
-	 * data-loading optimizations
+	 * For serial loading, do everything in one transaction to enable the
+	 * backend's data-loading optimizations.  For parallel loading
+	 * (range-partitioned, -j > 1), load branches and tellers in one
+	 * transaction, then load accounts in parallel with each worker in its own
+	 * transaction.  Each worker truncates its partitions again so it can use
+	 * COPY FREEZE, unless a foreign key references pgbench_accounts, which
+	 * prevents truncating a single partition.  Parallel loading is only done
+	 * when the tables were created in this run, so that the partitions are
+	 * known to match --partitions and --scale.
 	 */
 	executeStatement(con, "begin");
 
@@ -5180,9 +5339,20 @@ initGenerateDataClientSide(PGconn *con)
 	 */
 	initPopulateTable(con, "pgbench_branches", nbranches, initBranch);
 	initPopulateTable(con, "pgbench_tellers", ntellers, initTeller);
-	initPopulateTable(con, "pgbench_accounts", naccounts, initAccount);
 
-	executeStatement(con, "commit");
+	if (partition_method == PART_RANGE && nthreads > 1 && tables_created)
+	{
+		bool		use_freeze = PQserverVersion(con) >= 140000 &&
+			!accounts_referenced_by_fkey(con);
+
+		executeStatement(con, "commit");
+		initLoadAccountsParallel(use_freeze);
+	}
+	else
+	{
+		initPopulateTable(con, "pgbench_accounts", naccounts, initAccount);
+		executeStatement(con, "commit");
+	}
 }
 
 /*
@@ -5340,6 +5510,7 @@ runInitSteps(const char *initialize_steps)
 	const char *step;
 	double		run_time = 0.0;
 	bool		first = true;
+	bool		tables_created = false;
 
 	initPQExpBuffer(&stats);
 
@@ -5363,10 +5534,11 @@ runInitSteps(const char *initialize_steps)
 			case 't':
 				op = "create tables";
 				initCreateTables(con);
+				tables_created = true;
 				break;
 			case 'g':
 				op = "client-side generate";
-				initGenerateDataClientSide(con);
+				initGenerateDataClientSide(con, tables_created);
 				break;
 			case 'G':
 				op = "server-side generate";
@@ -6953,7 +7125,6 @@ main(int argc, char **argv)
 				initialization_option_set = true;
 				break;
 			case 'j':			/* jobs */
-				benchmarking_option_set = true;
 				if (!option_parse_int(optarg, "-j/--jobs", 1, INT_MAX,
 									  &nthreads))
 				{
@@ -7183,9 +7354,10 @@ main(int argc, char **argv)
 	/*
 	 * Don't need more threads than there are clients.  (This is not merely an
 	 * optimization; throttle_delay is calculated incorrectly below if some
-	 * threads have no clients assigned to them.)
+	 * threads have no clients assigned to them.)  In init mode, -j instead
+	 * sets the number of threads loading partitions, capped further below.
 	 */
-	if (nthreads > nclients)
+	if (nthreads > nclients && !is_init_mode)
 		nthreads = nclients;
 
 	/*
@@ -7229,6 +7401,10 @@ main(int argc, char **argv)
 		/* set default method */
 		if (partitions > 0 && partition_method == PART_NONE)
 			partition_method = PART_RANGE;
+
+		/* Cap the threads to partition count */
+		if (partitions > 0 && nthreads > partitions)
+			nthreads = partitions;
 
 		if (initialize_steps == NULL)
 			initialize_steps = pg_strdup(DEFAULT_INIT_STEPS);
