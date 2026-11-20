@@ -38,10 +38,10 @@
  *
  *	int TAS_SPIN(slock_t *lock)
  *		Like TAS(), but this version is used when waiting for a lock
- *		previously found to be contended.  By default, this is the
- *		same as TAS(), but on some architectures it's better to poll a
- *		contended lock using an unlocked instruction and retry the
- *		atomic test-and-set only when it appears free.
+ *		previously found to be contended.  By default, this polls a
+ *		contended lock using an unlocked instruction and retries the atomic
+ *		test-and-set only when it appears free.  On some architectures, it
+ *		may be better to override this to be the same as TAS().
  *
  *	TAS() and TAS_SPIN() are NOT part of the API, and should never be called
  *	directly.  A platform must provide either S_LOCK() or a TAS() for the
@@ -124,17 +124,6 @@ typedef unsigned char slock_t;
 
 #define TAS(lock) tas(lock)
 
-/*
- * On Intel EM64T, it's a win to use a non-locking test before the xchg proper,
- * but only when spinning.
- *
- * See also Implementing Scalable Atomic Locks for Multi-Core Intel(tm) EM64T
- * and IA32, by Michael Chynoweth and Mary R. Lee. As of this writing, it is
- * available at:
- * http://software.intel.com/en-us/articles/implementing-scalable-atomic-locks-for-multi-core-intel-em64t-and-ia32-architectures
- */
-#define TAS_SPIN(lock)    (*(lock) ? 1 : TAS(lock))
-
 static inline int
 tas(volatile slock_t *lock)
 {
@@ -170,15 +159,9 @@ spin_delay(void)
 /*
  * For ARM/ARM64, we use the "no platform-specific knowledge" flavors below,
  * which use __sync_lock_test_and_set() and friends.  However, we do use a
- * custom TAS_SPIN() and SPIN_DELAY() for ARM64.
+ * custom SPIN_DELAY() for ARM64.
  */
 #if defined(__aarch64__)
-
-/*
- * On ARM64, it's a win to use a non-locking test before the TAS proper.  It
- * may be a win on 32-bit ARM, too, but nobody's tested it yet.
- */
-#define TAS_SPIN(lock)	(*(lock) ? 1 : TAS(lock))
 
 #define SPIN_DELAY() spin_delay()
 
@@ -301,9 +284,6 @@ do \
 typedef unsigned int slock_t;
 
 #define TAS(lock) tas(lock)
-
-/* On PPC, it's a win to use a non-locking test before the lwarx */
-#define TAS_SPIN(lock)	(*(lock) ? 1 : TAS(lock))
 
 /*
  * The second operand of addi can hold a constant zero or a register number,
@@ -605,7 +585,7 @@ extern void s_unlock(volatile slock_t *lock);
  * so we only provide a default when there is a TAS to base it on.
  */
 #if !defined(TAS_SPIN) && defined(TAS)
-#define TAS_SPIN(lock)	TAS(lock)
+#define TAS_SPIN(lock)	(*(lock) ? 1 : TAS(lock))
 #endif	 /* ! TAS_SPIN && TAS */
 
 
