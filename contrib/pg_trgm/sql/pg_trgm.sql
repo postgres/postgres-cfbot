@@ -244,3 +244,11 @@ SELECT DISTINCT city, similarity(city, 'Warsaw'), show_limit()
 SELECT set_limit(0.5);
 SELECT DISTINCT city, similarity(city, 'Warsaw'), show_limit()
   FROM restaurants WHERE city % 'Warsaw';
+
+-- Check that conflicting implicit collations are reported properly
+CREATE TEMP TABLE ic_a(x text COLLATE "C");
+CREATE TEMP TABLE ic_b(y text COLLATE "POSIX");
+INSERT INTO ic_a VALUES ('hello world');
+INSERT INTO ic_b VALUES ('hello word');
+SELECT similarity(x, y) FROM ic_a, ic_b;
+SELECT similarity(x, y COLLATE "C") FROM ic_a, ic_b;
