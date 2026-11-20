@@ -114,76 +114,11 @@
  */
 
 
-#ifdef __i386__		/* 32-bit i386 */
-
-typedef unsigned char slock_t;
-
-#define TAS(lock) tas(lock)
-
-static inline int
-tas(volatile slock_t *lock)
-{
-	slock_t		_res = 1;
-
-	/*
-	 * Use a non-locking test before asserting the bus lock.  Note that the
-	 * extra test appears to be a small loss on some x86 platforms and a small
-	 * win on others; it's by no means clear that we should keep it.
-	 *
-	 * When this was last tested, we didn't have separate TAS() and TAS_SPIN()
-	 * macros.  Nowadays it probably would be better to do a non-locking test
-	 * in TAS_SPIN() but not in TAS(), like on x86_64, but no-one's done the
-	 * testing to verify that.  Without some empirical evidence, better to
-	 * leave it alone.
-	 */
-	__asm__ __volatile__(
-		"	cmpb	$0,%1		\n"
-		"	jne		TAS%=_out	\n"
-		"	lock				\n"
-		"	xchgb	%0,%1		\n"
-		"TAS%=_out: \n"
-:		"+q"(_res), "+m"(*lock)
-:		/* no inputs */
-:		"memory", "cc");
-	return (int) _res;
-}
-
-#define SPIN_DELAY() spin_delay()
-
-static inline void
-spin_delay(void)
-{
-	/*
-	 * This sequence is equivalent to the PAUSE instruction ("rep" is
-	 * ignored by old IA32 processors if the following instruction is
-	 * not a string operation); the IA-32 Architecture Software
-	 * Developer's Manual, Vol. 3, Section 7.7.2 describes why using
-	 * PAUSE in the inner loop of a spin lock is necessary for good
-	 * performance:
-	 *
-	 *     The PAUSE instruction improves the performance of IA-32
-	 *     processors supporting Hyper-Threading Technology when
-	 *     executing spin-wait loops and other routines where one
-	 *     thread is accessing a shared lock or semaphore in a tight
-	 *     polling loop. When executing a spin-wait loop, the
-	 *     processor can suffer a severe performance penalty when
-	 *     exiting the loop because it detects a possible memory order
-	 *     violation and flushes the core processor's pipeline. The
-	 *     PAUSE instruction provides a hint to the processor that the
-	 *     code sequence is a spin-wait loop. The processor uses this
-	 *     hint to avoid the memory order violation and prevent the
-	 *     pipeline flush. In addition, the PAUSE instruction
-	 *     de-pipelines the spin-wait loop to prevent it from
-	 *     consuming execution resources excessively.
-	 */
-	__asm__ __volatile__(
-		" rep; nop			\n");
-}
-
-#endif	 /* __i386__ */
-
-
-#ifdef __x86_64__		/* AMD Opteron, Intel EM64T */
+/*
+ * For x86 (both 32-bit and 64-bit), we have custom asm blocks for both TAS()
+ * and SPIN_DELAY().
+ */
+#if defined(__i386__) || defined(__x86_64__)
 
 typedef unsigned char slock_t;
 
@@ -220,14 +155,16 @@ static inline void
 spin_delay(void)
 {
 	/*
-	 * Adding a PAUSE in the spin delay loop is demonstrably a no-op on
-	 * Opteron, but it may be of some use on EM64T, so we keep it.
+	 * "rep; nop" is the PAUSE instruction.  Intel recommends it in spin-wait
+	 * loops: it hints that the loop is a spin-wait, which avoids a pipeline
+	 * flush when the loop exits, and it keeps the loop from hogging execution
+	 * resources.  Processors that predate PAUSE treat it as a plain NOP.
 	 */
 	__asm__ __volatile__(
 		" rep; nop			\n");
 }
 
-#endif	 /* __x86_64__ */
+#endif	 /* __i386__ || __x86_64__ */
 
 
 /*
