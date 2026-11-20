@@ -1021,3 +1021,30 @@ EXPLAIN (COSTS OFF)
 SELECT a FROM gtestnn_parent2 WHERE a NOT IN (SELECT b FROM gtestnn_parent2);
 SELECT a FROM gtestnn_parent2 WHERE a NOT IN (SELECT b FROM gtestnn_parent2);
 DROP TABLE gtestnn_parent2;
+
+-- Constraint exclusion must not trust CHECK or NOT NULL constraints on
+-- virtual generated columns of parent/partitioned tables, because a child
+-- partition can override the generation expression.
+CREATE TABLE gtest33p (
+    f2 int,
+    f3 int GENERATED ALWAYS AS (nullif(f2, 10) * 2) VIRTUAL NOT NULL,
+    CONSTRAINT gtest33p_ck CHECK (f3 > 30)
+) PARTITION BY RANGE (f2);
+CREATE TABLE gtest33p1 PARTITION OF gtest33p FOR VALUES FROM (0) TO (8);
+CREATE TABLE gtest33p2 PARTITION OF gtest33p
+    (f3 WITH OPTIONS GENERATED ALWAYS AS (f2 * 22) VIRTUAL)
+    FOR VALUES FROM (8) TO (100);
+INSERT INTO gtest33p (f2) VALUES (10), (12);
+
+SET constraint_exclusion TO on;
+-- gtest33p1 is excluded by its own CHECK/NOT NULL constraints, while gtest33p2 is scanned
+EXPLAIN (COSTS OFF)
+SELECT f2, f3 FROM gtest33p WHERE NOT (f3 > 30);
+SELECT f2, f3 FROM gtest33p WHERE NOT (f3 > 30);
+
+EXPLAIN (COSTS OFF)
+SELECT f2, f3 FROM gtest33p WHERE f3 IS NULL;
+SELECT f2, f3 FROM gtest33p WHERE f3 IS NULL;
+
+RESET constraint_exclusion;
+DROP TABLE gtest33p;
