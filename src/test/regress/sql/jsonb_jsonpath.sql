@@ -1264,3 +1264,16 @@ SELECT
 	jsonb_path_query_first(s1.j, '$.s > $s', vars => s2.j) gt
 FROM str s1, str s2
 ORDER BY s1.num, s2.num;
+
+select jsonb_path_query('[null, 1, "running", "runs", "ran", "run", "runner", "jogging"]', 'lax $[*] ? (@ tsmatch "fly" tsconfig "english")');
+select jsonb_path_query('[null, 1, "running", "runs", "ran", "run", "runner", "jogging"]', 'lax $[*] ? (@ tsmatch "run" tsconfig "english")');
+select jsonb_path_query('[null, 1, "running", "runs", "ran", "run", "runner", "jogging"]', 'lax $[*] ? (@ tsmatch "run" tsconfig "simple")');
+select jsonb_path_query('[null, 1, "PostgreSQL", "postgres", "POSTGRES", "database"]', 'lax $[*] ? (@ tsmatch "Postgres" tsconfig "english")');
+select jsonb_path_query('[null, 1, "PostgreSQL", "postgres", "POSTGRES", "database"]', 'lax $[*] ? (@ tsmatch "Postgres" tsconfig "simple")');
+-- in the default tsqparser (to_tsquery) spaces are not allowed, so this should fail for syntax
+select jsonb_path_query('["fast car", "super fast car", "fast and furious", "slow car"]', 'lax $[*] ? (@ tsmatch "fast car" tsconfig "english")');
+-- if we specify "w" however it should be ok
+select jsonb_path_query('["fast car", "super fast car", "fast and furious", "slow car"]', 'lax $[*] ? (@ tsmatch "fast car" tsconfig "english" tsqparser "w")');
+-- it should also be ok if we change to a valid to_tsquery
+select jsonb_path_query('["fast car", "super fast car", "fast and furious", "slow car"]', 'lax $[*] ? (@ tsmatch "fast & car" tsconfig "english")');
+select jsonb_path_query('["fat cat", "cat fat", "fat rats"]', 'lax $[*] ? (@ tsmatch "fat & rat" tsconfig "english")');
