@@ -221,4 +221,6 @@ extern bool planstate_tree_walker_impl(PlanState *planstate,
 									   planstate_tree_walker_callback walker,
 									   void *context);
 
+extern List *planstate_tree_collect(PlanState *planstate);
+
 #endif							/* NODEFUNCS_H */
