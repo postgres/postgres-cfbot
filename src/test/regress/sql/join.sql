@@ -399,6 +399,43 @@ select aa, bb, unique1, unique1
   where bb < bb and bb is null;
 
 --
+-- A LEFT or ANTI join to a provably empty rel need not be executed at all,
+-- if nothing above references the empty side
+--
+explain (costs off)
+select i1.f1 from int4_tbl i1 left join int4_tbl i2 on false
+  where i2.f1 is null;
+select i1.f1 from int4_tbl i1 left join int4_tbl i2 on false
+  where i2.f1 is null;
+
+-- the outer rel's sort order can still be used
+explain (costs off)
+select unique1 from tenk1 left join int4_tbl i2 on false
+  order by unique1 limit 3;
+
+explain (costs off)
+select i1.f1 from int4_tbl i1
+  where not exists (select 1 from int4_tbl i2 where i2.f1 = i1.f1 and false);
+
+-- the join must stay if a pushed-down qual can filter rows
+explain (costs off)
+select i1.f1 from int4_tbl i1 left join int4_tbl i2 on false
+  where coalesce(i2.f1, 0) = 1;
+select i1.f1 from int4_tbl i1 left join int4_tbl i2 on false
+  where coalesce(i2.f1, 0) = 1;
+
+-- ... or if the empty side's columns are needed
+explain (costs off)
+select * from int4_tbl i1 left join int4_tbl i2 on false;
+
+-- no such shortcut for FULL JOIN, whose outputs are nulled by the join
+explain (costs off)
+select a.f1 from (int4_tbl a join int4_tbl b on a.f1 = b.f1)
+  full join (select * from int4_tbl where false) s on a.f1 = s.f1;
+select a.f1 from (int4_tbl a join int4_tbl b on a.f1 = b.f1)
+  full join (select * from int4_tbl where false) s on a.f1 = s.f1;
+
+--
 -- regression test: check handling of empty-FROM subquery underneath outer join
 --
 explain (costs off)
