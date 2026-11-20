@@ -436,6 +436,10 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 		scan->rs_strategy = NULL;
 	}
 
+	if (scan->rs_base.rs_flags & SO_SCAN_INSTRUMENT_STRATEGY)
+		RecordTableScanStrategy(scan->rs_base.rs_instrument,
+								GetAccessStrategyType(scan->rs_strategy));
+
 	/* Publish the new size only after the old stream has been reset. */
 	scan->rs_nblocks = nblocks;
 
@@ -557,7 +561,8 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 										   sizeof(TBMIterateResult));
 		}
 
-		if (scan->rs_read_stream && scan->rs_base.rs_instrument)
+		if ((scan->rs_base.rs_flags & SO_SCAN_INSTRUMENT) &&
+			scan->rs_read_stream)
 			read_stream_enable_stats(scan->rs_read_stream,
 									 &scan->rs_base.rs_instrument->io);
 	}
@@ -1274,7 +1279,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_nkeys = nkeys;
 	scan->rs_base.rs_flags = flags;
 	scan->rs_base.rs_parallel = parallel_scan;
-	if (flags & SO_SCAN_INSTRUMENT)
+	if (flags & (SO_SCAN_INSTRUMENT | SO_SCAN_INSTRUMENT_STRATEGY))
 		scan->rs_base.rs_instrument = palloc0_object(TableScanInstrumentation);
 	else
 		scan->rs_base.rs_instrument = NULL;

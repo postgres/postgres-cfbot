@@ -543,6 +543,20 @@ GetAccessStrategyWithSize(BufferAccessStrategyType btype, int ring_size_kb)
 }
 
 /*
+ * GetAccessStrategyType -- return the type of a buffer access strategy.
+ *
+ * A NULL strategy represents normal buffer replacement.
+ */
+BufferAccessStrategyType
+GetAccessStrategyType(BufferAccessStrategy strategy)
+{
+	if (strategy == NULL)
+		return BAS_NORMAL;
+
+	return strategy->btype;
+}
+
+/*
  * GetAccessStrategyBufferCount -- an accessor for the number of buffers in
  *		the ring
  *

@@ -39,9 +39,11 @@
 #include "executor/nodeIndexscan.h"
 #include "executor/nodeMaterial.h"
 #include "executor/nodeMemoize.h"
+#include "executor/nodeSamplescan.h"
 #include "executor/nodeSeqscan.h"
 #include "executor/nodeSort.h"
 #include "executor/nodeSubplan.h"
+#include "executor/nodeTidscan.h"
 #include "executor/nodeTidrangescan.h"
 #include "executor/tqueue.h"
 #include "jit/jit.h"
@@ -263,6 +265,11 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 			ExecSeqScanInstrumentEstimate((SeqScanState *) planstate,
 										  e->pcxt);
 			break;
+		case T_SampleScanState:
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecSampleScanInstrumentEstimate((SampleScanState *) planstate,
+											 e->pcxt);
+			break;
 		case T_IndexScanState:
 			if (planstate->plan->parallel_aware)
 				ExecIndexScanEstimate((IndexScanState *) planstate,
@@ -288,6 +295,10 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 			if (planstate->plan->parallel_aware)
 				ExecForeignScanEstimate((ForeignScanState *) planstate,
 										e->pcxt);
+			break;
+		case T_TidScanState:
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecTidScanInstrumentEstimate((TidScanState *) planstate, e->pcxt);
 			break;
 		case T_TidRangeScanState:
 			if (planstate->plan->parallel_aware)
@@ -520,6 +531,11 @@ ExecParallelInitializeDSM(PlanState *planstate,
 			ExecSeqScanInstrumentInitDSM((SeqScanState *) planstate,
 										 d->pcxt);
 			break;
+		case T_SampleScanState:
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecSampleScanInstrumentInitDSM((SampleScanState *) planstate,
+											d->pcxt);
+			break;
 		case T_IndexScanState:
 			if (planstate->plan->parallel_aware)
 				ExecIndexScanInitializeDSM((IndexScanState *) planstate,
@@ -544,6 +560,10 @@ ExecParallelInitializeDSM(PlanState *planstate,
 			if (planstate->plan->parallel_aware)
 				ExecForeignScanInitializeDSM((ForeignScanState *) planstate,
 											 d->pcxt);
+			break;
+		case T_TidScanState:
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecTidScanInstrumentInitDSM((TidScanState *) planstate, d->pcxt);
 			break;
 		case T_TidRangeScanState:
 			if (planstate->plan->parallel_aware)
@@ -1188,6 +1208,12 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 		case T_SeqScanState:
 			ExecSeqScanRetrieveInstrumentation((SeqScanState *) planstate);
 			break;
+		case T_SampleScanState:
+			ExecSampleScanRetrieveInstrumentation((SampleScanState *) planstate);
+			break;
+		case T_TidScanState:
+			ExecTidScanRetrieveInstrumentation((TidScanState *) planstate);
+			break;
 		case T_TidRangeScanState:
 			ExecTidRangeScanRetrieveInstrumentation((TidRangeScanState *) planstate);
 			break;
@@ -1434,6 +1460,11 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */
 			ExecSeqScanInstrumentInitWorker((SeqScanState *) planstate, pwcxt);
 			break;
+		case T_SampleScanState:
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecSampleScanInstrumentInitWorker((SampleScanState *) planstate,
+											   pwcxt);
+			break;
 		case T_IndexScanState:
 			if (planstate->plan->parallel_aware)
 				ExecIndexScanInitializeWorker((IndexScanState *) planstate,
@@ -1459,6 +1490,11 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 			if (planstate->plan->parallel_aware)
 				ExecForeignScanInitializeWorker((ForeignScanState *) planstate,
 												pwcxt);
+			break;
+		case T_TidScanState:
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecTidScanInstrumentInitWorker((TidScanState *) planstate,
+											pwcxt);
 			break;
 		case T_TidRangeScanState:
 			if (planstate->plan->parallel_aware)

@@ -355,7 +355,7 @@ currtid_internal(Relation rel, const ItemPointerData *tid)
 	ItemPointerCopy(tid, result);
 
 	snapshot = RegisterSnapshot(GetLatestSnapshot());
-	scan = table_beginscan_tid(rel, snapshot);
+	scan = table_beginscan_tid(rel, snapshot, SO_NONE);
 	table_tuple_get_latest_tid(scan, result);
 	table_endscan(scan);
 	UnregisterSnapshot(snapshot);
