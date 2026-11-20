@@ -516,8 +516,9 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 		return false;
 
 	if (bktype == B_CHECKPOINTER &&
-		((io_object != IOOBJECT_WAL && io_op == IOOP_READ) ||
-		 (io_op == IOOP_EVICT || io_op == IOOP_HIT)))
+		((io_object != IOOBJECT_WAL &&
+		  (io_op == IOOP_READ || io_op == IOOP_HIT)) ||
+		 io_op == IOOP_EVICT))
 		return false;
 
 	if ((bktype == B_BG_WRITER || bktype == B_CHECKPOINTER) &&
