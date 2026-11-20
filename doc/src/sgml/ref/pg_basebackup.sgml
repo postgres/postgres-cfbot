@@ -399,6 +399,21 @@ PostgreSQL documentation
             extra write-ahead logs to be saved on the source server.
            </para>
            <para>
+            When a replication slot is used for streaming and the server is
+            version 15 or later, streaming begins at the slot's restart
+            position before the backup is started, rather than at the
+            backup's start position, so the backup can contain write-ahead
+            log from before its start position.  For a slot created by
+            <application>pg_basebackup</application> (a temporary slot, or one
+            requested with <option>--create-slot</option>), the restart
+            position is the server's most recent checkpoint, or on a standby
+            its most recent restartpoint, at the time the slot is created.
+            For an existing slot given with <option>--slot</option>, it is
+            the slot's current restart position, which can be considerably
+            older.  With older servers, or with <option>--no-slot</option>,
+            streaming begins at the backup's start position.
+           </para>
+           <para>
             When tar format is used, the write-ahead log files will be
             written to a separate file named <filename>pg_wal.tar</filename>
             (if the server is a version earlier than 10, the file will be named
@@ -514,7 +529,8 @@ PostgreSQL documentation
        <para>
         Specifies that the replication slot named by the
         <literal>--slot</literal> option should be created before starting
-        the backup.  An error is raised if the slot already exists.
+        the backup.  An error is raised if the slot already exists.  The slot
+        is not dropped if the backup subsequently fails.
        </para>
       </listitem>
      </varlistentry>
