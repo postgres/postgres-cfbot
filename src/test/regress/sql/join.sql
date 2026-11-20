@@ -953,6 +953,23 @@ select * from tenk1 t1 left join
   (tbl_anti t2 left join tbl_anti t3 on t2.c = t3.c) on t1.unique1 = t2.b
 where t3.a is null;
 
+-- but this is an antijoin: the upper join clause t3.b = 1 is strict for t3,
+-- so t3 cannot be null-extended in any matching row and its NOT NULL
+-- constraint applies after all
+explain (costs off)
+select * from tenk1 t1 left join
+  (tbl_anti t2 left join tbl_anti t3 on t2.c = t3.c)
+  on t1.unique1 = t2.b and t3.b = 1
+where t3.a is null;
+
+-- this is not an antijoin: the upper join clause is not strict for t3, so it
+-- cannot rule out matching rows with t3 null-extended
+explain (costs off)
+select * from tenk1 t1 left join
+  (tbl_anti t2 left join tbl_anti t3 on t2.c = t3.c)
+  on t1.unique1 = t2.b and (t3.b = 1 or t3.b is null)
+where t3.a is null;
+
 -- this is an antijoin: the strict join clause t2.c = t3.c guarantees t3.c is
 -- non-null
 explain (costs off)
@@ -1059,6 +1076,15 @@ where t2.a is null;
 explain (costs off)
 select * from tbl_anti t1 full join
   (tbl_anti t2 left join tbl_anti t3 on t2.c = t3.c) on t1.b = t2.b
+where t3.a is null;
+
+-- but this is an antijoin: the strict inner-join clause t3.b = t4.b within
+-- the right input guarantees t3 is not null-extended in any row that input
+-- emits, so its NOT NULL constraint applies after all
+explain (costs off)
+select * from tbl_anti t1 full join
+  (tbl_anti t2 left join tbl_anti t3 on t2.c = t3.c
+   join tbl_anti t4 on t3.b = t4.b) on t1.b = t2.b
 where t3.a is null;
 
 -- once the full join is reduced to an antijoin, its own quals can be passed
