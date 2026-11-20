@@ -55,6 +55,29 @@ is($node->safe_psql("postgres", "SELECT 1;"),
 
 $node->stop;
 
+# A backup_label file blocks pg_resetwal, even with --force or --dry-run.
+my $backup_label = $node->data_dir . '/backup_label';
+append_to_file($backup_label, "START WAL LOCATION: 0/2000028\n");
+command_fails_like(
+	[ 'pg_resetwal', $node->data_dir ],
+	qr/backup label file "backup_label" exists/,
+	'fails with backup_label');
+command_fails_like(
+	[ 'pg_resetwal', '--force', $node->data_dir ],
+	qr/backup label file "backup_label" exists/,
+	'fails with backup_label even with force');
+command_fails_like(
+	[ 'pg_resetwal', '--dry-run', $node->data_dir ],
+	qr/backup label file "backup_label" exists/,
+	'fails with backup_label even with dry-run');
+unlink($backup_label) or die "could not remove $backup_label: $!";
+command_ok([ 'pg_resetwal', $node->data_dir ],
+	'runs after removing backup_label');
+$node->start;
+is($node->safe_psql("postgres", "SELECT 1;"),
+	1, 'server running and working after removing backup_label');
+$node->stop;
+
 # check various command-line handling
 
 # Note: This test intends to check that a nonexistent data directory
