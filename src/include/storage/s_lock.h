@@ -231,26 +231,10 @@ spin_delay(void)
 
 
 /*
- * On ARM and ARM64, we use __sync_lock_test_and_set(int *, int) if available.
- *
- * We use the int-width variant of the builtin because it works on more chips
- * than other widths.
+ * For ARM/ARM64, we use the "no platform-specific knowledge" flavors below,
+ * which use __sync_lock_test_and_set() and friends.  However, we do use a
+ * custom TAS_SPIN() and SPIN_DELAY() for ARM64.
  */
-#if defined(__arm__) || defined(__aarch64__)
-#ifdef HAVE_GCC__SYNC_INT32_TAS
-
-#define TAS(lock) tas(lock)
-
-typedef int slock_t;
-
-static inline int
-tas(volatile slock_t *lock)
-{
-	return __sync_lock_test_and_set(lock, 1);
-}
-
-#define S_UNLOCK(lock) __sync_lock_release(lock)
-
 #if defined(__aarch64__)
 
 /*
@@ -274,8 +258,6 @@ spin_delay(void)
 }
 
 #endif	 /* __aarch64__ */
-#endif	 /* HAVE_GCC__SYNC_INT32_TAS */
-#endif	 /* __arm__ || __aarch64__ */
 
 
 /* S/390 and S/390x Linux (32- and 64-bit zSeries) */
@@ -513,7 +495,6 @@ do \
  * provides __sync_lock_test_and_set(), use that.  Prefer the int-width
  * version over the char-width version if we have both, on the rather dubious
  * grounds that that's known to be more likely to work in the ARM ecosystem.
- * (But we dealt with ARM above.)
  */
 #if !defined(TAS)
 
