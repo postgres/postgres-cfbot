@@ -202,7 +202,7 @@ dependencies_object_end(void *state)
 	 * Allocate enough space for the dependency, the attribute numbers in the
 	 * list and the final attribute number for the dependency.
 	 */
-	dep = palloc0(offsetof(MVDependency, attributes) + ((natts + 1) * sizeof(AttrNumber)));
+	dep = palloc0_flex_array(MVDependency, attributes, natts + 1);
 	dep->nattributes = natts + 1;
 
 	dep->attributes[natts] = parse->dependency;

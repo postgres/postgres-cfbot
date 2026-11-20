@@ -64,8 +64,7 @@ simple_string_list_append(SimpleStringList *list, const char *val)
 {
 	SimpleStringListCell *cell;
 
-	cell = (SimpleStringListCell *)
-		pg_malloc(offsetof(SimpleStringListCell, val) + strlen(val) + 1);
+	cell = pg_malloc_flex_array(SimpleStringListCell, val, strlen(val) + 1);
 
 	cell->next = NULL;
 	cell->touched = false;

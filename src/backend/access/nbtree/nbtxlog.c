@@ -556,8 +556,8 @@ btree_xlog_updates(Page page, OffsetNumber *updatedoffsets,
 		itemid = PageGetItemId(page, updatedoffsets[i]);
 		origtuple = (IndexTuple) PageGetItem(page, itemid);
 
-		vacposting = palloc(offsetof(BTVacuumPostingData, deletetids) +
-							updates->ndeletedtids * sizeof(uint16));
+		vacposting = palloc_flex_array(BTVacuumPostingData, deletetids,
+									   updates->ndeletedtids);
 		vacposting->updatedoffset = updatedoffsets[i];
 		vacposting->itup = origtuple;
 		vacposting->ndeletedtids = updates->ndeletedtids;
