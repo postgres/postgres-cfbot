@@ -2562,7 +2562,7 @@
   proname => 'interval_larger', prorettype => 'interval',
   proargtypes => 'interval interval', prosrc => 'interval_larger' },
 { oid => '1199', descr => 'date difference preserving months and years',
-  proname => 'age', prorettype => 'interval',
+  proname => 'age', provolatile => 's', prorettype => 'interval',
   proargtypes => 'timestamptz timestamptz', prosrc => 'timestamptz_age' },
 
 # OIDS 1200 - 1299
