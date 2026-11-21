@@ -177,7 +177,11 @@ SELECT '1,1'::cube > '1,2'::cube AS bool;
 SELECT '1,1'::cube < '1,2'::cube AS bool;
 
 SELECT '(2,0),(3,1)'::cube             > '(2,0,0,0,0),(3,1,0,0,1)'::cube AS bool;
-SELECT '(2,0),(3,1)'::cube             < '(2,0,0,0,0),(3,1,0,0,1)'::cube AS bool;
+-- Check that the ordering of these cubes stays transitive with a third cube.
+WITH t(a,b,c) AS (VALUES ('(2,0),(3,1)'::cube,
+                          '(2,0,0,0,0),(3,1,0,0,1)'::cube,
+                          '(2,0,1)'::cube))
+SELECT a < b AS a_lt_b, b < c AS b_lt_c, a < c AS a_lt_c FROM t;
 SELECT '(2,0),(3,1)'::cube             > '(2,0,0,0,1),(3,1,0,0,0)'::cube AS bool;
 SELECT '(2,0),(3,1)'::cube             < '(2,0,0,0,1),(3,1,0,0,0)'::cube AS bool;
 SELECT '(2,0),(3,1)'::cube             > '(2,0,0,0,0),(3,1,0,0,0)'::cube AS bool;
@@ -210,6 +214,7 @@ SELECT '0'::cube                 <@ '0'::cube                        AS bool;
 SELECT '0,0,0'::cube             <@ '0,0,0'::cube                    AS bool;
 SELECT '0,0'::cube               <@ '0,0,1'::cube                    AS bool;
 SELECT '0,0,0'::cube             <@ '0,0,1'::cube                    AS bool;
+SELECT '0,0'::cube               <@ '(0,0,-1),(0,0,-2)'::cube       AS bool;
 SELECT '1,0,0'::cube             <@ '0,0,1'::cube                    AS bool;
 SELECT '(1,0,0),(0,0,1)'::cube   <@ '(1,0,0),(0,0,1)'::cube          AS bool;
 SELECT '(1,0,0),(0,0,1)'::cube   <@ '(-1,-1,-1),(1,1,1)'::cube       AS bool;
@@ -401,6 +406,9 @@ RESET enable_bitmapscan;
 -- Test kNN
 INSERT INTO test_cube VALUES ('(1,1)'), ('(100000)'), ('(0, 100000)'); -- Some corner cases
 SET enable_seqscan = false;
+
+-- The one-dimensional point (100000) has zero in its second dimension.
+SELECT c FROM test_cube WHERE c <@ '(100000,1)';
 
 -- Test different metrics
 SET extra_float_digits = 0;

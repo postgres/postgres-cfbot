@@ -226,8 +226,10 @@
    In addition to the above operators, the usual comparison
    operators shown in <xref linkend="functions-comparison-op-table"/> are
    available for type <type>cube</type>.  These
-   operators first compare the first coordinates, and if those are equal,
-   compare the second coordinates, etc.  They exist mainly to support the
+   operators compare the lower bounds in dimension order, followed by
+   the upper bounds in the same order.  Missing bounds are taken as zero.
+   If all bounds compare equal, the cube with fewer dimensions sorts first.
+   They exist mainly to support the
    b-tree index operator class for <type>cube</type>, which can be useful for
    example if you would like a UNIQUE constraint on a <type>cube</type> column.
    Otherwise, this ordering is not of much practical use.
