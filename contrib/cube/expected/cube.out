@@ -773,10 +773,16 @@ SELECT '0,0,0'::cube             <@ '0,0,0'::cube                    AS bool;
 SELECT '0,0'::cube               <@ '0,0,1'::cube                    AS bool;
  bool 
 ------
- t
+ f
 (1 row)
 
 SELECT '0,0,0'::cube             <@ '0,0,1'::cube                    AS bool;
+ bool 
+------
+ f
+(1 row)
+
+SELECT '0,0'::cube               <@ '(0,0,-1),(0,0,-2)'::cube       AS bool;
  bool 
 ------
  f
@@ -866,7 +872,7 @@ SELECT '0,0,0'::cube                    @> '0,0,0'::cube             AS bool;
 SELECT '0,0,1'::cube                    @> '0,0'::cube               AS bool;
  bool 
 ------
- t
+ f
 (1 row)
 
 SELECT '0,0,1'::cube                    @> '0,0,0'::cube             AS bool;
@@ -1583,6 +1589,12 @@ RESET enable_bitmapscan;
 -- Test kNN
 INSERT INTO test_cube VALUES ('(1,1)'), ('(100000)'), ('(0, 100000)'); -- Some corner cases
 SET enable_seqscan = false;
+-- The one-dimensional point (100000) has zero in its second dimension.
+SELECT c FROM test_cube WHERE c <@ '(100000,1)';
+ c 
+---
+(0 rows)
+
 -- Test different metrics
 SET extra_float_digits = 0;
 SELECT *, c <-> '(100, 100),(500, 500)'::cube as dist FROM test_cube ORDER BY c <-> '(100, 100),(500, 500)'::cube LIMIT 5;
