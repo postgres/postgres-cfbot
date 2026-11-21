@@ -1287,28 +1287,59 @@ remove_self_join_rel(PlannerInfo *root,
 	Assert(found_relid);
 
 	/*
-	 * If the removed relation has a row mark, transfer it to the remaining
-	 * one.
+	 * If the relations have row marks, merge their locking requirements into
+	 * the kept relation's mark, then discard the removed relation's mark.
+	 * The caller has rejected cases in which only one mark requires row
+	 * locking.
 	 *
-	 * If both rels have row marks, just keep the one corresponding to the
-	 * remaining relation because we verified earlier that they have the same
-	 * strength.
+	 * When the marks have different lock strengths, retain the stronger lock
+	 * and its waitPolicy.  This produces the same result as an execution of
+	 * the unoptimized query in which the scan requesting the stronger lock
+	 * reaches each tuple first.  Choosing that ordering also avoids the risk
+	 * of lock-upgrade deadlocks that would exist if the weaker lock were
+	 * acquired first.
+	 *
+	 * For equal lock strengths, take the greater waitPolicy, as
+	 * applyLockingClause() does when combining locking clauses for one RTE.
 	 */
 	if (rmark)
 	{
-		if (kmark)
-		{
-			Assert(kmark->markType == rmark->markType);
+		Assert(kmark != NULL);
+		Assert(kmark->rti == kmark->prti);
+		Assert(rmark->rti == rmark->prti);
+		Assert(!kmark->isParent);
+		Assert(!rmark->isParent);
 
-			root->rowMarks = list_delete_ptr(root->rowMarks, rmark);
-		}
-		else
-		{
-			/* Shouldn't have inheritance children yet. */
-			Assert(rmark->rti == rmark->prti);
+		/*
+		 * Since SJE only considers regular tables (not foreign tables),
+		 * we don't expect to see ROW_MARK_COPY marks.  It's important to
+		 * check this since the associated row-identity Vars in the tlist
+		 * are different for COPY marks.
+		 */
+		Assert(kmark->markType != ROW_MARK_COPY);
+		Assert(rmark->markType != ROW_MARK_COPY);
 
-			rmark->rti = rmark->prti = toKeep->relid;
+		/* Merge the lock strengths and waitPolicies as described above */
+		if (rmark->strength > kmark->strength)
+		{
+			kmark->strength = rmark->strength;
+			/* copy fields derived from strength */
+			kmark->markType = rmark->markType;
+			kmark->allMarkTypes = rmark->allMarkTypes;
+			/* adopt rmark's waitPolicy too */
+			kmark->waitPolicy = rmark->waitPolicy;
 		}
+		else if (rmark->strength == kmark->strength)
+		{
+			/* adopt the greater waitPolicy */
+			kmark->waitPolicy = Max(kmark->waitPolicy, rmark->waitPolicy);
+		}
+		/*
+		 * Now drop the rmark from root->rowMarks.  Ideally we'd also get
+		 * rid of the rmark's associated row-identity Var in the tlist.
+		 * But that's just a ctid, so it doesn't seem worth the trouble.
+		 */
+		root->rowMarks = list_delete_ptr(root->rowMarks, rmark);
 	}
 }
 
@@ -1826,10 +1857,15 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 				continue;
 
 			/*
-			 * Check Row Marks equivalence. We can't remove the join if the
-			 * relations have row marks of different strength (e.g., one is
-			 * locked FOR UPDATE, and another just has ROW_MARK_REFERENCE for
-			 * EvalPlanQual rechecking).
+			 * If row marks are needed, preprocess_rowmarks() creates one for
+			 * every non-target base relation.  Target relations aren't SJE
+			 * candidates, so these relations must either both have row marks or
+			 * both lack them.
+			 *
+			 * We cannot merge a locking mark with a non-locking mark, since they
+			 * can represent different sets of row values.  Different locking mark
+			 * types are compatible, however: remove_self_join_rel() will retain
+			 * the stronger lock requirement.
 			 */
 			foreach(lc, root->rowMarks)
 			{
@@ -1849,7 +1885,11 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 				if (kmark && rmark)
 					break;
 			}
-			if (kmark && rmark && kmark->markType != rmark->markType)
+			Assert((kmark == NULL) == (rmark == NULL));
+			if (kmark &&
+				kmark->markType != rmark->markType &&
+				(!RowMarkRequiresRowShareLock(kmark->markType) ||
+				 !RowMarkRequiresRowShareLock(rmark->markType)))
 				continue;
 
 			/*
