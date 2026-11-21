@@ -638,12 +638,13 @@ typedef struct ExprEvalStep
 		{
 			bool		has_nulls;
 			bool		inclause;	/* true for IN and false for NOT IN */
-			bool		null_lhs_result;	/* for non-strict lookups, we
-											 * cache what looking up NULL
+			bool		null_lhs_result;	/* we cache what looking up NULL
 											 * returns. */
 			bool		null_lhs_isnull;
 			struct ScalarArrayOpExprHashTable *elements_tab;
-			FmgrInfo   *finfo;	/* function's lookup data */
+
+			/* the array, evaluated once */
+			struct ExprState *array_expr;
 			FunctionCallInfo fcinfo_data;	/* arguments etc */
 			ScalarArrayOpExpr *saop;
 		}			hashedscalararrayop;
