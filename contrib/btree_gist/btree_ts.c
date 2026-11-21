@@ -7,6 +7,7 @@
 
 #include "btree_gist.h"
 #include "btree_utils_num.h"
+#include "common/int.h"
 #include "utils/fmgrprotos.h"
 #include "utils/timestamp.h"
 #include "utils/float.h"
@@ -111,9 +112,19 @@ gbt_ts_dist(const void *a, const void *b, FmgrInfo *flinfo)
 	const Timestamp *aa = (const Timestamp *) a;
 	const Timestamp *bb = (const Timestamp *) b;
 	Interval   *i;
+	int64		diff;
 
 	if (TIMESTAMP_NOT_FINITE(*aa) || TIMESTAMP_NOT_FINITE(*bb))
 		return get_float8_infinity();
+
+	/*
+	 * Some valid timestamps are too far apart for their difference to fit in
+	 * an interval.  Don't throw an error for those, since KNN searches
+	 * compute distances for index entries they merely visit; compute the
+	 * distance in double instead.
+	 */
+	if (pg_sub_s64_overflow(*aa, *bb, &diff))
+		return fabs(((float8) *aa - (float8) *bb) / USECS_PER_SEC);
 
 	i = DatumGetIntervalP(DirectFunctionCall2(timestamp_mi,
 											  TimestampGetDatum(*aa),
