@@ -127,6 +127,11 @@ step s1_trunc_ins_since_vacuum {
     FROM test_stat_oid AS tso
     WHERE tso.name = 'test_stat_trunc'
 }
+step s1_trunc_dead_tuples {
+    SELECT pg_stat_get_dead_tuples(tso.oid) AS n_dead_tup
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_trunc'
+}
 
 # SLRU stats steps
 step s1_slru_save_stats {
@@ -599,6 +604,7 @@ permutation
   s2_ff
   s1_table_stats
   s1_trunc_ins_since_vacuum
+  s1_trunc_dead_tuples
 
 # S1 prepares, S1 aborts prepared
 permutation
@@ -637,6 +643,7 @@ permutation
   s1_ff s2_ff
   s1_table_stats
   s1_trunc_ins_since_vacuum
+  s1_trunc_dead_tuples
 
 
 ### 2PC: rolled back drop maintains live / dead counters
