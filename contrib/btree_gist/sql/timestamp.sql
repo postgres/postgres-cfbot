@@ -43,3 +43,7 @@ INSERT INTO timestampfar VALUES ('4714-11-24 00:00:00 BC'), ('294276-12-31 23:59
 EXPLAIN (COSTS OFF)
 SELECT a FROM timestampfar ORDER BY a <-> '294276-12-31 23:59:59' LIMIT 1;
 SELECT a FROM timestampfar ORDER BY a <-> '294276-12-31 23:59:59' LIMIT 1;
+
+-- same-sign infinities are zero distance apart
+SELECT a, a <-> 'infinity' FROM timestamptmp ORDER BY a <-> 'infinity' LIMIT 3;
+SELECT a, a <-> '-infinity' FROM timestamptmp ORDER BY a <-> '-infinity' LIMIT 3;

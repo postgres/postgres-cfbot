@@ -114,8 +114,12 @@ gbt_ts_dist(const void *a, const void *b, FmgrInfo *flinfo)
 	Interval   *i;
 	int64		diff;
 
+	/*
+	 * Treat same-sign infinities as equal, as the float8 opclass does, and
+	 * any other infinite input as infinitely far away.
+	 */
 	if (TIMESTAMP_NOT_FINITE(*aa) || TIMESTAMP_NOT_FINITE(*bb))
-		return get_float8_infinity();
+		return (*aa == *bb) ? 0.0 : get_float8_infinity();
 
 	/*
 	 * Some valid timestamps are too far apart for their difference to fit in
@@ -157,11 +161,15 @@ ts_dist(PG_FUNCTION_ARGS)
 
 	if (TIMESTAMP_NOT_FINITE(a) || TIMESTAMP_NOT_FINITE(b))
 	{
-		Interval   *p = palloc_object(Interval);
+		Interval   *p = palloc0_object(Interval);
 
-		p->day = INT_MAX;
-		p->month = INT_MAX;
-		p->time = PG_INT64_MAX;
+		/* same-sign infinities are equal, as in gbt_ts_dist */
+		if (a != b)
+		{
+			p->day = INT_MAX;
+			p->month = INT_MAX;
+			p->time = PG_INT64_MAX;
+		}
 		PG_RETURN_INTERVAL_P(p);
 	}
 	else
@@ -181,11 +189,15 @@ tstz_dist(PG_FUNCTION_ARGS)
 
 	if (TIMESTAMP_NOT_FINITE(a) || TIMESTAMP_NOT_FINITE(b))
 	{
-		Interval   *p = palloc_object(Interval);
+		Interval   *p = palloc0_object(Interval);
 
-		p->day = INT_MAX;
-		p->month = INT_MAX;
-		p->time = PG_INT64_MAX;
+		/* same-sign infinities are equal, as in gbt_ts_dist */
+		if (a != b)
+		{
+			p->day = INT_MAX;
+			p->month = INT_MAX;
+			p->time = PG_INT64_MAX;
+		}
 		PG_RETURN_INTERVAL_P(p);
 	}
 
