@@ -177,7 +177,11 @@ SELECT '1,1'::cube > '1,2'::cube AS bool;
 SELECT '1,1'::cube < '1,2'::cube AS bool;
 
 SELECT '(2,0),(3,1)'::cube             > '(2,0,0,0,0),(3,1,0,0,1)'::cube AS bool;
-SELECT '(2,0),(3,1)'::cube             < '(2,0,0,0,0),(3,1,0,0,1)'::cube AS bool;
+-- Check that the ordering of these cubes stays transitive with a third cube.
+WITH t(a,b,c) AS (VALUES ('(2,0),(3,1)'::cube,
+                          '(2,0,0,0,0),(3,1,0,0,1)'::cube,
+                          '(2,0,1)'::cube))
+SELECT a < b AS a_lt_b, b < c AS b_lt_c, a < c AS a_lt_c FROM t;
 SELECT '(2,0),(3,1)'::cube             > '(2,0,0,0,1),(3,1,0,0,0)'::cube AS bool;
 SELECT '(2,0),(3,1)'::cube             < '(2,0,0,0,1),(3,1,0,0,0)'::cube AS bool;
 SELECT '(2,0),(3,1)'::cube             > '(2,0,0,0,0),(3,1,0,0,0)'::cube AS bool;
