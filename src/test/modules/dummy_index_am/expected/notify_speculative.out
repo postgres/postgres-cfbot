@@ -1,0 +1,105 @@
+Parsed test spec with 3 sessions
+
+starting permutation: c_lock c_order s1_nothing s2_insert c_unlock c_show
+step c_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step c_order: SELECT 'spec_idx'::regclass::oid < 'spec_key'::regclass::oid;
+?column?
+--------
+t       
+(1 row)
+
+step s1_nothing: INSERT INTO spec_tab VALUES (1, 10) ON CONFLICT DO NOTHING; <waiting ...>
+step s2_insert: INSERT INTO spec_tab VALUES (1, 20);
+step c_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+s1: NOTICE:  spec_idx: deleted 10
+step s1_nothing: <... completed>
+step c_show: SELECT * FROM spec_tab ORDER BY k;
+k| v
+-+--
+1|20
+(1 row)
+
+
+starting permutation: c_lock s1_update s2_insert c_unlock c_show
+step c_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step s1_update: INSERT INTO spec_tab VALUES (1, 10) ON CONFLICT (k) DO UPDATE SET v = excluded.v; <waiting ...>
+step s2_insert: INSERT INTO spec_tab VALUES (1, 20);
+step c_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+s1: NOTICE:  spec_idx: deleted 10
+s1: NOTICE:  spec_idx: deleted 20
+step s1_update: <... completed>
+step c_show: SELECT * FROM spec_tab ORDER BY k;
+k| v
+-+--
+1|10
+(1 row)
+
+
+starting permutation: c_lock s1_nothing s2_other c_unlock c_show
+step c_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step s1_nothing: INSERT INTO spec_tab VALUES (1, 10) ON CONFLICT DO NOTHING; <waiting ...>
+step s2_other: INSERT INTO spec_tab VALUES (2, 20);
+step c_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step s1_nothing: <... completed>
+step c_show: SELECT * FROM spec_tab ORDER BY k;
+k| v
+-+--
+1|10
+2|20
+(2 rows)
+
+
+starting permutation: c_lock s1_nothing s2_begin s2_insert s2_abort c_unlock c_show
+step c_lock: SELECT pg_advisory_lock(1);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step s1_nothing: INSERT INTO spec_tab VALUES (1, 10) ON CONFLICT DO NOTHING; <waiting ...>
+step s2_begin: BEGIN;
+step s2_insert: INSERT INTO spec_tab VALUES (1, 20);
+step s2_abort: ROLLBACK;
+step c_unlock: SELECT pg_advisory_unlock(1);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step s1_nothing: <... completed>
+step c_show: SELECT * FROM spec_tab ORDER BY k;
+k| v
+-+--
+1|10
+(1 row)
+
