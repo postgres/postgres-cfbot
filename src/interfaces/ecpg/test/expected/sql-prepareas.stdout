@@ -64,3 +64,11 @@ execute ident_name(:ivar1,:ivar2)
 prepare "include_ _name" from :v_query
 execute "include_ _name"(:ivar1,:ivar2)
 1 2
++++++ Test for a NULL value in EXECUTE(exprlist) +++++
+rows with NULL c1 (must be 1) = 1
++++++ Test for a quoted value before another value in EXECUTE(exprlist) +++++
+rows stored (must be 4) = 4
+eleven values stored (must be 1) = 1
++++++ Test for quoting values in EXECUTE(exprlist) +++++
+rows in test_marker (must be 0) = 0
+rows stored (must be 2) = 2

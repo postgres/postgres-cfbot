@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-
+#include <pgtypes_date.h>
 exec sql include ../regression;
 exec sql whenever sqlerror sqlprint;
 
@@ -20,6 +20,7 @@ int main(void)
 {
 	exec sql begin declare section;
 	int ivar1 = 1, ivar2 = 2;
+	short v_ind = -1;
 	char v_include_dq_name[16], v_include_ws_name[16], v_normal_name[16], v_query[64];
 	exec sql end declare section;
 
@@ -190,6 +191,91 @@ int main(void)
 	exec sql execute "include_ _name"(:ivar1,:ivar2);
 	check_result_of_insert();
 	exec sql deallocate "include_ _name";
+
+	/*
+	 * A NULL host-variable value (negative indicator) passed to
+	 * EXECUTE(exprlist) must be inserted as the SQL keyword NULL, not
+	 * dereferenced as a null pointer.
+	 */
+	exec sql truncate test;
+	printf("+++++ Test for a NULL value in EXECUTE(exprlist) +++++\n");
+	exec sql prepare stmt_null(int,int) as insert into test values($1,$2);
+	exec sql execute stmt_null(:ivar1:v_ind, :ivar2);
+	exec sql select count(*) into :ivar1 from test where c1 is null;
+	printf("rows with NULL c1 (must be 1) = %d\n", ivar1);
+	exec sql deallocate stmt_null;
+
+	/*
+	 * A value that contains a quote or $n (or ?, with -r questionmarks) must
+	 * not hide the placeholder after it or be taken for one.  Every value is
+	 * inserted as a quoted literal.  Placeholders from $10 up must be
+	 * replaced whole.  All rows must be stored as given.
+	 */
+	{
+		exec sql begin declare section;
+		bytea v_bytea[4];
+		char v_literal[16];
+		exec sql end declare section;
+
+		printf("+++++ Test for a quoted value before another value in EXECUTE(exprlist) +++++\n");
+		exec sql create table test_pos (a text, b int);
+		exec sql prepare stmt_pos_b(bytea,int) as insert into test_pos values(encode($1, 'escape'),$2);
+		v_bytea.len = 2;
+		memcpy(v_bytea.arr, "ab", 2);
+		exec sql execute stmt_pos_b(:v_bytea, :ivar2);
+		exec sql prepare stmt_pos_t(text,int) as insert into test_pos values($1,$2);
+		strcpy(v_literal, "cd");
+		exec sql execute stmt_pos_t(:v_literal, :ivar2);
+		strcpy(v_literal, "x$2");
+		exec sql execute stmt_pos_t(:v_literal, :ivar2);
+		strcpy(v_literal, "a?b");
+		exec sql execute stmt_pos_t(:v_literal, :ivar2);
+		exec sql select count(*) into :ivar1 from test_pos where a in ('ab', 'cd', 'x$2', 'a?b') and b = 2;
+		printf("rows stored (must be 4) = %d\n", ivar1);
+		exec sql prepare stmt_pos_11(int,int,int,int,int,int,int,int,int,int,int) as
+			insert into test_pos values(concat_ws(',',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10),$11);
+		exec sql execute stmt_pos_11(:ivar2, :ivar2, :ivar2, :ivar2, :ivar2, :ivar2,
+									 :ivar2, :ivar2, :ivar2, :ivar2, :ivar2);
+		exec sql select count(*) into :ivar1 from test_pos where a = '2,2,2,2,2,2,2,2,2,2' and b = 2;
+		printf("eleven values stored (must be 1) = %d\n", ivar1);
+		exec sql deallocate stmt_pos_b;
+		exec sql deallocate stmt_pos_t;
+		exec sql deallocate stmt_pos_11;
+		exec sql drop table test_pos;
+	}
+
+	/*
+	 * A character value containing SQL text must be stored as is, and the
+	 * INSERT into test_marker in it must not run.  Boolean, date and NaN
+	 * values, which can't be written as bare words, must be stored too.
+	 */
+	{
+		exec sql begin declare section;
+		char v_text[64];
+		bool v_bool = true;
+		date v_date;
+		double v_double;
+		exec sql end declare section;
+
+		printf("+++++ Test for quoting values in EXECUTE(exprlist) +++++\n");
+		exec sql create table test_quote (t text, b bool, d date, f float8);
+		exec sql create table test_marker (c int);
+		exec sql prepare stmt_q(text,bool,date,float8) as insert into test_quote values($1,$2,$3,$4);
+		v_date = PGTYPESdate_from_asc("2026-11-18", NULL);
+		v_double = strtod("NaN", NULL);
+		strcpy(v_text, "x'); insert into test_marker values(1); --");
+		exec sql execute stmt_q(:v_text, :v_bool, :v_date, :v_double);
+		strcpy(v_text, "O'Brien");
+		exec sql execute stmt_q(:v_text, :v_bool, :v_date, :v_double);
+		exec sql select count(*) into :ivar1 from test_marker;
+		printf("rows in test_marker (must be 0) = %d\n", ivar1);
+		exec sql select count(*) into :ivar1 from test_quote
+			where (t = 'O''Brien' or t like 'x''); insert%') and b and d = '2026-11-18' and f = 'NaN';
+		printf("rows stored (must be 2) = %d\n", ivar1);
+		exec sql deallocate stmt_q;
+		exec sql drop table test_quote;
+		exec sql drop table test_marker;
+	}
 
 	exec sql drop table test;
 	exec sql commit work;

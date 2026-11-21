@@ -1999,6 +1999,43 @@ EXEC SQL EXECUTE mystmt USING 42, 'foobar';
    </para>
 
    <para>
+    A prepared statement can also be executed by writing its parameter
+    values in parentheses after the statement name, as in the SQL
+    command <xref linkend="sql-execute"/>:
+<programlisting>
+EXEC SQL PREPARE mystmt2(int, text) AS INSERT INTO test1 VALUES($1, $2);
+ ...
+EXEC SQL EXECUTE mystmt2(:id, :name);
+</programlisting>
+    In this form, host variables in the parenthesized list are not sent
+    to the server as separate parameter values.  Instead, the value of
+    each host variable is written into the text of
+    the <command>EXECUTE</command> command as a quoted SQL literal,
+    escaped as needed, so the value is passed exactly as it is.  This is
+    the case regardless of how the statement was prepared.  To pass host
+    variable values as separate parameter values, use
+    <literal>USING</literal> as shown above.
+   </para>
+
+   <note>
+    <para>
+     Before <productname>PostgreSQL</productname> 20,
+     ecpglib inserted the values in this list
+     into the command text without quoting, so a character host variable
+     had to contain a complete, quoted SQL literal, and boolean and
+     date/time host variables did not work.  A program that puts a quoted
+     literal or other SQL text into a character host variable in this list
+     must be changed to pass the plain value; otherwise the quotes or SQL
+     text become part of the value.  Numeric values are now also passed
+     as quoted literals and converted the same way as with
+     <literal>USING</literal>; for example, a <type>double</type> host
+     variable containing 1.5 for an <type>integer</type> parameter is now
+     an error instead of being rounded.  What counts is the version of
+     ecpglib the program uses, not the server version.
+    </para>
+   </note>
+
+   <para>
     When you don't need the prepared statement anymore, you should
     deallocate it:
 <programlisting>
@@ -7659,6 +7696,13 @@ PREPARE <replaceable class="parameter">prepared_name</replaceable> FROM <replace
      later be handled according to C rules; but <literal>\"</literal>
      causes an immediate syntax error because it is seen as ending the
      literal.
+    </para>
+
+    <para>
+     A prepared statement can be executed with <literal>USING</literal>,
+     or with its parameter values in parentheses after the statement name.
+     In the second form, host variable values are written into the
+     command text as quoted SQL literals; see <xref linkend="ecpg-dynamic-input"/>.
     </para>
    </refsect1>
 
