@@ -880,28 +880,33 @@ IoWorkerMain(const void *startup_data, size_t startup_data_len)
 			}
 
 			ioh = &pgaio_ctl->io_handles[io_index];
+
+			/*
+			 * Must be set before error_ioh.  There's not really a good errno
+			 * we can report here.
+			 */
+			error_errno = ENOENT;
 			error_ioh = ioh;
 			errcallback.arg = ioh;
+
+			/*
+			 * Prevent interrupts between pgaio_io_reopen() and
+			 * pgaio_io_perform_synchronously() that otherwise could lead to
+			 * the FD getting closed in that window.  Also hold them while
+			 * logging, as ereport() can process a die interrupt and exit
+			 * without completing the IO.
+			 */
+			HOLD_INTERRUPTS();
 
 			pgaio_debug_io(DEBUG4, ioh,
 						   "worker %d processing IO",
 						   MyIoWorkerId);
 
 			/*
-			 * Prevent interrupts between pgaio_io_reopen() and
-			 * pgaio_io_perform_synchronously() that otherwise could lead to
-			 * the FD getting closed in that window.
-			 */
-			HOLD_INTERRUPTS();
-
-			/*
 			 * It's very unlikely, but possible, that reopen fails. E.g. due
 			 * to memory allocations failing or file permissions changing or
 			 * such.  In that case we need to fail the IO.
-			 *
-			 * There's not really a good errno we can report here.
 			 */
-			error_errno = ENOENT;
 			pgaio_io_reopen(ioh);
 
 			/*
