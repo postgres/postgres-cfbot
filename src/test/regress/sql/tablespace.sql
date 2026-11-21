@@ -420,6 +420,35 @@ REINDEX (TABLESPACE regress_tblspace) TABLE tablespace_table; -- fail
 REINDEX (TABLESPACE regress_tblspace, CONCURRENTLY) TABLE tablespace_table; -- fail
 RESET ROLE;
 
+-- pg_stat_tablespace credits a relation moved to another tablespace to the
+-- new one from the move on.  What it did before belongs to the old one.
+-- pgstat_info is kept across a relcache rebuild, so doing this in a
+-- transaction that already used the relation exercises
+-- pgstat_relation_update_tablespace().  The two tablespaces hold nothing but
+-- this table, so the numbers are exact.
+SET allow_in_place_tablespaces = true;
+CREATE TABLESPACE regress_tblspace_stats1 LOCATION '';
+CREATE TABLESPACE regress_tblspace_stats2 LOCATION '';
+SELECT oid AS stats2_oid FROM pg_tablespace
+  WHERE spcname = 'regress_tblspace_stats2' \gset
+CREATE TABLE tablespace_stats_move (a int)
+  WITH (autovacuum_enabled = off) TABLESPACE regress_tblspace_stats1;
+INSERT INTO tablespace_stats_move SELECT generate_series(1, 10);
+BEGIN;
+SELECT count(*) FROM tablespace_stats_move;
+ALTER TABLE tablespace_stats_move SET TABLESPACE regress_tblspace_stats2;
+INSERT INTO tablespace_stats_move SELECT generate_series(1, 5);
+SELECT count(*) FROM tablespace_stats_move;
+COMMIT;
+SELECT pg_stat_force_next_flush();
+SELECT tablespace_name, tup_inserted, tup_returned FROM pg_stat_tablespace
+  WHERE tablespace_name LIKE 'regress_tblspace_stats_' ORDER BY 1;
+DROP TABLE tablespace_stats_move;
+DROP TABLESPACE regress_tblspace_stats1;
+DROP TABLESPACE regress_tblspace_stats2;
+SELECT pg_stat_have_stats('tablespace', 0, :stats2_oid);
+RESET allow_in_place_tablespaces;
+
 ALTER TABLESPACE regress_tblspace RENAME TO regress_tblspace_renamed;
 
 ALTER TABLE ALL IN TABLESPACE regress_tblspace_renamed SET TABLESPACE pg_default;
