@@ -38,8 +38,17 @@ typedef struct LogicalRepRelMapEntry
 								 * for a REPLICA IDENTITY FULL remote
 								 * relation? */
 
-	/* Sync state. */
+	/*
+	 * Sync state.
+	 *
+	 * reported and reportedstate limit report_unapplied_change() to one
+	 * report per sync state: whether a report was made, and for which state.
+	 * They are kept next to state so that they occupy padding that follows it
+	 * anyway.
+	 */
 	char		state;
+	bool		reported;
+	char		reportedstate;
 	XLogRecPtr	statelsn;
 } LogicalRepRelMapEntry;
 
