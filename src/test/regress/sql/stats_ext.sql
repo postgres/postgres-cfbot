@@ -1920,9 +1920,12 @@ RESET enable_mergejoin;
 SELECT * FROM check_estimated_rows('SELECT * FROM sb_2 WHERE numeric_lt(y, 1.0)');
 
 CREATE STATISTICS extstat_sb_2_small ON numeric_lt(y, 1.0) FROM sb_2;
+-- These statistics should win over the estimate from the support function.
+CREATE STATISTICS extstat_sb_2_prefix ON starts_with(payload, payload) FROM sb_2;
 ANALYZE sb_2;
 
 SELECT * FROM check_estimated_rows('SELECT * FROM sb_2 WHERE numeric_lt(y, 1.0)');
+SELECT * FROM check_estimated_rows('SELECT * FROM sb_2 WHERE starts_with(payload, payload)');
 
 -- Tidy up
 DROP TABLE sb_1, sb_2 CASCADE;
