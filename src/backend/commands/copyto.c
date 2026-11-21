@@ -90,6 +90,7 @@ typedef struct CopyToStateData
 	char	   *filename;		/* filename, or NULL for STDOUT */
 	bool		is_program;		/* is 'filename' a program to popen? */
 	bool		json_row_delim_needed;	/* need delimiter before next row */
+	AttrNumber	max_attnum;		/* highest attribute to fetch from the slot */
 	StringInfo	json_buf;		/* reusable buffer for JSON output,
 								 * initialized in BeginCopyTo */
 	TupleDesc	tupDesc;		/* Descriptor for JSON output; for a column
@@ -1326,7 +1327,12 @@ DoCopyTo(CopyToState cstate)
 
 		cstate->routine->CopyToOutFunc(cstate, attr->atttypid,
 									   &cstate->out_functions[attnum - 1]);
+		cstate->max_attnum = Max(cstate->max_attnum, attnum);
 	}
+
+	/* JSON output may need the whole row to construct a composite datum. */
+	if (cstate->opts.format == COPY_FORMAT_JSON)
+		cstate->max_attnum = num_phys_attrs;
 
 	/*
 	 * Create a temporary memory context that we can reset once per row to
@@ -1419,11 +1425,7 @@ CopyRelationTo(CopyToState cstate, Relation rel, Relation root_rel, uint64 *proc
 		if (map != NULL)
 			copyslot = execute_attr_map_slot(map, slot, root_slot);
 		else
-		{
-			/* Deconstruct the tuple */
-			slot_getallattrs(slot);
 			copyslot = slot;
-		}
 
 		/* Format and send the data */
 		CopyOneRowTo(cstate, copyslot);
@@ -1457,8 +1459,8 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 	MemoryContextReset(cstate->rowcontext);
 	oldcontext = MemoryContextSwitchTo(cstate->rowcontext);
 
-	/* Make sure the tuple is fully deconstructed */
-	slot_getallattrs(slot);
+	/* Fetch only the prefix containing the attributes needed for output. */
+	slot_getsomeattrs(slot, cstate->max_attnum);
 
 	cstate->routine->CopyToOneRow(cstate, slot);
 
