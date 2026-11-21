@@ -12761,15 +12761,15 @@ select * from fkest f1
                      QUERY PLAN                      
 -----------------------------------------------------
  Hash Join
-   Hash Cond: ((f2.x = f1.x) AND (f2.x10b = f1.x10))
+   Hash Cond: ((f1.x = f2.x) AND (f1.x10 = f2.x10b))
    ->  Hash Join
-         Hash Cond: (f3.x = f2.x)
+         Hash Cond: (f3.x = f1.x)
          ->  Seq Scan on fkest f3
          ->  Hash
-               ->  Seq Scan on fkest f2
+               ->  Seq Scan on fkest f1
                      Filter: (x100 = 2)
    ->  Hash
-         ->  Seq Scan on fkest f1
+         ->  Seq Scan on fkest f2
                Filter: (x100 = 2)
 (11 rows)
 
@@ -12861,15 +12861,14 @@ select * from j1 inner join j3 on j1.id = j3.id;
 -----------------------------------
  Hash Join
    Output: j1.id, j3.id
-   Inner Unique: true
-   Hash Cond: (j3.id = j1.id)
-   ->  Seq Scan on public.j3
-         Output: j3.id
-   ->  Hash
+   Hash Cond: (j1.id = j3.id)
+   ->  Seq Scan on public.j1
          Output: j1.id
-         ->  Seq Scan on public.j1
-               Output: j1.id
-(10 rows)
+   ->  Hash
+         Output: j3.id
+         ->  Seq Scan on public.j3
+               Output: j3.id
+(9 rows)
 
 -- ensure left join is marked as unique
 explain (verbose, costs off)
