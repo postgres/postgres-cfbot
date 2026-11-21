@@ -1151,7 +1151,7 @@ cube_contains_v0(NDBOX *a, NDBOX *b)
 		}
 	}
 
-	/* Can't care less about the excess dimensions of (a), if any */
+	/* Compare the dimensions present in both cubes. */
 	for (i = 0; i < Min(DIM(a), DIM(b)); i++)
 	{
 		if (Min(LL_COORD(a, i), UR_COORD(a, i)) >
@@ -1159,6 +1159,14 @@ cube_contains_v0(NDBOX *a, NDBOX *b)
 			return false;
 		if (Max(LL_COORD(a, i), UR_COORD(a, i)) <
 			Max(LL_COORD(b, i), UR_COORD(b, i)))
+			return false;
+	}
+
+	/* The dimensions absent from b are zero. */
+	for (; i < DIM(a); i++)
+	{
+		if (Min(LL_COORD(a, i), UR_COORD(a, i)) > 0 ||
+			Max(LL_COORD(a, i), UR_COORD(a, i)) < 0)
 			return false;
 	}
 
