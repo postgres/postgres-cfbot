@@ -262,6 +262,7 @@ typedef struct PgStat_TableXactStatus
 	PgStat_Counter updated_pre_truncdrop;
 	PgStat_Counter deleted_pre_truncdrop;
 	PgStat_Counter ins_since_vacuum_pre_truncdrop;
+	PgStat_Counter delta_dead_tuples_pre_truncdrop;
 	int			nest_level;		/* subtransaction nest level */
 	/* links to other structs for same relation: */
 	struct PgStat_TableXactStatus *upper;	/* next higher subxact if any */

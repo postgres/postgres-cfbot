@@ -261,6 +261,11 @@ pgstat_drop_relation(Relation rel)
 	if (pgstat_info->tab.trans &&
 		pgstat_info->tab.trans->nest_level == nest_level)
 	{
+		if (!pgstat_info->tab.trans->truncdropped)
+			pgstat_info->tab.trans->delta_dead_tuples_pre_truncdrop =
+				pgstat_info->tab.counts_xact.delta_dead_tuples +
+				pgstat_info->tab.trans->tuples_inserted +
+				pgstat_info->tab.trans->tuples_updated;
 		pgstat_info->tab.trans->ins_since_vacuum_pre_truncdrop +=
 			pgstat_info->tab.counts_xact.ins_since_vacuum;
 		if (pgstat_info->tab.trans->truncdropped)
@@ -271,6 +276,7 @@ pgstat_drop_relation(Relation rel)
 		pgstat_info->tab.trans->tuples_updated = 0;
 		pgstat_info->tab.trans->tuples_deleted = 0;
 		pgstat_info->tab.counts_xact.ins_since_vacuum = 0;
+		pgstat_info->tab.counts_xact.delta_dead_tuples = 0;
 	}
 }
 
@@ -517,6 +523,11 @@ pgstat_count_truncate(Relation rel)
 		Assert(pgstat_info->kind == PGSTAT_KIND_RELATION);
 
 		ensure_tabstat_xact_level(pgstat_info);
+		if (!pgstat_info->tab.trans->truncdropped)
+			pgstat_info->tab.trans->delta_dead_tuples_pre_truncdrop =
+				pgstat_info->tab.counts_xact.delta_dead_tuples +
+				pgstat_info->tab.trans->tuples_inserted +
+				pgstat_info->tab.trans->tuples_updated;
 		pgstat_info->tab.trans->ins_since_vacuum_pre_truncdrop +=
 			pgstat_info->tab.counts_xact.ins_since_vacuum;
 		if (pgstat_info->tab.trans->truncdropped)
@@ -527,6 +538,7 @@ pgstat_count_truncate(Relation rel)
 		pgstat_info->tab.trans->tuples_updated = 0;
 		pgstat_info->tab.trans->tuples_deleted = 0;
 		pgstat_info->tab.counts_xact.ins_since_vacuum = 0;
+		pgstat_info->tab.counts_xact.delta_dead_tuples = 0;
 	}
 }
 
@@ -677,9 +689,8 @@ AtEOXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit)
 			relstat->tab.truncdropped = trans->truncdropped;
 			if (trans->truncdropped)
 			{
-				/* forget live/dead stats seen by backend thus far */
+				/* forget live stats seen by backend thus far */
 				relstat->tab.counts_xact.delta_live_tuples = 0;
-				relstat->tab.counts_xact.delta_dead_tuples = 0;
 			}
 			/* insert adds a live tuple, delete removes one */
 			relstat->tab.counts_xact.delta_live_tuples +=
@@ -695,8 +706,9 @@ AtEOXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit)
 		else
 		{
 			/* inserted tuples are dead, deleted tuples are unaffected */
-			relstat->tab.counts_xact.delta_dead_tuples +=
-				trans->tuples_inserted + trans->tuples_updated;
+			if (!trans->truncdropped)
+				relstat->tab.counts_xact.delta_dead_tuples +=
+					trans->tuples_inserted + trans->tuples_updated;
 			/* an aborted xact generates no changed_tuple events */
 		}
 		relstat->tab.counts_xact.ins_since_vacuum +=
@@ -734,6 +746,11 @@ AtEOSubXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit, in
 				if (trans->truncdropped)
 				{
 					/* propagate the truncate/drop status one level up */
+					if (!trans->upper->truncdropped)
+						trans->upper->delta_dead_tuples_pre_truncdrop =
+							trans->delta_dead_tuples_pre_truncdrop +
+							trans->upper->tuples_inserted +
+							trans->upper->tuples_updated;
 					if (trans->upper->truncdropped)
 						trans->upper->ins_since_vacuum_pre_truncdrop +=
 							trans->upper->tuples_inserted;
@@ -790,8 +807,9 @@ AtEOSubXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit, in
 			relstat->tab.counts_xact.tuples_updated += trans->tuples_updated;
 			relstat->tab.counts_xact.tuples_deleted += trans->tuples_deleted;
 			/* inserted tuples are dead, deleted tuples are unaffected */
-			relstat->tab.counts_xact.delta_dead_tuples +=
-				trans->tuples_inserted + trans->tuples_updated;
+			if (!trans->truncdropped)
+				relstat->tab.counts_xact.delta_dead_tuples +=
+					trans->tuples_inserted + trans->tuples_updated;
 			relstat->tab.counts_xact.ins_since_vacuum +=
 				trans->tuples_inserted;
 			relstat->tab.trans = trans->upper;
@@ -1149,6 +1167,8 @@ restore_truncdrop_counters(PgStat_TableXactStatus *trans)
 		trans->tuples_inserted = trans->inserted_pre_truncdrop;
 		trans->tuples_updated = trans->updated_pre_truncdrop;
 		trans->tuples_deleted = trans->deleted_pre_truncdrop;
+		trans->parent->tab.counts_xact.delta_dead_tuples =
+			trans->delta_dead_tuples_pre_truncdrop;
 		trans->parent->tab.counts_xact.ins_since_vacuum +=
 			trans->ins_since_vacuum_pre_truncdrop;
 	}
