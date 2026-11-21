@@ -3,6 +3,8 @@
 
 use strict;
 use warnings FATAL => 'all';
+use File::Basename;
+use File::Copy;
 use PostgreSQL::Test::Utils;
 use PostgreSQL::Test::Cluster;
 use Test::More;
@@ -213,6 +215,54 @@ SKIP:
 	my $lz4_is_valid = system_log($lz4, '-t', @lz4_wals);
 	is($lz4_is_valid, 0,
 		"lz4 verified the integrity of compressed WAL segments");
+}
+
+# A completed LZ4 segment whose frame is cut off after the last data block
+# decompresses to the full segment size, but must still be streamed again.
+SKIP:
+{
+	skip "postgres was not built with LZ4 support", 4
+	  if (!check_pg_config("#define USE_LZ4 1"));
+
+	my $trunc_dir = $primary->basedir . '/lz4_truncated';
+	mkdir($trunc_dir);
+	my ($lz4_wal) = glob "$stream_dir/*.lz4";
+	my $name = basename($lz4_wal);
+	copy($lz4_wal, "$trunc_dir/$name") or die "could not copy $lz4_wal: $!";
+	# Drop the 4-byte end mark of the frame.
+	truncate("$trunc_dir/$name", (-s "$trunc_dir/$name") - 4)
+	  or die "could not truncate $trunc_dir/$name: $!";
+
+	my $segsize = $primary->safe_psql('postgres',
+		"SELECT pg_size_bytes(current_setting('wal_segment_size'))");
+	my ($tli, $logid, $segno) =
+	  $name =~ /^([0-9A-F]{8})([0-9A-F]{8})([0-9A-F]{8})/;
+	my $seg_start = sprintf('%X/%08X', hex($logid), hex($segno) * $segsize);
+
+	# A complete segment just before it, so that skipping the truncated one
+	# makes streaming restart at its start, not at the server's position.
+	# Only the size of an uncompressed segment is checked.
+	my $prev = sprintf('%s%s%08X', $tli, $logid, hex($segno) - 1);
+	open(my $fh, '>', "$trunc_dir/$prev") or die "could not create $prev: $!";
+	truncate($fh, $segsize) or die "could not extend $prev: $!";
+	close($fh);
+
+	$primary->command_checks_all(
+		[
+			'pg_receivewal',
+			'--directory' => $trunc_dir,
+			'--verbose',
+			'--endpos' => $nextlsn,
+			'--no-loop',
+			'--compress' => 'lz4'
+		],
+		0,
+		[qr/^$/],
+		[
+			qr/compressed segment file "\Q$name\E" is truncated, skipping/,
+			qr/starting log streaming at \Q$seg_start\E /
+		],
+		'pg_receivewal streams a truncated LZ4 segment again');
 }
 
 # Verify that the start streaming position is computed and that the value is
