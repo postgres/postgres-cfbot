@@ -1,0 +1,12 @@
+Parsed test spec with 2 sessions
+
+starting permutation: lock_dim analyze_fact alter_dim commit
+step lock_dim: 
+	BEGIN;
+	LOCK dim IN ACCESS EXCLUSIVE MODE;
+
+s2: WARNING:  skipping join statistics "public.join_stat"
+DETAIL:  Could not obtain lock on table "public.dim".
+step analyze_fact: ANALYZE fact;
+step alter_dim: ALTER TABLE dim ALTER COLUMN label TYPE varchar(20);
+step commit: COMMIT;

@@ -112,6 +112,7 @@ test: timeouts
 test: vacuum-concurrent-drop
 test: vacuum-conflict
 test: vacuum-skip-locked
+test: join-stats-analyze
 test: stats
 test: horizons
 test: predicate-hash

@@ -3540,6 +3540,85 @@ have_relevant_eclass_joinclause(PlannerInfo *root,
 
 
 /*
+ * count_relevant_eclass_joinclauses
+ *		Count the joinclauses EquivalenceClasses could produce between the
+ *		two given relations.
+ *
+ * Like have_relevant_eclass_joinclause(), but counts them.  As there, we
+ * don't check that each could actually be generated, so the count may be
+ * too high.
+ */
+int
+count_relevant_eclass_joinclauses(PlannerInfo *root,
+								  RelOptInfo *rel1, RelOptInfo *rel2)
+{
+	Bitmapset  *matching_ecs;
+	Relids		join_relids;
+	Relids		nominal_relids1;
+	Relids		nominal_relids2;
+	int			count = 0;
+	int			i;
+
+	/* Examine only eclasses mentioning both rel1 and rel2 */
+	matching_ecs = get_common_eclass_indexes(root, rel1->relids,
+											 rel2->relids);
+
+	join_relids = bms_union(rel1->relids, rel2->relids);
+
+	/* Source clauses of a broken EC refer to the top parents of child rels */
+	nominal_relids1 = IS_OTHER_REL(rel1) ? rel1->top_parent_relids : rel1->relids;
+	nominal_relids2 = IS_OTHER_REL(rel2) ? rel2->top_parent_relids : rel2->relids;
+
+	i = -1;
+	while ((i = bms_next_member(matching_ecs, i)) >= 0)
+	{
+		EquivalenceClass *ec = (EquivalenceClass *) list_nth(root->eq_classes,
+															 i);
+		EquivalenceMemberIterator it;
+		EquivalenceMember *em;
+
+		/* A single-member EC generates no joinclauses */
+		if (list_length(ec->ec_members) <= 1)
+			continue;
+
+		/*
+		 * An EC with a constant generates restriction clauses instead.  A
+		 * member using both relations does yield a joinclause then, but it is
+		 * distributed to the joininfo lists and counted there.
+		 */
+		if (ec->ec_has_const)
+			continue;
+
+		if (ec->ec_broken)
+		{
+			foreach_node(RestrictInfo, rinfo, ec->ec_sources)
+			{
+				if (bms_overlap(nominal_relids1, rinfo->clause_relids) &&
+					bms_overlap(nominal_relids2, rinfo->clause_relids))
+					count++;
+			}
+			continue;
+		}
+
+		count++;
+
+		/* Each member using both relations is equated by one more clause */
+		setup_eclass_member_iterator(&it, ec, join_relids);
+		while ((em = eclass_member_iterator_next(&it)) != NULL)
+		{
+			if (bms_overlap(em->em_relids, rel1->relids) &&
+				bms_overlap(em->em_relids, rel2->relids))
+				count++;
+		}
+	}
+
+	bms_free(join_relids);
+
+	return count;
+}
+
+
+/*
  * has_relevant_eclass_joinclause
  *		Detect whether there is an EquivalenceClass that could produce
  *		a joinclause involving the given relation and anything else.

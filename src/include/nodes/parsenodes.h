@@ -3574,6 +3574,12 @@ typedef struct CreateStatsStmt
 	bool		transformed;	/* true when transformStatsStmt is finished */
 	bool		if_not_exists;	/* do nothing if stats name already exists */
 	Oid			owner;			/* OID of owner, or InvalidOid for default */
+
+	/* Join statistics fields, populated by transformStatsStmt */
+	Oid			stxrelid;		/* anchor table OID (InvalidOid if not join) */
+	List	   *stxjoinrels;	/* participating table OIDs, anchor first
+								 * (list of Oid) */
+	List	   *stxjoinconds;	/* equijoin conditions (list of OpExpr) */
 } CreateStatsStmt;
 
 /*

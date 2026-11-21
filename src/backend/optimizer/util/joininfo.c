@@ -82,6 +82,56 @@ have_relevant_joinclause(PlannerInfo *root,
 
 
 /*
+ * count_relevant_joinclauses
+ *		Count the joinclauses that reference both given relations.
+ *
+ * Like have_relevant_joinclause(), but counts them.  A clause that also
+ * references other relations is counted too, so the count may be too high,
+ * but never too low: callers use it to rule out joins on more than one
+ * clause.
+ */
+int
+count_relevant_joinclauses(PlannerInfo *root,
+						   RelOptInfo *rel1, RelOptInfo *rel2)
+{
+	int			count = 0;
+	ListCell   *l;
+
+	/* a clause involving both relations is in both joininfo lists */
+	foreach(l, rel1->joininfo)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
+
+		/*
+		 * If the join commutes with some other outer join(s) via outer join
+		 * identity 3, there will be multiple clones of its join clauses in
+		 * the joininfo list.  Count only the has_clone form of such clauses.
+		 */
+		if (rinfo->is_clone)
+			continue;
+
+		/*
+		 * A clause on one relation in an outer join's ON clause is in both
+		 * joininfo lists, as it is evaluated at the join, but does not
+		 * reference both.
+		 */
+		if (bms_overlap(rel1->relids, rinfo->clause_relids) &&
+			bms_overlap(rel2->relids, rinfo->clause_relids))
+			count++;
+	}
+
+	/*
+	 * We also need to count from the EquivalenceClass data structure, which
+	 * might contain relationships not emitted into the joininfo lists.
+	 */
+	if (rel1->has_eclass_joins && rel2->has_eclass_joins)
+		count += count_relevant_eclass_joinclauses(root, rel1, rel2);
+
+	return count;
+}
+
+
+/*
  * add_join_clause_to_rels
  *	  Add 'restrictinfo' to the joininfo list of each relation it requires.
  *

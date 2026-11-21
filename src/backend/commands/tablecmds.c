@@ -484,6 +484,7 @@ static void ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 					  AlterTableUtilityContext *context);
 static void ATRewriteCatalogs(List **wqueue, LOCKMODE lockmode,
 							  AlterTableUtilityContext *context);
+static bool ATOnlyRebuildsStatistics(AlteredTableInfo *tab);
 static void ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 					  AlterTableCmd *cmd, LOCKMODE lockmode, AlterTablePass cur_pass,
 					  AlterTableUtilityContext *context);
@@ -5440,6 +5441,10 @@ ATRewriteCatalogs(List **wqueue, LOCKMODE lockmode,
 	{
 		AlteredTableInfo *tab = (AlteredTableInfo *) lfirst(ltab);
 
+		/* a table whose join statistics alone were re-created was not altered */
+		if (ATOnlyRebuildsStatistics(tab))
+			continue;
+
 		/*
 		 * If the table is source table of ATTACH PARTITION command, we did
 		 * not modify anything about it that will change its toasting
@@ -5451,6 +5456,37 @@ ATRewriteCatalogs(List **wqueue, LOCKMODE lockmode,
 			tab->relkind == RELKIND_MATVIEW)
 			AlterTableCreateToastTable(tab->relid, (Datum) 0, lockmode);
 	}
+}
+
+/*
+ * ATOnlyRebuildsStatistics: is re-creating statistics objects the only work
+ * queued for this table?
+ *
+ * This is the case for the table join statistics belong to, when the type of
+ * a column of another of the joined tables is changed.  The table itself was
+ * not altered, and is locked only with ShareUpdateExclusiveLock (see
+ * ATPostAlterTypeCleanup), so the toast table check must skip it rather
+ * than lock it more strongly.
+ */
+static bool
+ATOnlyRebuildsStatistics(AlteredTableInfo *tab)
+{
+	bool		found = false;
+
+	if (tab->rewrite != 0)
+		return false;
+
+	for (AlterTablePass pass = 0; pass < AT_NUM_PASSES; pass++)
+	{
+		foreach_node(AlterTableCmd, cmd, tab->subcmds[pass])
+		{
+			if (cmd->subtype != AT_ReAddStatistics)
+				return false;
+			found = true;
+		}
+	}
+
+	return found;
 }
 
 /*
