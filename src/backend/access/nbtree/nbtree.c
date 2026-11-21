@@ -368,6 +368,7 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 	so->oppositeDirCheck = false;
 	so->arrayKeys = NULL;
 	so->orderProcs = NULL;
+	so->numArrayKeys = 0;
 	so->arrayContext = NULL;
 
 	so->killedItems = NULL;		/* until needed */
@@ -385,6 +386,27 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 	scan->opaque = so;
 
 	return scan;
+}
+
+/*
+ * Free the current element of each skip array on a pass-by-reference type.
+ * These copies are made in the caller's memory context, not in arrayContext,
+ * so nothing else would free them before the end of the query.
+ */
+static void
+_bt_free_skiparray_elems(BTScanOpaque so)
+{
+	for (int i = 0; i < so->numArrayKeys; i++)
+	{
+		BTArrayKeyInfo *array = &so->arrayKeys[i];
+		ScanKey		skey = &so->keyData[array->scan_key];
+
+		if (!(skey->sk_flags & SK_BT_SKIP) || array->attbyval)
+			continue;
+		if (skey->sk_argument)
+			pfree(DatumGetPointer(skey->sk_argument));
+		skey->sk_argument = (Datum) 0;
+	}
 }
 
 /*
@@ -450,6 +472,7 @@ btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 	 */
 	if (scankey && scan->numberOfKeys > 0)
 		memcpy(scan->keyData, scankey, scan->numberOfKeys * sizeof(ScanKeyData));
+	_bt_free_skiparray_elems(so);
 	so->numberOfKeys = 0;		/* until _bt_preprocess_keys sets it */
 	so->numArrayKeys = 0;		/* ditto */
 }
@@ -477,6 +500,7 @@ btendscan(IndexScanDesc scan)
 	/* No need to invalidate positions, the RAM is about to be freed. */
 
 	/* Release storage */
+	_bt_free_skiparray_elems(so);
 	if (so->keyData != NULL)
 		pfree(so->keyData);
 	/* so->arrayKeys and so->orderProcs are in arrayContext */
