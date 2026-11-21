@@ -1206,6 +1206,33 @@ SELECT * FROM hat_data WHERE hat_name IN ('h8', 'h9', 'h7') ORDER BY hat_name;
 
 DROP RULE hat_upsert ON hats;
 
+-- DO UPDATE ... RETURNING excluded values
+CREATE RULE hat_upsert AS ON INSERT TO hats
+    DO INSTEAD
+    INSERT INTO hat_data VALUES (
+           NEW.hat_name,
+           NEW.hat_color)
+        ON CONFLICT (hat_name)
+        DO UPDATE
+           SET hat_name = hat_data.hat_name, hat_color = 'Excl: '||excluded.hat_color
+           WHERE excluded.hat_color <>  'forbidden' AND hat_data.* != excluded.*
+        RETURNING excluded.*;
+SELECT definition FROM pg_rules WHERE tablename = 'hats' ORDER BY rulename;
+
+-- EXCLUDED not allowed in plain INSERT
+INSERT INTO hats VALUES ('h6', 'black'), ('h7', 'forbidden'), ('h8', 'red')
+  RETURNING excluded.*;
+
+-- OLD/NEW have no effect on EXCLUDED
+EXPLAIN (verbose, costs off)
+INSERT INTO hats VALUES ('h6', 'black'), ('h7', 'forbidden'), ('h8', 'red')
+  RETURNING old.*, new.*, *;
+INSERT INTO hats VALUES ('h6', 'black'), ('h7', 'forbidden'), ('h8', 'red')
+  RETURNING old.*, new.*, *;
+SELECT * FROM hat_data ORDER BY hat_name;
+
+DROP RULE hat_upsert ON hats;
+
 -- DO SELECT with a WHERE clause
 CREATE RULE hat_confsel AS ON INSERT TO hats
     DO INSTEAD
