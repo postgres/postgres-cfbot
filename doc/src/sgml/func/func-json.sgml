@@ -617,8 +617,10 @@
          Constructs a JSON array from either a series of
          <replaceable>value_expression</replaceable> parameters or from the results
          of <replaceable>query_expression</replaceable>,
-         which must be a SELECT query returning a single column. If
-         <literal>ABSENT ON NULL</literal> is specified, NULL values are ignored.
+         which must be a SELECT query returning a single column.
+         An empty JSON array is returned if no parameters are given;
+         modifier clauses may also be specified in that case.
+         If <literal>ABSENT ON NULL</literal> is specified, NULL values are ignored.
          This is always the case if a
          <replaceable>query_expression</replaceable> is used. If the query returns
          no rows, an empty JSON array is returned.
@@ -719,6 +721,7 @@
         <para>
          Constructs a JSON object of all the key/value pairs given,
          or an empty object if none are given.
+         Modifier clauses may also be specified when constructing an empty object.
          <replaceable>key_expression</replaceable> is a scalar expression
          defining the <acronym>JSON</acronym> key, which is
          converted to the <type>text</type> type.
