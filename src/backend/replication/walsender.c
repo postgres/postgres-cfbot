@@ -358,7 +358,7 @@ InitWalSender(void)
 		Assert(MyProc->xmin == InvalidTransactionId);
 		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 		MyProc->statusFlags |= PROC_AFFECTS_ALL_HORIZONS;
-		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+		ProcGlobal->statusFlags[ProcGetMyXactOff()] = MyProc->statusFlags;
 		LWLockRelease(ProcArrayLock);
 	}
 
