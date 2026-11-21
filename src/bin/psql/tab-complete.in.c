@@ -5129,9 +5129,14 @@ match_previous_words(int pattern_id,
 	else if (Matches("REPACK", "(*)"))
 		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_clusterables,
 										"USING INDEX");
-	else if (Matches("REPACK", MatchAnyExcept("(")))
-		COMPLETE_WITH("USING INDEX");
-	else if (Matches("REPACK", "(*)", MatchAnyExcept("(")))
+	else if (Matches("REPACK", "USING") ||
+			 Matches("REPACK", "(*)", "USING") ||
+			 Matches("REPACK", MatchAny, "USING") ||
+			 Matches("REPACK", "(*)", MatchAny, "USING") ||
+			 Matches("REPACK", "(*)", MatchAny, "(*)", "USING"))
+		COMPLETE_WITH("INDEX");
+	else if (Matches("REPACK", MatchAnyExcept("(")) ||
+			 Matches("REPACK", "(*)", MatchAnyExcept("(")))
 		COMPLETE_WITH("USING INDEX");
 	else if (Matches("REPACK", MatchAny, "USING", "INDEX") ||
 			 Matches("REPACK", "(*)", MatchAny, "USING", "INDEX"))
@@ -5139,14 +5144,9 @@ match_previous_words(int pattern_id,
 		set_completion_reference(prev3_wd);
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_index_of_table);
 	}
-
-	/*
-	 * Complete ... [ (*) ] <sth> USING INDEX, with a list of indexes for
-	 * <sth>.
-	 */
-	else if (TailMatches(MatchAny, "USING", "INDEX"))
+	else if (Matches("REPACK", "(*)", MatchAny, "(*)", "USING", "INDEX"))
 	{
-		set_completion_reference(prev3_wd);
+		set_completion_reference(prev4_wd);
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_index_of_table);
 	}
 	else if (HeadMatches("REPACK", "(*") &&
