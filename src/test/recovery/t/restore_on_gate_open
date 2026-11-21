@@ -1,0 +1,46 @@
+#!/usr/bin/perl
+
+# restore_command helper: restore a WAL file from an archive, like "cp", but
+# only once its gate is open.
+#
+# The test closes the gate for a file by creating "<file>.gate" in the gate
+# directory, and opens it by removing that file.  While the gate is closed
+# this script waits, and with it the startup process that called it, so the
+# test decides when replay may go past a given point in the WAL.
+use strict;
+use warnings FATAL => 'all';
+use File::Copy;
+use Time::HiRes qw(time usleep);
+
+# This script accepts five arguments:
+# - The archive directory to restore from.
+# - The gate directory.
+# - A timeout in seconds, defined by $PostgreSQL::Test::Utils::timeout_default.
+#   If a gate is still closed after this long, the script dies.  Its exit
+#   status then makes recovery fail, instead of being taken as the end of the
+#   archive, which would make recovery end early.
+# - The file to restore and the path to restore it to (%f and %p).
+my ($archive_dir, $gate_dir, $timeout_sec, $file, $dest) = @ARGV;
+
+my $poll_interval_usec = 10_000;
+my $gate = "$gate_dir/$file.gate";
+
+if (-e $gate)
+{
+	print STDERR "restore_on_gate_open: waiting for gate of $file\n";
+	my $deadline = time() + $timeout_sec;
+	while (-e $gate)
+	{
+		die "restore_on_gate_open: timed out waiting for gate of $file\n"
+		  if time() > $deadline;
+		usleep($poll_interval_usec);
+	}
+}
+
+# A file missing from the archive (the end of the WAL, a timeline history
+# file that doesn't exist) is a plain failure, as with "cp".
+exit 1 unless -e "$archive_dir/$file";
+
+copy("$archive_dir/$file", $dest)
+  or die "restore_on_gate_open: could not copy $file: $!\n";
+exit 0;
