@@ -12,6 +12,7 @@
 
 #include "access/gist.h"
 #include "access/stratnum.h"
+#include "common/int.h"
 #include "cubedata.h"
 #include "libpq/pqformat.h"
 #include "utils/array.h"
@@ -937,87 +938,46 @@ rt_cube_size(NDBOX *a, double *size)
 }
 
 /*
- * make up a metric in which one box will be 'lower' than the other
- * -- this can be useful for sorting and to determine uniqueness
+ * Sort by all lower coordinates, then all upper coordinates.  Treat a
+ * missing coordinate as zero in both passes.  Comparing the upper bounds
+ * of the common dimensions before the remaining lower bounds would make
+ * the order depend on the dimensionality of the other cube.
  */
+static inline double
+cube_sort_coord(NDBOX *cube, int i, bool upper)
+{
+	if (i >= DIM(cube))
+		return 0.0;
+
+	if (upper)
+		return float8_max(LL_COORD(cube, i), UR_COORD(cube, i));
+	return float8_min(LL_COORD(cube, i), UR_COORD(cube, i));
+}
+
 int32
 cube_cmp_v0(NDBOX *a, NDBOX *b)
 {
-	int			i;
-	int			dim;
+	int			ndims = Max(DIM(a), DIM(b));
 
-	dim = Min(DIM(a), DIM(b));
-
-	/* compare the common dimensions */
-	for (i = 0; i < dim; i++)
+	for (int i = 0; i < ndims; i++)
 	{
-		if (Min(LL_COORD(a, i), UR_COORD(a, i)) >
-			Min(LL_COORD(b, i), UR_COORD(b, i)))
-			return 1;
-		if (Min(LL_COORD(a, i), UR_COORD(a, i)) <
-			Min(LL_COORD(b, i), UR_COORD(b, i)))
-			return -1;
+		int			cmp = float8_cmp_internal(cube_sort_coord(a, i, false),
+											  cube_sort_coord(b, i, false));
+
+		if (cmp != 0)
+			return cmp;
 	}
-	for (i = 0; i < dim; i++)
+	for (int i = 0; i < ndims; i++)
 	{
-		if (Max(LL_COORD(a, i), UR_COORD(a, i)) >
-			Max(LL_COORD(b, i), UR_COORD(b, i)))
-			return 1;
-		if (Max(LL_COORD(a, i), UR_COORD(a, i)) <
-			Max(LL_COORD(b, i), UR_COORD(b, i)))
-			return -1;
+		int			cmp = float8_cmp_internal(cube_sort_coord(a, i, true),
+											  cube_sort_coord(b, i, true));
+
+		if (cmp != 0)
+			return cmp;
 	}
 
-	/* compare extra dimensions to zero */
-	if (DIM(a) > DIM(b))
-	{
-		for (i = dim; i < DIM(a); i++)
-		{
-			if (Min(LL_COORD(a, i), UR_COORD(a, i)) > 0)
-				return 1;
-			if (Min(LL_COORD(a, i), UR_COORD(a, i)) < 0)
-				return -1;
-		}
-		for (i = dim; i < DIM(a); i++)
-		{
-			if (Max(LL_COORD(a, i), UR_COORD(a, i)) > 0)
-				return 1;
-			if (Max(LL_COORD(a, i), UR_COORD(a, i)) < 0)
-				return -1;
-		}
-
-		/*
-		 * if all common dimensions are equal, the cube with more dimensions
-		 * wins
-		 */
-		return 1;
-	}
-	if (DIM(a) < DIM(b))
-	{
-		for (i = dim; i < DIM(b); i++)
-		{
-			if (Min(LL_COORD(b, i), UR_COORD(b, i)) > 0)
-				return -1;
-			if (Min(LL_COORD(b, i), UR_COORD(b, i)) < 0)
-				return 1;
-		}
-		for (i = dim; i < DIM(b); i++)
-		{
-			if (Max(LL_COORD(b, i), UR_COORD(b, i)) > 0)
-				return -1;
-			if (Max(LL_COORD(b, i), UR_COORD(b, i)) < 0)
-				return 1;
-		}
-
-		/*
-		 * if all common dimensions are equal, the cube with more dimensions
-		 * wins
-		 */
-		return -1;
-	}
-
-	/* They're really equal */
-	return 0;
+	/* Preserve the dimension count as the final tie-breaker. */
+	return pg_cmp_u32(DIM(a), DIM(b));
 }
 
 Datum
