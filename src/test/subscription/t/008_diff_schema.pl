@@ -31,6 +31,53 @@ $node_subscriber->safe_psql('postgres',
 
 # Setup logical replication
 my $publisher_connstr = $node_publisher->connstr . ' dbname=postgres';
+
+# A zero-column publisher still sends rows.  Subscriber-only columns must
+# get their defaults during initial COPY as well as incremental replication.
+foreach my $binary ('false', 'true')
+{
+	$node_publisher->safe_psql(
+		'postgres', q{
+		CREATE TABLE tab_nocols ();
+		INSERT INTO tab_nocols DEFAULT VALUES;
+		INSERT INTO tab_nocols DEFAULT VALUES;
+		CREATE PUBLICATION pub_nocols FOR TABLE tab_nocols
+			WITH (publish = 'insert');
+	});
+	$node_subscriber->safe_psql('postgres',
+		"CREATE TABLE tab_nocols (local_value text DEFAULT 'subscriber-default')"
+	);
+	$node_subscriber->safe_psql('postgres',
+		"CREATE SUBSCRIPTION sub_nocols CONNECTION '$publisher_connstr' PUBLICATION pub_nocols WITH (binary = $binary)"
+	);
+
+	$node_subscriber->wait_for_subscription_sync($node_publisher, 'sub_nocols');
+
+	is( $node_subscriber->safe_psql(
+			'postgres', q{
+			SELECT count(*) FROM tab_nocols
+			WHERE local_value = 'subscriber-default'
+		}),
+		'2',
+		"initial zero-column rows use local defaults (binary = $binary)");
+
+	$node_publisher->safe_psql('postgres',
+		"INSERT INTO tab_nocols DEFAULT VALUES");
+	$node_publisher->wait_for_catchup('sub_nocols');
+	is( $node_subscriber->safe_psql(
+			'postgres', q{
+			SELECT count(*) FROM tab_nocols
+			WHERE local_value = 'subscriber-default'
+		}),
+		'3',
+		"incremental zero-column rows use local defaults (binary = $binary)");
+
+	$node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION sub_nocols');
+	$node_publisher->safe_psql('postgres',
+		'DROP PUBLICATION pub_nocols; DROP TABLE tab_nocols');
+	$node_subscriber->safe_psql('postgres', 'DROP TABLE tab_nocols');
+}
+
 $node_publisher->safe_psql('postgres',
 	"CREATE PUBLICATION tap_pub FOR ALL TABLES");
 
