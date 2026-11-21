@@ -714,3 +714,73 @@ SELECT expanded_record_field_text(ROW(5, 'field')::expanded_comp, 1),
        expanded_record_field_text(ROW(5, 'field')::expanded_comp, 2);
 
 DROP TYPE expanded_comp;
+
+-- Preserve implicitly coerced composite arguments when deparsing calls.
+CREATE TYPE rowtypes_deparse_a AS (a int, b int);
+CREATE TYPE rowtypes_deparse_b AS (a int, b int);
+
+CREATE FUNCTION rowtypes_deparse_pick(rowtypes_deparse_a) RETURNS int
+  LANGUAGE sql IMMUTABLE AS 'SELECT $1.a';
+CREATE VIEW rowtypes_deparse_named AS
+  SELECT rowtypes_deparse_pick(ROW(1, 2)) AS r;
+
+-- Adding an overload must not make the stored call ambiguous on recreation.
+CREATE FUNCTION rowtypes_deparse_pick(rowtypes_deparse_b) RETURNS int
+  LANGUAGE sql IMMUTABLE AS 'SELECT $1.b';
+SELECT pg_get_viewdef('rowtypes_deparse_named', false);
+SELECT 'CREATE VIEW rowtypes_deparse_named_plain AS ' ||
+  pg_get_viewdef('rowtypes_deparse_named', false) \gexec
+SELECT 'CREATE VIEW rowtypes_deparse_named_pretty AS ' ||
+  pg_get_viewdef('rowtypes_deparse_named', true) \gexec
+SELECT o.r AS original, n.r AS plain, p.r AS pretty
+  FROM rowtypes_deparse_named o, rowtypes_deparse_named_plain n,
+       rowtypes_deparse_named_pretty p;
+
+CREATE FUNCTION rowtypes_deparse_call(rowtypes_deparse_a) RETURNS int
+  LANGUAGE sql IMMUTABLE AS 'SELECT $1.a';
+CREATE VIEW rowtypes_deparse_record AS
+  SELECT rowtypes_deparse_call(ROW(1, 2)) AS r;
+CREATE VIEW rowtypes_deparse_explicit AS
+  SELECT rowtypes_deparse_call(ROW(1, 2)::rowtypes_deparse_a) AS r;
+
+-- A record overload must not silently replace the original function.
+CREATE FUNCTION rowtypes_deparse_call(record) RETURNS int
+  LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN 99; END';
+SELECT pg_get_viewdef('rowtypes_deparse_record', false);
+SELECT 'CREATE VIEW rowtypes_deparse_record_plain AS ' ||
+  pg_get_viewdef('rowtypes_deparse_record', false) \gexec
+SELECT 'CREATE VIEW rowtypes_deparse_record_pretty AS ' ||
+  pg_get_viewdef('rowtypes_deparse_record', true) \gexec
+SELECT o.r AS original, n.r AS plain, p.r AS pretty
+  FROM rowtypes_deparse_record o, rowtypes_deparse_record_plain n,
+       rowtypes_deparse_record_pretty p;
+
+-- Explicit casts and anonymous records keep their existing behaviour.
+SELECT pg_get_viewdef('rowtypes_deparse_explicit', false);
+CREATE VIEW rowtypes_deparse_anonymous AS
+  SELECT rowtypes_deparse_call(ROW(1, 2)) AS r;
+SELECT pg_get_viewdef('rowtypes_deparse_anonymous', false);
+SELECT r FROM rowtypes_deparse_anonymous;
+
+-- VARIADIC arguments need element casts even without adding an overload.
+CREATE FUNCTION rowtypes_deparse_variadic(VARIADIC rowtypes_deparse_a[])
+  RETURNS int LANGUAGE sql IMMUTABLE
+  AS 'SELECT ($1[1]).a + ($1[2]).b';
+CREATE VIEW rowtypes_deparse_var AS
+  SELECT rowtypes_deparse_variadic(ROW(1, 2), ROW(3, 4)) AS r;
+SELECT pg_get_viewdef('rowtypes_deparse_var', false);
+SELECT 'CREATE VIEW rowtypes_deparse_var_plain AS ' ||
+  pg_get_viewdef('rowtypes_deparse_var', false) \gexec
+SELECT 'CREATE VIEW rowtypes_deparse_var_pretty AS ' ||
+  pg_get_viewdef('rowtypes_deparse_var', true) \gexec
+SELECT o.r AS original, n.r AS plain, p.r AS pretty
+  FROM rowtypes_deparse_var o, rowtypes_deparse_var_plain n,
+       rowtypes_deparse_var_pretty p;
+
+-- A column default does not need to show its implicit composite cast.
+CREATE TABLE rowtypes_deparse_def
+  (c rowtypes_deparse_a DEFAULT ROW(1, 2));
+SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef
+  WHERE adrelid = 'rowtypes_deparse_def'::regclass;
+
+-- Leave the objects in place for the pg_upgrade dump/restore test.

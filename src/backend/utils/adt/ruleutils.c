@@ -10022,7 +10022,15 @@ get_rule_expr(Node *node, deparse_context *context,
 					ReleaseTupleDesc(tupdesc);
 				}
 				appendStringInfoChar(buf, ')');
-				if (rowexpr->row_format == COERCE_EXPLICIT_CAST)
+
+				/*
+				 * Preserve named composite types when showimplicit is true. A
+				 * bare ROW() expression already has type RECORD, so we can
+				 * omit an implicit cast to RECORD even when showimplicit is
+				 * true without affecting overload resolution on reparse.
+				 */
+				if (rowexpr->row_format == COERCE_EXPLICIT_CAST ||
+					(showimplicit && rowexpr->row_typeid != RECORDOID))
 					appendStringInfo(buf, "::%s",
 									 format_type_with_typemod(rowexpr->row_typeid, -1));
 			}
