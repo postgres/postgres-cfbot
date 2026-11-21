@@ -1022,6 +1022,93 @@ ugly ad-hoc code to recognize that in limited contexts, but discarding
 constant ECs from pathkeys makes it happen cleanly and automatically.
 
 
+UniqueKeys
+----------
+
+The UniqueKeys data structure represents what is known about the uniqueness
+of the rows of a base relation.  Each UniqueKey is a set of
+EquivalenceClasses, and it says that the relation cannot have two rows with
+equal values in all those ECs.  A unique index on (a, b) thus gives a
+UniqueKey consisting of the ECs that a and b belong to.  As with PathKeys,
+an EC that contains a constant is left out.  That can leave an empty
+UniqueKey, which means that the relation has at most one row.
+
+By default, a UniqueKey says nothing about rows in which the value of one
+of its ECs is NULL, because a unique index allows any number of such rows.
+That is good enough for matching mergejoinable join clauses, which are
+assumed to be strict.  DISTINCT and GROUP BY, however, consider NULLs equal
+to each other.  A UniqueKey that also holds on those terms is marked
+null_aware; that is the case if the index is NULLS NOT DISTINCT, or if each
+column in the UniqueKey has a NOT NULL constraint or is forced to be
+non-NULL by a strict restriction clause.
+
+The UniqueKeys of base relations are built the first time they are needed,
+so that a query that never needs them does not pay for them.
+
+UniqueKeys are used to detect unique inner sides of joins when the inner
+side is itself a join, and to skip DISTINCT and GROUP BY steps whose input
+is already distinct.  The following describes each of these in turn.  For
+now only plain tables get UniqueKeys, and only joins that involve no outer
+joins, semijoins or antijoins are handled.
+
+We do not keep UniqueKeys for join relations.  A join relation would
+typically have many of them, most of which would never be used.  And since
+they would be derived from the join's input relations, which of them are
+found would depend on the order in which the joins are performed.  Instead,
+whether a join relation is unique for a given set of join clauses is worked
+out when the question comes up (see joinrel_is_distinct_for), as follows.
+A join emits each combination of rows of its base relations at most once,
+so it suffices to show that a row on the other side of the clauses leaves
+only one possible row for each base relation.  Start with the ECs that the
+clauses equate to the other side; their values are fixed.  Then repeat
+these steps until nothing changes:
+
+	If a base relation has a UniqueKey all of whose ECs are fixed, it
+	has only one possible row.
+
+	If a base relation has only one possible row, every EC that has a
+	member belonging to that relation is fixed.
+
+The join relation is unique if every base relation ends up with only one
+possible row.  For example, given
+
+	SELECT ... FROM a, b, c WHERE a.x = b.id AND b.y = c.id AND c.z = a.w
+
+with unique indexes on b.id and c.id, the join of b and c is unique for the
+clause a.x = b.id: the EC {a.x, b.id} is fixed, which leaves one row of b,
+which fixes the EC {b.y, c.id}, which leaves one row of c.  It is not
+unique for the clause c.z = a.w, since that fixes only the EC {c.z, a.w},
+and neither relation has a UniqueKey within that.
+
+The second step relies on all members of an EC that are computable within
+the join relation being equal in its output.  That is why a broken EC is
+never used.
+
+The same procedure tells whether the result of the scan/join phase is
+already distinct on the DISTINCT or GROUP BY columns: start with the ECs of
+those columns, and use only UniqueKeys marked null_aware.  If so, a
+DISTINCT step is skipped, and so is a grouping step that has no aggregates
+or HAVING clause to evaluate.
+
+A UniqueKey that is not marked null_aware can still be used there if join
+clauses keep its columns from being NULL.  In
+
+	SELECT DISTINCT a.id, b.y FROM a JOIN b ON a.x = b.u
+
+with a unique index on the nullable column b.u, every row of b that the
+join emits has a non-NULL b.u, so the index is as good as one on a NOT NULL
+column.
+
+A DISTINCT step can also follow grouping or window functions, for which we
+keep no UniqueKeys.  Grouping without grouping sets emits one row for each
+group, so its output is distinct if all the grouping columns are among the
+DISTINCT columns, or if the relation below is distinct for those that are,
+since they then determine the group.  It emits at most one row if there is
+no GROUP BY.  Window functions neither add nor remove rows, so their output
+is distinct if the relation below them is distinct for the DISTINCT columns
+(see is_redundant_distinct).
+
+
 Order of processing for EquivalenceClasses and PathKeys
 -------------------------------------------------------
 

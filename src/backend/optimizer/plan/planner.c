@@ -184,6 +184,12 @@ static RelOptInfo *create_grouping_paths(PlannerInfo *root,
 										 bool target_parallel_safe,
 										 grouping_sets_data *gd);
 static bool is_degenerate_grouping(PlannerInfo *root);
+static bool is_redundant_grouping(PlannerInfo *root, RelOptInfo *input_rel);
+static bool is_redundant_distinct(PlannerInfo *root, RelOptInfo *scanjoin_rel);
+static void create_redundant_step_paths(PlannerInfo *root,
+										RelOptInfo *input_rel,
+										RelOptInfo *output_rel,
+										PathTarget *target);
 static void create_degenerate_grouping_paths(PlannerInfo *root,
 											 RelOptInfo *input_rel,
 											 RelOptInfo *grouped_rel);
@@ -221,6 +227,7 @@ static void create_one_window_path(PlannerInfo *root,
 								   List *activeWindows);
 static RelOptInfo *create_distinct_paths(PlannerInfo *root,
 										 RelOptInfo *input_rel,
+										 RelOptInfo *scanjoin_rel,
 										 PathTarget *target);
 static void create_partial_distinct_paths(PlannerInfo *root,
 										  RelOptInfo *input_rel,
@@ -1847,6 +1854,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		bool		scanjoin_target_parallel_safe;
 		bool		scanjoin_target_same_exprs;
 		bool		have_grouping;
+		RelOptInfo *scanjoin_rel;
 		WindowFuncLists *wflists = NULL;
 		List	   *activeWindows = NIL;
 		grouping_sets_data *gset_data = NULL;
@@ -1961,6 +1969,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		 * of the query's sort clause, distinct clause, etc.
 		 */
 		current_rel = query_planner(root, standard_qp_callback, &qp_extra);
+		scanjoin_rel = current_rel;
 
 		/*
 		 * Convert the query's result tlist into PathTarget format.
@@ -2145,6 +2154,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		{
 			current_rel = create_distinct_paths(root,
 												current_rel,
+												scanjoin_rel,
 												sort_input_target);
 		}
 	}							/* end of if (setOperations) */
@@ -4107,11 +4117,13 @@ create_grouping_paths(PlannerInfo *root,
 									target_parallel_safe, parse->havingQual);
 
 	/*
-	 * Create either paths for a degenerate grouping or paths for ordinary
-	 * grouping, as appropriate.
+	 * Create either paths for a degenerate grouping, paths for a redundant
+	 * grouping, or paths for ordinary grouping, as appropriate.
 	 */
 	if (is_degenerate_grouping(root))
 		create_degenerate_grouping_paths(root, input_rel, grouped_rel);
+	else if (is_redundant_grouping(root, input_rel))
+		create_redundant_step_paths(root, input_rel, grouped_rel, target);
 	else
 	{
 		int			flags = 0;
@@ -4272,6 +4284,133 @@ is_degenerate_grouping(PlannerInfo *root)
 
 	return (root->hasHavingQual || parse->groupingSets) &&
 		!parse->hasAggs && parse->groupClause == NIL;
+}
+
+/*
+ * is_redundant_grouping
+ *
+ * A redundant grouping is one in which every group is certain to consist of
+ * a single input row, and there is nothing to compute or filter per group.
+ * The input rows can then be returned as they are.
+ */
+static bool
+is_redundant_grouping(PlannerInfo *root, RelOptInfo *input_rel)
+{
+	Query	   *parse = root->parse;
+	List	   *pathkeys;
+
+	if (parse->groupClause == NIL || parse->groupingSets ||
+		parse->hasAggs || parse->havingQual)
+		return false;
+
+	/* SRFs in the grouping columns multiply the rows of the input paths */
+	if (parse->hasTargetSRFs)
+		return false;
+
+	/*
+	 * If the grouping columns are not sortable, group_pathkeys is empty and
+	 * we can only succeed if the input has at most one row; that's fine.
+	 */
+	pathkeys = list_copy_head(root->group_pathkeys,
+							  root->num_groupby_pathkeys);
+
+	return rel_is_distinct_for_pathkeys(root, input_rel, pathkeys);
+}
+
+/*
+ * is_redundant_distinct
+ *
+ * A redundant DISTINCT is one whose input rows are certain to be distinct
+ * already.  The input rows are those of the scan/join relation, possibly
+ * after grouping and window functions.
+ */
+static bool
+is_redundant_distinct(PlannerInfo *root, RelOptInfo *scanjoin_rel)
+{
+	Query	   *parse = root->parse;
+
+	if (parse->hasDistinctOn)
+		return false;
+
+	/* SRFs in the targetlist multiply the rows of the input paths */
+	if (parse->hasTargetSRFs)
+		return false;
+
+	if (parse->groupClause || parse->groupingSets ||
+		parse->hasAggs || root->hasHavingQual)
+	{
+		List	   *common_pathkeys = NIL;
+
+		if (parse->groupingSets)
+			return false;
+
+		/* Without GROUP BY, at most one row comes out of the grouping step */
+		if (parse->groupClause == NIL)
+			return true;
+
+		/* group_pathkeys does not represent an unsortable GROUP BY */
+		if (!grouping_is_sortable(root->processed_groupClause))
+			return false;
+
+		/*
+		 * There is one row for each group, so the rows are distinct if all
+		 * the grouping columns are among the DISTINCT columns.  Failing that,
+		 * they are distinct if the scan/join relation is distinct for the
+		 * grouping columns that are, since those then determine the group.
+		 */
+		for (int i = 0; i < root->num_groupby_pathkeys; i++)
+		{
+			PathKey    *gpathkey = list_nth_node(PathKey,
+												 root->group_pathkeys, i);
+
+			foreach_node(PathKey, dpathkey, root->distinct_pathkeys)
+			{
+				if (dpathkey->pk_eclass == gpathkey->pk_eclass)
+				{
+					common_pathkeys = lappend(common_pathkeys, gpathkey);
+					break;
+				}
+			}
+		}
+
+		if (list_length(common_pathkeys) == root->num_groupby_pathkeys)
+			return true;
+
+		return rel_is_distinct_for_pathkeys(root, scanjoin_rel,
+											common_pathkeys);
+	}
+
+	/*
+	 * Window functions don't change the rows, so check the scan/join rel.  As
+	 * above, it's fine if distinct_pathkeys is empty.
+	 */
+	return rel_is_distinct_for_pathkeys(root, scanjoin_rel,
+										root->distinct_pathkeys);
+}
+
+/*
+ * create_redundant_step_paths
+ *
+ * Build paths for an upper rel whose processing step has been found to be
+ * redundant, by just projecting the input rel's paths to the given target.
+ */
+static void
+create_redundant_step_paths(PlannerInfo *root, RelOptInfo *input_rel,
+							RelOptInfo *output_rel, PathTarget *target)
+{
+	foreach_ptr(Path, path, input_rel->pathlist)
+	{
+		/*
+		 * create_projection_path insists that a ProjectionPath it is given
+		 * belong to the same rel, so look through one that belongs to the
+		 * input rel.
+		 */
+		if (IsA(path, ProjectionPath))
+			path = ((ProjectionPath *) path)->subpath;
+
+		add_path(output_rel, (Path *)
+				 create_projection_path(root, output_rel, path, target));
+	}
 }
 
 /*
@@ -5094,6 +5233,7 @@ create_one_window_path(PlannerInfo *root,
  * Build a new upperrel containing Paths for SELECT DISTINCT evaluation.
  *
  * input_rel: contains the source-data Paths
+ * scanjoin_rel: the scan/join relation of the query
  * target: the pathtarget for the result Paths to compute
  *
  * Note: input paths should already compute the desired pathtarget, since
@@ -5101,7 +5241,7 @@ create_one_window_path(PlannerInfo *root,
  */
 static RelOptInfo *
 create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
-					  PathTarget *target)
+					  RelOptInfo *scanjoin_rel, PathTarget *target)
 {
 	RelOptInfo *distinct_rel;
 
@@ -5125,11 +5265,19 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	distinct_rel->useridiscurrent = input_rel->useridiscurrent;
 	distinct_rel->fdwroutine = input_rel->fdwroutine;
 
-	/* build distinct paths based on input_rel's pathlist */
-	create_final_distinct_paths(root, input_rel, distinct_rel);
+	if (is_redundant_distinct(root, scanjoin_rel))
+	{
+		/* the input rows are distinct already, so just pass them on */
+		create_redundant_step_paths(root, input_rel, distinct_rel, target);
+	}
+	else
+	{
+		/* build distinct paths based on input_rel's pathlist */
+		create_final_distinct_paths(root, input_rel, distinct_rel);
 
-	/* now build distinct paths based on input_rel's partial_pathlist */
-	create_partial_distinct_paths(root, input_rel, distinct_rel, target);
+		/* now build distinct paths based on input_rel's partial_pathlist */
+		create_partial_distinct_paths(root, input_rel, distinct_rel, target);
+	}
 
 	/* Give a helpful error if we failed to create any paths */
 	if (distinct_rel->pathlist == NIL)
