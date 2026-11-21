@@ -873,6 +873,19 @@ alter domain con drop constraint nonexistent;
 ERROR:  constraint "nonexistent" of domain "con" does not exist
 alter domain con drop constraint if exists nonexistent;
 NOTICE:  constraint "nonexistent" of domain "con" does not exist, skipping
+-- a subtransaction after DROP CONSTRAINT must work
+create domain dsubxact as int constraint dsubxact_pos check (value > 0);
+begin;
+alter domain dsubxact drop constraint dsubxact_pos;
+savepoint s1;
+drop domain dsubxact;
+rollback;
+begin;
+alter domain dsubxact drop constraint if exists nonexistent;
+NOTICE:  constraint "nonexistent" of domain "dsubxact" does not exist, skipping
+savepoint s1;
+drop domain dsubxact;
+commit;
 -- not-null constraints
 create domain connotnull integer;
 create table domconnotnulltest

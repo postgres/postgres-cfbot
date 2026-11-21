@@ -2959,6 +2959,17 @@ AlterDomainDropConstraint(List *names, const char *constrName,
 			CatalogTupleUpdate(rel, &tup->t_self, tup);
 		}
 
+		/*
+		 * We must send out an sinval message for the domain, to ensure that
+		 * any dependent plans get rebuilt.  Since this command doesn't change
+		 * the domain's pg_type row, that won't happen automatically; do it
+		 * manually.  Do it before the deletion, so that the deletion's
+		 * CommandCounterIncrement() processes it: queued after the last
+		 * catalog change, it would be left pending, and starting a
+		 * subtransaction would then fail.
+		 */
+		CacheInvalidateHeapTuple(rel, tup, NULL);
+
 		conobj.classId = ConstraintRelationId;
 		conobj.objectId = construct->oid;
 		conobj.objectSubId = 0;
@@ -2983,13 +2994,6 @@ AlterDomainDropConstraint(List *names, const char *constrName,
 					(errmsg("constraint \"%s\" of domain \"%s\" does not exist, skipping",
 							constrName, TypeNameToString(typename))));
 	}
-
-	/*
-	 * We must send out an sinval message for the domain, to ensure that any
-	 * dependent plans get rebuilt.  Since this command doesn't change the
-	 * domain's pg_type row, that won't happen automatically; do it manually.
-	 */
-	CacheInvalidateHeapTuple(rel, tup, NULL);
 
 	ObjectAddressSet(address, TypeRelationId, domainoid);
 
