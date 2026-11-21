@@ -46,6 +46,7 @@ extern PGDLLIMPORT BinaryUpgradeAttributeVersions *binary_upgrade_next_attribute
 
 extern PGDLLIMPORT Oid binary_upgrade_next_pg_enum_oid;
 extern PGDLLIMPORT Oid binary_upgrade_next_pg_authid_oid;
+extern PGDLLIMPORT Oid binary_upgrade_next_pg_subscription_oid;
 
 extern PGDLLIMPORT bool binary_upgrade_record_init_privs;
 
