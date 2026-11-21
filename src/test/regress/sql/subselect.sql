@@ -1832,3 +1832,58 @@ SELECT * FROM not_null_text_tab
 WHERE t NOT IN (SELECT id FROM not_null_tab);
 
 ROLLBACK;
+
+--
+-- Numbered subplan names must not collide with names used as given, such as
+-- CTE names, whichever comes first
+--
+EXPLAIN (COSTS OFF)
+WITH expr_1 AS MATERIALIZED (SELECT 1 AS x)
+SELECT (SELECT x FROM expr_1), (SELECT 2 WHERE random() >= 0);
+
+-- expr_1 is generated first, so the CTE expr_1 that comes after is numbered
+EXPLAIN (COSTS OFF)
+SELECT (SELECT 1 WHERE random() >= 0),
+       (WITH expr_1 AS MATERIALIZED (SELECT 2 AS x) SELECT x FROM expr_1);
+
+-- expr_5 is used as given after expr_1 .. expr_4, so the next one is expr_6
+EXPLAIN (COSTS OFF)
+SELECT (SELECT 1 WHERE random() >= 0), (SELECT 2 WHERE random() >= 0),
+       (SELECT 3 WHERE random() >= 0),
+       (WITH expr_5 AS MATERIALIZED (SELECT 4 AS x) SELECT x FROM expr_5),
+       (SELECT 5 WHERE random() >= 0);
+
+-- Past 32 names, choose_plan_name() looks them up in a hash table.  The CTEs
+-- c1 .. c40 keep their names, generated names still do not collide with
+-- expr_2 and expr_1 given by the user, and a CTE called expr after expr_N have
+-- been generated keeps its name (only the names other than cN are shown)
+CREATE FUNCTION subplan_names(query text) RETURNS text
+LANGUAGE plpgsql AS
+$$
+DECLARE
+  ln text;
+  names text[] := '{}';
+BEGIN
+  FOR ln IN EXECUTE 'EXPLAIN (COSTS OFF) ' || query LOOP
+    IF ln ~ '^\s*(CTE|InitPlan|SubPlan) ' THEN
+      ln := regexp_replace(ln, '^\s*(CTE|InitPlan|SubPlan) ', '');
+      IF ln !~ '^c[0-9]+$' THEN
+        names := names || ln;
+      END IF;
+    END IF;
+  END LOOP;
+  RETURN array_to_string(names, ' ');
+END;
+$$;
+SELECT subplan_names(format(
+  'WITH %s, expr_2 AS MATERIALIZED (SELECT 0 AS x) '
+  'SELECT (SELECT x FROM expr_2), (SELECT 1 WHERE random() >= 0), '
+  '(WITH expr_1 AS MATERIALIZED (SELECT 2 AS x) SELECT x FROM expr_1), '
+  '(WITH expr AS MATERIALIZED (SELECT 3 AS x) SELECT x FROM expr) '
+  'FROM (%s) s',
+  (SELECT string_agg(format('c%s AS MATERIALIZED (SELECT %s AS x)', i, i),
+                     ', ')
+   FROM generate_series(1, 40) i),
+  (SELECT string_agg(format('SELECT x FROM c%s', i), ' UNION ALL ')
+   FROM generate_series(1, 40) i)));
+DROP FUNCTION subplan_names(text);
