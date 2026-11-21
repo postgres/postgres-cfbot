@@ -321,6 +321,8 @@ extern void pgstat_report_xact_timestamp(TimestampTz tstamp);
 extern const char *pgstat_get_backend_current_activity(int pid, bool checkUser);
 extern const char *pgstat_get_crashed_backend_activity(int pid, char *buffer,
 													   int buflen);
+extern TimestampTz pgstat_get_xact_start_by_proc_number(ProcNumber procNumber,
+														int pid);
 extern int64 pgstat_get_my_query_id(void);
 extern int64 pgstat_get_my_plan_id(void);
 
