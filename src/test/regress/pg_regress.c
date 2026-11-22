@@ -2012,9 +2012,6 @@ schedule_read_group(_sched *s)
 
 		if (name == NULL)
 			break;
-		if (num_tests >= max_concurrent_tests)
-			bail("too many tests (%d) in schedule file \"%s\" line %d, test %s",
-				 num_tests, s->schedule, s->line_num, name);
 		num_tests++;
 		test = dep_add(s->graph, name);
 		dep_link(s->fence, test);
@@ -2054,6 +2051,50 @@ log_group_concurrency(instr_time *test_start, instr_time *test_stop,
 		note("effective concurrency %.2f / %d", total / (group_stop - group_start), num_tests);
 }
 
+/* Wait until one running slot exits. Other tests keep running. */
+static int
+reap_one(PID_TYPE *pids, int *statuses, instr_time *stoptimes, int nslots)
+{
+	int			i;
+	PID_TYPE	child;
+	int			status;
+
+	for (;;)
+	{
+#ifdef WIN32
+		PID_TYPE	active[MAX_PARALLEL_TESTS];
+		int			nactive = 0;
+		DWORD		wstatus;
+		int			r;
+
+		for (i = 0; i < nslots; i++)
+			if (pids[i] != INVALID_PID)
+				active[nactive++] = pids[i];
+		r = WaitForMultipleObjects(nactive, active, FALSE, INFINITE);
+		if (r < WAIT_OBJECT_0 || r >= WAIT_OBJECT_0 + nactive)
+			bail("failed to wait for subprocesses: error code %lu", GetLastError());
+		child = active[r - WAIT_OBJECT_0];
+		GetExitCodeProcess(child, &wstatus);
+		CloseHandle(child);
+		status = (int) wstatus;
+#else
+		child = wait(&status);
+		if (child == INVALID_PID)
+			bail("failed to wait for subprocesses: %m");
+#endif
+		for (i = 0; i < nslots; i++)
+		{
+			if (pids[i] == child)
+			{
+				pids[i] = INVALID_PID;
+				statuses[i] = status;
+				INSTR_TIME_SET_CURRENT(stoptimes[i]);
+				return i;
+			}
+		}
+	}
+}
+
 /*
  * Run all the tests specified in one schedule file
  */
@@ -2078,7 +2119,18 @@ run_schedule(const char *schedule, test_start_function startfunc,
 	instr_time	schedule_start_time;
 	instr_time	schedule_stop_time;
 	int			num_tests;
+	bool		is_parallel;
 	int			i;
+	int			next_slot[MAX_PARALLEL_TESTS];
+	int			free_head;
+	int			nrunning;
+	int			ndone;
+	int			pool;
+	double		group_origin;
+	double		group_end;
+	double		group_base;
+	double		t0;
+	double		tf;
 
 	memset(tests, 0, sizeof(tests));
 	memset(resultfiles, 0, sizeof(resultfiles));
@@ -2099,14 +2151,26 @@ run_schedule(const char *schedule, test_start_function startfunc,
 		;
 	fclose(rd.file);
 
+	nrunning = 0;
+	ndone = 0;
+	pool = max_concurrent_tests;
+	if (max_connections > 0 && max_connections < pool)
+		pool = max_connections;
+	free_head = 0;
+	for (i = 0; i < pool; i++)
+	{
+		next_slot[i] = i + 1;
+		pids[i] = INVALID_PID;
+	}
+	next_slot[pool - 1] = -1;
+
 	INSTR_TIME_SET_CURRENT(schedule_start_time);
 	dep_done(&graph, t);
 	for (;;)
 	{
-		num_tests = 0;
-		while (graph.ready != NULL &&
-			   (max_connections <= 0 || num_tests < max_connections) &&
-			   num_tests < max_concurrent_tests)
+		if (nrunning == 0)
+			group_base = total_test_time;
+		while (nrunning < pool && graph.ready != NULL)
 		{
 			t = graph.ready;
 			graph.ready = t->link;
@@ -2119,6 +2183,8 @@ run_schedule(const char *schedule, test_start_function startfunc,
 			}
 			
 			/* a test node */
+			num_tests = free_head;
+			free_head = next_slot[num_tests];
 			nodes[num_tests] = t;
 			tests[num_tests] = t->data;
 			resultfiles[num_tests] = NULL;
@@ -2129,22 +2195,27 @@ run_schedule(const char *schedule, test_start_function startfunc,
 										   &expectfiles[num_tests],
 										   &tags[num_tests]);
 			INSTR_TIME_SET_CURRENT(starttimes[num_tests]);
-			num_tests++;
+			nrunning++;
 		}
-		if (num_tests == 0)
+		if (nrunning == 0)
 			break;
 
-		note_detail("parallel group of %d tests: ", num_tests);
-		wait_for_tests(pids, statuses, stoptimes, tests, num_tests);
-		note_end();
+		i = reap_one(pids, statuses, stoptimes, pool);
 
-		for (i = 0; i < num_tests; i++)
-			dep_done(&graph, nodes[i]);
+		/* timing */
+		t0 = INSTR_TIME_GET_NANOSEC(starttimes[i]);
+		tf = INSTR_TIME_GET_NANOSEC(stoptimes[i]);
 
-		log_group_concurrency(starttimes, stoptimes, &total_test_time, num_tests);
+		if (ndone == 0 || t0 < group_origin)
+			group_origin = t0;
 
+		if (ndone == 0 || tf > group_end)
+			group_end = tf;
+
+		log_group_concurrency(&starttimes[i], &stoptimes[i], &total_test_time, 1);
+		is_parallel = (nrunning > 1 || ndone > 0);
+		
 		/* Check results for all tests */
-		for (i = 0; i < num_tests; i++)
 		{
 			_stringlist *rl,
 					   *el,
@@ -2179,29 +2250,34 @@ run_schedule(const char *schedule, test_start_function startfunc,
 
 			if (statuses[i] != 0)
 			{
-				test_status_failed(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), (num_tests > 1));
+				test_status_failed(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), is_parallel);
 				log_child_failure(statuses[i]);
 			}
 			else
 			{
 				if (differ)
-				{
-					test_status_failed(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), (num_tests > 1));
-				}
+					test_status_failed(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), is_parallel);
 				else
-				{
-					test_status_ok(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), (num_tests > 1));
-				}
+					test_status_ok(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), is_parallel);
 			}
 		}
 
-		for (i = 0; i < num_tests; i++)
 		{
 			tests[i] = NULL;
 			free_stringlist(&resultfiles[i]);
 			free_stringlist(&expectfiles[i]);
 			free_stringlist(&tags[i]);
 		}
+		next_slot[i] = free_head;
+		free_head = i;
+		nrunning--;
+		ndone++;
+		dep_done(&graph, nodes[i]);
+		if (nrunning == 0 && ndone > 1)
+			note("effective concurrency %.2f / %d",
+				 (total_test_time - group_base) / (group_end - group_origin), ndone);
+		if (nrunning == 0)
+			ndone = 0;
 	}
 	INSTR_TIME_SET_CURRENT(schedule_stop_time);
 	schedule_elapsed_time = INSTR_TIME_GET_NANOSEC(schedule_stop_time) - INSTR_TIME_GET_NANOSEC(schedule_start_time);
