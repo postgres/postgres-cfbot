@@ -78,22 +78,39 @@ typedef enum
 } TupStoreStatus;
 
 /*
- * State for a single read pointer.  If we are in state INMEM then all the
- * read pointers' "current" fields denote the read positions.  In state
- * WRITEFILE, the file/offset fields denote the read positions.  In state
- * READFILE, inactive read pointers have valid file/offset, but the active
- * read pointer implicitly has position equal to the temp file's seek position.
+ * State for a single read pointer.
  *
- * Special case: if eof_reached is true, then the pointer's read position is
- * implicitly equal to the write position, and current/file/offset aren't
- * maintained.  This way we need not update all the read pointers each time
- * we write.
+ * eflags shows the capability flags required for this pointer (which can
+ * be different from one pointer to another).
+ *
+ * eof_reached is set true when a forward read fails due to reaching EOF.
+ * While it is true, the pointer's read position is implicitly equal to the
+ * write position, and we do not maintain row/current/file/offset.  This
+ * rule saves us from having to update read pointers each time we write.
+ *
+ * row is the absolute row number of the next record to be read by this
+ * pointer, counting from 0 as the first record inserted after tuplestore
+ * creation or tuplestore_clear().  (Note that tuplestore_trim() does not
+ * renumber rows, though it does make earlier rows inaccessible.)
+ *
+ * current is valid only in state INMEM: it is the pointer's current read
+ * position as an index into the in-memory array.
+ *
+ * file/offset are valid in the non-INMEM states: they denote the pointer's
+ * current read position in the underlying BufFile.  In state WRITEFILE,
+ * all the file/offset fields are valid.  In state READFILE, inactive read
+ * pointers have valid file/offset, but the active read pointer implicitly
+ * has position equal to the temp file's seek position.
  */
 typedef struct
 {
 	int			eflags;			/* capability flags */
 	bool		eof_reached;	/* read has reached EOF */
+	/* remaining fields are only valid when !eof_reached */
+	int64		row;			/* next absolute row number to read */
+	/* fields only valid in INMEM state: */
 	int			current;		/* next array index to read */
+	/* fields only valid in WRITEFILE/READFILE state: */
 	int			file;			/* temp file# */
 	pgoff_t		offset;			/* byte offset in file */
 } TSReadPointer;
@@ -158,13 +175,24 @@ struct Tuplestorestate
 	 * released due to a tuplestore_trim() operation, but we haven't expended
 	 * the effort to slide the remaining pointers down.  These unused pointers
 	 * are set to NULL to catch any invalid accesses.  Note that memtupcount
-	 * includes the deleted pointers.
+	 * includes these deleted pointers.
 	 */
 	void	  **memtuples;		/* array of pointers to palloc'd tuples */
 	int			memtupdeleted;	/* the first N slots are currently unused */
 	int			memtupcount;	/* number of tuples currently present */
 	int			memtupsize;		/* allocated length of memtuples array */
 	bool		growmemtuples;	/* memtuples' growth still underway? */
+
+	/*
+	 * rowstrimmed is the absolute row number of memtuples[0] while we're in
+	 * INMEM state; when we switch to file state, it becomes the absolute row
+	 * number of the first row in the file.  This is redundant information
+	 * while we're in INMEM state, because state->tuples is always the total
+	 * number of tuples inserted into the tuplestore, so that the last valid
+	 * array entry always has absolute row number state->tuples - 1.  However,
+	 * once we switch to a file state it's not redundant.
+	 */
+	int64		rowstrimmed;	/* reference point for tuple row numbers */
 
 	/*
 	 * These variables are used to keep track of the current positions.
@@ -241,6 +269,11 @@ static Tuplestorestate *tuplestore_begin_common(int eflags,
 												int maxKBytes);
 static void tuplestore_puttuple_common(Tuplestorestate *state, void *tuple);
 static void dumptuples(Tuplestorestate *state);
+#ifdef USE_ASSERT_CHECKING
+static void check_read_pointer_rows(Tuplestorestate *state);
+#else
+#define check_read_pointer_rows(state)	((void) 0)
+#endif
 static void tuplestore_updatemax(Tuplestorestate *state);
 static unsigned int getlen(Tuplestorestate *state, bool eofOK);
 static void *copytup_heap(Tuplestorestate *state, void *tup);
@@ -281,6 +314,7 @@ tuplestore_begin_common(int eflags, bool interXact, int maxKBytes)
 
 	state->memtupdeleted = 0;
 	state->memtupcount = 0;
+	state->rowstrimmed = 0;
 	state->tuples = 0;
 
 	/*
@@ -302,6 +336,7 @@ tuplestore_begin_common(int eflags, bool interXact, int maxKBytes)
 
 	state->readptrs[0].eflags = eflags;
 	state->readptrs[0].eof_reached = false;
+	state->readptrs[0].row = 0;
 	state->readptrs[0].current = 0;
 
 	return state;
@@ -422,8 +457,8 @@ tuplestore_alloc_read_pointer(Tuplestorestate *state, int eflags)
 /*
  * tuplestore_clear
  *
- *	Delete all the contents of a tuplestore, and reset its read pointers
- *	to the start.
+ *	Delete all the contents of a tuplestore, reset its read pointers
+ *	to the start, and reset absolute row numbers to start at zero.
  */
 void
 tuplestore_clear(Tuplestorestate *state)
@@ -473,11 +508,13 @@ tuplestore_clear(Tuplestorestate *state)
 	state->truncated = false;
 	state->memtupdeleted = 0;
 	state->memtupcount = 0;
+	state->rowstrimmed = 0;
 	state->tuples = 0;
 	readptr = state->readptrs;
 	for (i = 0; i < state->readptrcount; readptr++, i++)
 	{
 		readptr->eof_reached = false;
+		readptr->row = 0;
 		readptr->current = 0;
 	}
 }
@@ -509,6 +546,8 @@ tuplestore_select_read_pointer(Tuplestorestate *state, int ptr)
 	TSReadPointer *oldptr;
 
 	Assert(ptr >= 0 && ptr < state->readptrcount);
+
+	check_read_pointer_rows(state);
 
 	/* No work if already active */
 	if (ptr == state->activeptr)
@@ -802,7 +841,7 @@ tuplestore_puttuple_common(Tuplestorestate *state, void *tuple)
 	ResourceOwner oldowner;
 	MemoryContext oldcxt;
 
-	state->tuples++;
+	check_read_pointer_rows(state);
 
 	switch (state->status)
 	{
@@ -817,6 +856,7 @@ tuplestore_puttuple_common(Tuplestorestate *state, void *tuple)
 				if (readptr->eof_reached && i != state->activeptr)
 				{
 					readptr->eof_reached = false;
+					readptr->row = state->tuples;
 					readptr->current = state->memtupcount;
 				}
 			}
@@ -835,6 +875,7 @@ tuplestore_puttuple_common(Tuplestorestate *state, void *tuple)
 
 			/* Stash the tuple in the in-memory array */
 			state->memtuples[state->memtupcount++] = tuple;
+			state->tuples++;
 
 			/*
 			 * Done if we still fit in available memory and have array slots.
@@ -895,6 +936,7 @@ tuplestore_puttuple_common(Tuplestorestate *state, void *tuple)
 				if (readptr->eof_reached && i != state->activeptr)
 				{
 					readptr->eof_reached = false;
+					readptr->row = state->tuples;
 					BufFileTell(state->myfile,
 								&readptr->file,
 								&readptr->offset);
@@ -902,6 +944,7 @@ tuplestore_puttuple_common(Tuplestorestate *state, void *tuple)
 			}
 
 			WRITETUP(state, tuple);
+			state->tuples++;
 			break;
 		case TSS_READFILE:
 
@@ -929,12 +972,14 @@ tuplestore_puttuple_common(Tuplestorestate *state, void *tuple)
 				if (readptr->eof_reached && i != state->activeptr)
 				{
 					readptr->eof_reached = false;
+					readptr->row = state->tuples;
 					readptr->file = state->writepos_file;
 					readptr->offset = state->writepos_offset;
 				}
 			}
 
 			WRITETUP(state, tuple);
+			state->tuples++;
 			break;
 		default:
 			elog(ERROR, "invalid tuplestore state");
@@ -960,6 +1005,8 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 
 	Assert(forward || (readptr->eflags & EXEC_FLAG_BACKWARD));
 
+	check_read_pointer_rows(state);
+
 	switch (state->status)
 	{
 		case TSS_INMEM:
@@ -971,6 +1018,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 				if (readptr->current < state->memtupcount)
 				{
 					/* We have another tuple, so return it */
+					readptr->row++;
 					return state->memtuples[readptr->current++];
 				}
 				readptr->eof_reached = true;
@@ -984,6 +1032,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 				 */
 				if (readptr->eof_reached)
 				{
+					readptr->row = state->tuples;
 					readptr->current = state->memtupcount;
 					readptr->eof_reached = false;
 				}
@@ -994,7 +1043,8 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 						Assert(!state->truncated);
 						return NULL;
 					}
-					readptr->current--; /* last returned tuple */
+					readptr->row--; /* last returned tuple */
+					readptr->current--;
 				}
 				if (readptr->current <= state->memtupdeleted)
 				{
@@ -1032,6 +1082,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 				if ((tuplen = getlen(state, true)) != 0)
 				{
 					tup = READTUP(state, tuplen);
+					readptr->row++;
 					return tup;
 				}
 				else
@@ -1055,6 +1106,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 			{
 				/* even a failed backwards fetch gets you out of eof state */
 				readptr->eof_reached = false;
+				readptr->row = state->rowstrimmed;
 				Assert(!state->truncated);
 				return NULL;
 			}
@@ -1063,6 +1115,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 			if (readptr->eof_reached)
 			{
 				readptr->eof_reached = false;
+				readptr->row = state->tuples;
 				/* We will return the tuple returned before returning NULL */
 			}
 			else
@@ -1086,10 +1139,12 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 						ereport(ERROR,
 								(errcode_for_file_access(),
 								 errmsg("could not seek in tuplestore temporary file")));
+					readptr->row = state->rowstrimmed;
 					Assert(!state->truncated);
 					return NULL;
 				}
 				tuplen = getlen(state, false);
+				readptr->row--;
 			}
 
 			/*
@@ -1221,6 +1276,8 @@ tuplestore_skiptuples(Tuplestorestate *state, int64 ntuples, bool forward)
 
 	Assert(forward || (readptr->eflags & EXEC_FLAG_BACKWARD));
 
+	check_read_pointer_rows(state);
+
 	if (ntuples <= 0)
 		return true;
 
@@ -1233,9 +1290,11 @@ tuplestore_skiptuples(Tuplestorestate *state, int64 ntuples, bool forward)
 					return false;
 				if (state->memtupcount - readptr->current >= ntuples)
 				{
+					readptr->row += ntuples;
 					readptr->current += ntuples;
 					return true;
 				}
+				readptr->row = state->tuples;
 				readptr->current = state->memtupcount;
 				readptr->eof_reached = true;
 				return false;
@@ -1244,16 +1303,19 @@ tuplestore_skiptuples(Tuplestorestate *state, int64 ntuples, bool forward)
 			{
 				if (readptr->eof_reached)
 				{
+					readptr->row = state->tuples;
 					readptr->current = state->memtupcount;
 					readptr->eof_reached = false;
 					ntuples--;
 				}
 				if (readptr->current - state->memtupdeleted > ntuples)
 				{
+					readptr->row -= ntuples;
 					readptr->current -= ntuples;
 					return true;
 				}
 				Assert(!state->truncated);
+				readptr->row -= readptr->current - state->memtupdeleted;
 				readptr->current = state->memtupdeleted;
 				return false;
 			}
@@ -1289,6 +1351,9 @@ static void
 dumptuples(Tuplestorestate *state)
 {
 	int			i;
+
+	/* Make rowstrimmed = row number of the oldest tuple we still have */
+	state->rowstrimmed += state->memtupdeleted;
 
 	for (i = state->memtupdeleted;; i++)
 	{
@@ -1330,21 +1395,26 @@ tuplestore_rescan(Tuplestorestate *state)
 	TSReadPointer *readptr = &state->readptrs[state->activeptr];
 
 	Assert(readptr->eflags & EXEC_FLAG_REWIND);
+	/* REWIND should have prevented trimming any tuples */
 	Assert(!state->truncated);
+	Assert(state->rowstrimmed == 0);
 
 	switch (state->status)
 	{
 		case TSS_INMEM:
 			readptr->eof_reached = false;
+			readptr->row = 0;
 			readptr->current = 0;
 			break;
 		case TSS_WRITEFILE:
 			readptr->eof_reached = false;
+			readptr->row = 0;
 			readptr->file = 0;
 			readptr->offset = 0;
 			break;
 		case TSS_READFILE:
 			readptr->eof_reached = false;
+			readptr->row = 0;
 			if (BufFileSeek(state->myfile, 0, 0, SEEK_SET) != 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
@@ -1372,6 +1442,8 @@ tuplestore_copy_read_pointer(Tuplestorestate *state,
 	/* Assigning to self is a no-op */
 	if (srcptr == destptr)
 		return;
+
+	check_read_pointer_rows(state);
 
 	if (dptr->eflags != sptr->eflags)
 	{
@@ -1444,7 +1516,8 @@ tuplestore_copy_read_pointer(Tuplestorestate *state,
  *
  * Calling this function authorizes the tuplestore to delete all tuples
  * before the oldest read pointer, if no read pointer is marked as requiring
- * REWIND capability.
+ * REWIND capability.  However, such deletion doesn't change the absolute
+ * row numbers associated with tuples or read pointer positions.
  *
  * Note: this is obviously safe if no pointer has BACKWARD capability either.
  * If a pointer is marked as BACKWARD but not REWIND capable, it means that
@@ -1471,6 +1544,8 @@ tuplestore_trim(Tuplestorestate *state)
 	 */
 	if (state->status != TSS_INMEM)
 		return;
+
+	check_read_pointer_rows(state);
 
 	/* Find the oldest read pointer */
 	oldest = state->memtupcount;
@@ -1537,12 +1612,50 @@ tuplestore_trim(Tuplestorestate *state)
 
 	state->memtupdeleted = 0;
 	state->memtupcount -= nremove;
+	state->rowstrimmed += nremove;
 	for (i = 0; i < state->readptrcount; i++)
 	{
 		if (!state->readptrs[i].eof_reached)
 			state->readptrs[i].current -= nremove;
 	}
+
+	check_read_pointer_rows(state);
 }
+
+/*
+ * Validate each read pointer's absolute row number against other state.
+ */
+#ifdef USE_ASSERT_CHECKING
+static void
+check_read_pointer_rows(Tuplestorestate *state)
+{
+	/* base is the row number of memtuples[0], if we're in INMEM state */
+	int64		base = state->tuples - state->memtupcount;
+	int64		oldest;
+
+	/* calculate row number of oldest still-accessible tuple */
+	if (state->status == TSS_INMEM)
+	{
+		Assert(base == state->rowstrimmed);
+		oldest = base + state->memtupdeleted;
+	}
+	else
+		oldest = state->rowstrimmed;
+
+	for (int i = 0; i < state->readptrcount; i++)
+	{
+		TSReadPointer *readptr = &state->readptrs[i];
+
+		if (readptr->eof_reached)
+			continue;			/* row is not valid in eof_reached state */
+		/* row mustn't be before oldest tuple, nor beyond the EOF point */
+		Assert(readptr->row >= oldest && readptr->row <= state->tuples);
+		if (state->status == TSS_INMEM)
+			Assert(readptr->row == base + readptr->current);
+		/* in the file states there's no equivalently simple check */
+	}
+}
+#endif
 
 /*
  * tuplestore_updatemax
