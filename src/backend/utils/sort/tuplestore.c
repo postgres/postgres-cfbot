@@ -1222,27 +1222,12 @@ tuplestore_gettupleslot_force(Tuplestorestate *state, bool forward,
 /*
  * tuplestore_advance - exported function to adjust position without fetching
  *
- * We could optimize this case to avoid palloc/pfree overhead, but for the
- * moment it doesn't seem worthwhile.
+ * Returns true if able to advance over a tuple, false if not.
  */
 bool
 tuplestore_advance(Tuplestorestate *state, bool forward)
 {
-	void	   *tuple;
-	bool		should_free;
-
-	tuple = tuplestore_gettuple(state, forward, &should_free);
-
-	if (tuple)
-	{
-		if (should_free)
-			pfree(tuple);
-		return true;
-	}
-	else
-	{
-		return false;
-	}
+	return tuplestore_skiptuples(state, 1, forward);
 }
 
 /*
@@ -1254,70 +1239,39 @@ bool
 tuplestore_skiptuples(Tuplestorestate *state, int64 ntuples, bool forward)
 {
 	TSReadPointer *readptr = &state->readptrs[state->activeptr];
-
-	Assert(forward || (readptr->eflags & EXEC_FLAG_BACKWARD));
-
-	check_read_pointer_rows(state);
+	int64		limit;
 
 	if (ntuples <= 0)
 		return true;
 
-	switch (state->status)
+	if (forward)
 	{
-		case TSS_INMEM:
-			if (forward)
-			{
-				if (readptr->eof_reached)
-					return false;
-				if (state->memtupcount - readptr->current >= ntuples)
-				{
-					readptr->row += ntuples;
-					readptr->current += ntuples;
-					return true;
-				}
-				readptr->row = state->tuples;
-				readptr->current = state->memtupcount;
-				readptr->eof_reached = true;
+		if (readptr->eof_reached)
+			return false;
+		else
+		{
+			limit = state->tuples - readptr->row + 1;
+			/* If ntuples > limit, return false after advancing to EOF */
+			if (!tuplestore_seek(state, readptr->row + Min(limit, ntuples)))
 				return false;
-			}
-			else
-			{
-				if (readptr->eof_reached)
-				{
-					readptr->row = state->tuples;
-					readptr->current = state->memtupcount;
-					readptr->eof_reached = false;
-					ntuples--;
-				}
-				if (readptr->current - state->memtupdeleted > ntuples)
-				{
-					readptr->row -= ntuples;
-					readptr->current -= ntuples;
-					return true;
-				}
-				Assert(!state->truncated);
-				readptr->row -= readptr->current - state->memtupdeleted;
-				readptr->current = state->memtupdeleted;
-				return false;
-			}
-			break;
-
-		default:
-			/* We don't currently try hard to optimize other cases */
-			while (ntuples-- > 0)
-			{
-				void	   *tuple;
-				bool		should_free;
-
-				tuple = tuplestore_gettuple(state, forward, &should_free);
-
-				if (tuple == NULL)
-					return false;
-				if (should_free)
-					pfree(tuple);
-				CHECK_FOR_INTERRUPTS();
-			}
-			return true;
+			return (ntuples <= limit);
+		}
+	}
+	else
+	{
+		if (readptr->eof_reached)
+		{
+			/* Return to the state of being just past the last tuple */
+			readptr->eof_reached = false;
+			readptr->row = state->tuples;
+		}
+		limit = readptr->row - state->rowstrimmed;
+		if (state->status == TSS_INMEM)
+			limit -= state->memtupdeleted;
+		/* If ntuples > limit, return false after moving to start */
+		if (!tuplestore_seek(state, readptr->row - Min(limit, ntuples)))
+			return false;
+		return (ntuples <= limit);
 	}
 }
 
