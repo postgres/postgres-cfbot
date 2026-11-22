@@ -1,19 +1,11 @@
 /* -------------------------------------------------------------------------
  *
  * pgstat_backend.c
- *	  Implementation of backend statistics.
+ *	  Generic infrastructure for per-backend statistics.
  *
- * This file contains the implementation of backend statistics.  It is kept
- * separate from pgstat.c to enforce the line between the statistics access /
- * storage implementation and the details about individual types of
- * statistics.
- *
- * This statistics kind uses a proc number as object ID for the hash table
- * of pgstats.  Entries are created each time a process is spawned, and are
- * dropped when the process exits.  These are not written to the pgstats file
- * on disk.  Pending statistics are managed without direct interactions with
- * PgStat_EntryRef->pending, relying on PendingBackendStats instead so as it
- * is possible to report data within critical sections.
+ * This file manages the per-kind arrays used for per-backend statistics,
+ * including entry creation, fetching, snapshots, transfer to global
+ * statistics, and invalidation.
  *
  * Copyright (c) 2001-2026, PostgreSQL Global Development Group
  *
@@ -24,456 +16,394 @@
 
 #include "postgres.h"
 
-#include "access/xlog.h"
-#include "executor/instrument.h"
-#include "storage/bufmgr.h"
 #include "storage/proc.h"
-#include "storage/procarray.h"
-#include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
 
 /*
- * Backend statistics counts waiting to be flushed out. These counters may be
- * reported within critical sections so we use static memory in order to avoid
- * memory allocation.
+ * Return the shared-memory object for one built-in fixed-numbered statistics
+ * kind.
  */
-static PgStat_BackendPending PendingBackendStats;
-static bool backend_has_iostats = false;
-static bool backend_has_lockstats = false;
-
-/*
- * WAL usage counters saved from pgWalUsage at the previous call to
- * pgstat_flush_backend().  This is used to calculate how much WAL usage
- * happens between pgstat_flush_backend() calls, by subtracting the
- * previous counters from the current ones.
- */
-static WalUsage prevBackendWalUsage;
-
-/*
- * Utility routines to report I/O stats for backends, kept here to avoid
- * exposing PendingBackendStats to the outside world.
- */
-void
-pgstat_count_backend_io_op_time(IOObject io_object, IOContext io_context,
-								IOOp io_op, instr_time io_time)
+static char *
+pgstat_get_per_backend_shmem_data(PgStat_Kind kind)
 {
-	Assert(track_io_timing || track_wal_io_timing);
+	const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
 
-	if (!pgstat_tracks_backend_bktype(MyBackendType))
-		return;
+	Assert(kind_info != NULL);
+	Assert(kind_info->fixed_amount);
+	Assert(pgstat_is_kind_builtin(kind));
 
-	Assert(pgstat_tracks_io_op(MyBackendType, io_object, io_context, io_op));
-
-	INSTR_TIME_ADD(PendingBackendStats.pending_io.pending_times[io_object][io_context][io_op],
-				   io_time);
-
-	backend_has_iostats = true;
-	pgstat_report_fixed = true;
-}
-
-void
-pgstat_count_backend_io_op(IOObject io_object, IOContext io_context,
-						   IOOp io_op, uint32 cnt, uint64 bytes)
-{
-	if (!pgstat_tracks_backend_bktype(MyBackendType))
-		return;
-
-	Assert(pgstat_tracks_io_op(MyBackendType, io_object, io_context, io_op));
-
-	PendingBackendStats.pending_io.counts[io_object][io_context][io_op] += cnt;
-	PendingBackendStats.pending_io.bytes[io_object][io_context][io_op] += bytes;
-
-	backend_has_iostats = true;
-	pgstat_report_fixed = true;
+	return (char *) pgStatLocal.shmem + kind_info->shared_ctl_off;
 }
 
 /*
- * Utility routines to report lock stats for backends, kept here to avoid
- * exposing PendingBackendStats to the outside world.
- */
-void
-pgstat_count_backend_lock_waits(uint8 locktag_type, PgStat_Counter usecs)
-{
-	if (!pgstat_tracks_backend_bktype(MyBackendType))
-		return;
-
-	Assert(locktag_type <= LOCKTAG_LAST_TYPE);
-
-	PendingBackendStats.pending_lock.stats[locktag_type].waits++;
-	PendingBackendStats.pending_lock.stats[locktag_type].wait_time += usecs;
-
-	backend_has_lockstats = true;
-	pgstat_report_fixed = true;
-}
-
-void
-pgstat_count_backend_lock_fastpath_exceeded(uint8 locktag_type)
-{
-	if (!pgstat_tracks_backend_bktype(MyBackendType))
-		return;
-
-	Assert(locktag_type <= LOCKTAG_LAST_TYPE);
-
-	PendingBackendStats.pending_lock.stats[locktag_type].fastpath_exceeded++;
-
-	backend_has_lockstats = true;
-	pgstat_report_fixed = true;
-}
-
-/*
- * Returns statistics of a backend by proc number.
- */
-PgStat_Backend *
-pgstat_fetch_stat_backend(ProcNumber procNumber)
-{
-	PgStat_Backend *backend_entry;
-
-	backend_entry = (PgStat_Backend *) pgstat_fetch_entry(PGSTAT_KIND_BACKEND,
-														  InvalidOid, procNumber,
-														  NULL);
-
-	return backend_entry;
-}
-
-/*
- * Returns statistics of a backend by pid.
+ * Return one per-backend entry, whether or not it is currently active.
  *
- * This routine includes sanity checks to ensure that the backend exists and
- * is running.  "bktype" can be optionally defined to return the BackendType
- * of the backend whose statistics are returned.
+ * Callers that inspect or modify the entry must hold its content lock.
  */
-PgStat_Backend *
-pgstat_fetch_stat_backend_by_pid(int pid, BackendType *bktype)
+void *
+pgstat_get_per_backend_entry(PgStat_Kind kind, ProcNumber procnum)
 {
-	PGPROC	   *proc;
-	PgBackendStatus *beentry;
-	ProcNumber	procNumber;
-	PgStat_Backend *backend_stats;
+	const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+	char	   *array;
+	Size		aligned_entry_size;
 
-	proc = BackendPidGetProc(pid);
-	if (bktype)
-		*bktype = B_INVALID;
-
-	/* this could be an auxiliary process */
-	if (!proc)
-		proc = AuxiliaryPidGetProc(pid);
-
-	if (!proc)
+	if (kind_info == NULL || kind_info->per_backend_entry_size == 0)
 		return NULL;
 
-	procNumber = GetNumberFromPGProc(proc);
+	Assert(pgstat_is_kind_builtin(kind));
 
-	beentry = pgstat_get_beentry_by_proc_number(procNumber);
-	if (!beentry)
+	if (procnum < 0 || procnum >= NumPerBackendStatSlots)
 		return NULL;
 
-	/* check if the backend type tracks statistics */
-	if (!pgstat_tracks_backend_bktype(beentry->st_backendType))
-		return NULL;
-
-	/* if PID does not match, leave */
-	if (beentry->st_procpid != pid)
-		return NULL;
-
-	if (bktype)
-		*bktype = beentry->st_backendType;
+	array = pgStatLocal.shmem->per_backend_arrays[kind];
+	Assert(array != NULL);
 
 	/*
-	 * Retrieve the entry.  Note that "beentry" may be freed depending on the
-	 * value of stats_fetch_consistency, so do not access it from this point.
+	 * The entry type is kind-specific, so use its aligned size as the byte
+	 * stride for the zero-based ProcNumber.
 	 */
-	backend_stats = pgstat_fetch_stat_backend(procNumber);
-	if (!backend_stats)
+	aligned_entry_size = MAXALIGN(kind_info->per_backend_entry_size);
+
+	return array + procnum * aligned_entry_size;
+}
+
+/*
+ * Initialize this process's entry for one per-backend statistics kind.
+ *
+ * A blocking flush during early startup may already have initialized the
+ * entry. In that case, preserve the statistics it contains.
+ */
+static PgStatShared_PerBackendEntry *
+pgstat_create_my_per_backend_entry(PgStat_Kind kind)
+{
+	const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+	PgStatShared_PerBackendEntry *entry;
+
+	entry = pgstat_get_per_backend_entry(kind, MyProcNumber);
+
+	LWLockAcquire(&entry->lock, LW_EXCLUSIVE);
+
+	if (entry->backend_type == B_INVALID)
 	{
-		if (bktype)
-			*bktype = B_INVALID;
-		return NULL;
+		entry->backend_type = MyBackendType;
+		memset((char *) entry + kind_info->per_backend_data_off, 0,
+			   kind_info->per_backend_data_len);
 	}
 
-	return backend_stats;
+	LWLockRelease(&entry->lock);
+
+	return entry;
 }
 
 /*
- * Flush out locally pending backend IO statistics.  Locking is managed
- * by the caller.
+ * Initialize entries for all kinds that use per-backend arrays.
+ *
+ * This runs after any stale entries for the reused ProcNumber have been
+ * transferred to global statistics.
  */
-static void
-pgstat_flush_backend_entry_io(PgStat_EntryRef *entry_ref)
+void
+pgstat_create_my_per_backend_entries(void)
 {
-	PgStatShared_Backend *shbackendent;
-	PgStat_BktypeIO *bktype_shstats;
-	PgStat_PendingIO pending_io;
-
-	/*
-	 * This function can be called even if nothing at all has happened for IO
-	 * statistics.  In this case, avoid unnecessarily modifying the stats
-	 * entry.
-	 */
-	if (!backend_has_iostats)
-		return;
-
-	shbackendent = (PgStatShared_Backend *) entry_ref->shared_stats;
-	bktype_shstats = &shbackendent->stats.io_stats;
-	pending_io = PendingBackendStats.pending_io;
-
-	for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+	for (PgStat_Kind kind = PGSTAT_KIND_BUILTIN_MIN;
+		 kind <= PGSTAT_KIND_BUILTIN_MAX; kind++)
 	{
-		for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+		const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+
+		if (kind_info == NULL || kind_info->per_backend_entry_size == 0)
+			continue;
+
+		(void) pgstat_create_my_per_backend_entry(kind);
+	}
+}
+
+/*
+ * Lock this process's entry for a per-backend statistics kind.
+ *
+ * The blocking path initializes an inactive entry, which allows forced
+ * flushes during early process startup. The routine nonblocking path does not
+ * initialize entries.
+ *
+ * NB: On success, the entry is returned with its content lock held. A
+ * nonblocking call returns NULL if the entry cannot be locked or is inactive.
+ */
+void *
+pgstat_lock_my_per_backend_entry(PgStat_Kind kind, bool nowait)
+{
+	const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+	PgStatShared_PerBackendEntry *entry;
+
+	entry = pgstat_get_per_backend_entry(kind, MyProcNumber);
+
+	if (nowait)
+	{
+		if (!LWLockConditionalAcquire(&entry->lock, LW_EXCLUSIVE))
+			return NULL;
+
+		if (entry->backend_type == B_INVALID)
 		{
-			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
-			{
-				instr_time	time;
+			LWLockRelease(&entry->lock);
+			return NULL;
+		}
+	}
+	else
+	{
+		LWLockAcquire(&entry->lock, LW_EXCLUSIVE);
 
-				bktype_shstats->counts[io_object][io_context][io_op] +=
-					pending_io.counts[io_object][io_context][io_op];
-				bktype_shstats->bytes[io_object][io_context][io_op] +=
-					pending_io.bytes[io_object][io_context][io_op];
-				time = pending_io.pending_times[io_object][io_context][io_op];
-
-				bktype_shstats->times[io_object][io_context][io_op] +=
-					INSTR_TIME_GET_MICROSEC(time);
-			}
+		if (entry->backend_type == B_INVALID)
+		{
+			entry->backend_type = MyBackendType;
+			memset((char *) entry + kind_info->per_backend_data_off, 0,
+				   kind_info->per_backend_data_len);
 		}
 	}
 
-	/*
-	 * Clear out the statistics buffer, so it can be re-used.
-	 */
-	MemSet(&PendingBackendStats.pending_io, 0, sizeof(PgStat_PendingIO));
-
-	backend_has_iostats = false;
+	return entry;
 }
 
 /*
- * To determine whether WAL usage happened.
- */
-static inline bool
-pgstat_backend_wal_have_pending(void)
-{
-	return (pgWalUsage.wal_records != prevBackendWalUsage.wal_records);
-}
-
-/*
- * Flush out locally pending backend WAL statistics.  Locking is managed
- * by the caller.
- */
-static void
-pgstat_flush_backend_entry_wal(PgStat_EntryRef *entry_ref)
-{
-	PgStatShared_Backend *shbackendent;
-	PgStat_WalCounters *bktype_shstats;
-	WalUsage	wal_usage_diff = {0};
-
-	/*
-	 * This function can be called even if nothing at all has happened for WAL
-	 * statistics.  In this case, avoid unnecessarily modifying the stats
-	 * entry.
-	 */
-	if (!pgstat_backend_wal_have_pending())
-		return;
-
-	shbackendent = (PgStatShared_Backend *) entry_ref->shared_stats;
-	bktype_shstats = &shbackendent->stats.wal_counters;
-
-	/*
-	 * Calculate how much WAL usage counters were increased by subtracting the
-	 * previous counters from the current ones.
-	 */
-	WalUsageAccumDiff(&wal_usage_diff, &pgWalUsage, &prevBackendWalUsage);
-
-#define WALSTAT_ACC(fld, var_to_add) \
-	(bktype_shstats->fld += var_to_add.fld)
-	WALSTAT_ACC(wal_buffers_full, wal_usage_diff);
-	WALSTAT_ACC(wal_records, wal_usage_diff);
-	WALSTAT_ACC(wal_fpi, wal_usage_diff);
-	WALSTAT_ACC(wal_bytes, wal_usage_diff);
-	WALSTAT_ACC(wal_fpi_bytes, wal_usage_diff);
-#undef WALSTAT_ACC
-
-	/*
-	 * Save the current counters for the subsequent calculation of WAL usage.
-	 */
-	prevBackendWalUsage = pgWalUsage;
-}
-
-/*
- * Flush out locally pending backend lock statistics.  Locking is managed
- * by the caller.
- */
-static void
-pgstat_flush_backend_entry_lock(PgStat_EntryRef *entry_ref)
-{
-	PgStatShared_Backend *shbackendent;
-	PgStat_PendingLock *bktype_shstats;
-
-	if (!backend_has_lockstats)
-		return;
-
-	shbackendent = (PgStatShared_Backend *) entry_ref->shared_stats;
-	bktype_shstats = &shbackendent->stats.lock_stats;
-
-	for (int i = 0; i <= LOCKTAG_LAST_TYPE; i++)
-	{
-#define LOCKSTAT_ACC(fld) \
-	(bktype_shstats->stats[i].fld += PendingBackendStats.pending_lock.stats[i].fld)
-		LOCKSTAT_ACC(waits);
-		LOCKSTAT_ACC(wait_time);
-		LOCKSTAT_ACC(fastpath_exceeded);
-#undef LOCKSTAT_ACC
-	}
-
-	MemSet(&PendingBackendStats.pending_lock, 0, sizeof(PgStat_PendingLock));
-	backend_has_lockstats = false;
-}
-
-/*
- * Flush out locally pending backend statistics
+ * Accumulate all active per-backend entries into a fixed-kind snapshot.
  *
- * "flags" parameter controls which statistics to flush.  Returns true
- * if some statistics could not be flushed due to lock contention.
- */
-bool
-pgstat_flush_backend(bool nowait, uint32 flags)
-{
-	PgStat_EntryRef *entry_ref;
-	bool		has_pending_data = false;
-
-	if (!pgstat_tracks_backend_bktype(MyBackendType))
-		return false;
-
-	/* Some IO data pending? */
-	if ((flags & PGSTAT_BACKEND_FLUSH_IO) && backend_has_iostats)
-		has_pending_data = true;
-
-	/* Some WAL data pending? */
-	if ((flags & PGSTAT_BACKEND_FLUSH_WAL) &&
-		pgstat_backend_wal_have_pending())
-		has_pending_data = true;
-
-	/* Some lock data pending? */
-	if ((flags & PGSTAT_BACKEND_FLUSH_LOCK) && backend_has_lockstats)
-		has_pending_data = true;
-
-	if (!has_pending_data)
-		return false;
-
-	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_BACKEND, InvalidOid,
-											MyProcNumber, nowait);
-	if (!entry_ref)
-		return true;
-
-	/* Flush requested statistics */
-	if (flags & PGSTAT_BACKEND_FLUSH_IO)
-		pgstat_flush_backend_entry_io(entry_ref);
-
-	if (flags & PGSTAT_BACKEND_FLUSH_WAL)
-		pgstat_flush_backend_entry_wal(entry_ref);
-
-	if (flags & PGSTAT_BACKEND_FLUSH_LOCK)
-		pgstat_flush_backend_entry_lock(entry_ref);
-
-	pgstat_unlock_entry(entry_ref);
-
-	return false;
-}
-
-/*
- * Callback to flush out locally pending backend statistics.
- *
- * If some stats could not be flushed due to lock contention, return true.
- */
-bool
-pgstat_backend_flush_cb(bool nowait)
-{
-	return pgstat_flush_backend(nowait, PGSTAT_BACKEND_FLUSH_ALL);
-}
-
-/*
- * Create backend statistics entry for proc number.
+ * SNAPSHOT mode also copies every active entry into the backend-local
+ * snapshot hash, fixing both the values and the set of visible processes.
+ * The caller must hold the kind lock to prevent entries from moving into the
+ * global statistics while the snapshot is assembled.
  */
 void
-pgstat_create_backend(ProcNumber procnum)
+pgstat_per_backend_snapshot(PgStat_Kind kind, void *snap)
 {
-	PgStat_EntryRef *entry_ref;
-	PgStatShared_Backend *shstatent;
+	const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+	PgStat_HashKey key = {0};
 
-	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_BACKEND, InvalidOid,
-											procnum, false);
-	shstatent = (PgStatShared_Backend *) entry_ref->shared_stats;
+	key.kind = kind;
+	key.dboid = InvalidOid;
 
-	/*
-	 * NB: need to accept that there might be stats from an older backend,
-	 * e.g. if we previously used this proc number.
-	 */
-	memset(&shstatent->stats, 0, sizeof(shstatent->stats));
-	pgstat_unlock_entry(entry_ref);
+	for (ProcNumber procnum = 0; procnum < NumPerBackendStatSlots; procnum++)
+	{
+		PgStatShared_PerBackendEntry *entry;
 
-	MemSet(&PendingBackendStats, 0, sizeof(PgStat_BackendPending));
-	backend_has_iostats = false;
-	backend_has_lockstats = false;
+		entry = pgstat_get_per_backend_entry(kind, procnum);
 
-	/*
-	 * Initialize prevBackendWalUsage with pgWalUsage so that
-	 * pgstat_backend_flush_cb() can calculate how much pgWalUsage counters
-	 * are increased by subtracting prevBackendWalUsage from pgWalUsage.
-	 */
-	prevBackendWalUsage = pgWalUsage;
+		LWLockAcquire(&entry->lock, LW_SHARED);
+
+		if (entry->backend_type != B_INVALID)
+		{
+			kind_info->per_backend_acc_cb(snap, entry);
+
+			if (pgstat_fetch_consistency == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT)
+			{
+				key.objid = procnum;
+				pgstat_cache_snapshot_entry(&key,
+											(char *) entry +
+											kind_info->per_backend_data_off,
+											kind_info->per_backend_data_len);
+			}
+		}
+
+		LWLockRelease(&entry->lock);
+	}
 }
 
 /*
- * Backend statistics are not collected for all BackendTypes.
+ * Fetch one process's per-backend statistics.
  *
- * The following BackendTypes do not participate in the backend stats
- * subsystem:
- * - The same and for the same reasons as in pgstat_tracks_io_bktype().
- * - B_BG_WRITER, B_CHECKPOINTER, B_STARTUP and B_AUTOVAC_LAUNCHER because their
- * I/O stats are already visible in pg_stat_io and there is only one of those.
- *
- * Function returns true if BackendType participates in the backend stats
- * subsystem and false if it does not.
- *
- * When adding a new BackendType, also consider adding relevant restrictions to
- * pgstat_tracks_io_object() and pgstat_tracks_io_op().
+ * NONE mode returns a copy allocated in the current memory context. CACHE and
+ * SNAPSHOT modes return data owned by the backend-local statistics snapshot.
+ * Return NULL if the ProcNumber is invalid or no process was active at the
+ * consistency mode's observation point.
  */
-bool
-pgstat_tracks_backend_bktype(BackendType bktype)
+void *
+pgstat_fetch_per_backend(PgStat_Kind kind, ProcNumber procnum)
 {
-	/*
-	 * List every type so that new backend types trigger a warning about
-	 * needing to adjust this switch.
-	 */
-	switch (bktype)
-	{
-		case B_INVALID:
-		case B_AUTOVAC_LAUNCHER:
-		case B_DEAD_END_BACKEND:
-		case B_ARCHIVER:
-		case B_LOGGER:
-		case B_BG_WRITER:
-		case B_CHECKPOINTER:
-		case B_IO_WORKER:
-		case B_STARTUP:
-		case B_DATACHECKSUMSWORKER_LAUNCHER:
-		case B_DATACHECKSUMSWORKER_WORKER:
-			return false;
+	const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+	PgStatShared_PerBackendEntry *entry;
+	PgStat_HashKey key = {0};
+	void	   *stats_data;
+	bool		found;
 
-		case B_AUTOVAC_WORKER:
-		case B_BACKEND:
-		case B_BG_WORKER:
-		case B_STANDALONE_BACKEND:
-		case B_SLOTSYNC_WORKER:
-		case B_WAL_RECEIVER:
-		case B_WAL_SENDER:
-		case B_WAL_SUMMARIZER:
-		case B_WAL_WRITER:
-			return true;
+	pgstat_prep_snapshot();
+
+	entry = pgstat_get_per_backend_entry(kind, procnum);
+
+	if (entry == NULL)
+		return NULL;
+
+	/* Read directly without caching in NONE mode */
+	if (pgstat_fetch_consistency == PGSTAT_FETCH_CONSISTENCY_NONE)
+	{
+		LWLockAcquire(&entry->lock, LW_SHARED);
+
+		if (entry->backend_type == B_INVALID)
+		{
+			LWLockRelease(&entry->lock);
+			return NULL;
+		}
+
+		stats_data = palloc(kind_info->per_backend_data_len);
+		memcpy(stats_data, (char *) entry + kind_info->per_backend_data_off,
+			   kind_info->per_backend_data_len);
+		LWLockRelease(&entry->lock);
+
+		return stats_data;
 	}
 
-	return false;
+	Assert(pgstat_fetch_consistency == PGSTAT_FETCH_CONSISTENCY_CACHE ||
+		   pgstat_fetch_consistency == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT);
+
+	/*
+	 * A full fixed-kind snapshot pre-caches all active entries. CACHE mode
+	 * reads only the requested array entry on a cache miss.
+	 */
+	if (pgstat_fetch_consistency == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT)
+		pgstat_snapshot_fixed(kind);
+	else
+		pgStatLocal.snapshot.mode = PGSTAT_FETCH_CONSISTENCY_CACHE;
+
+	key.kind = kind;
+	key.dboid = InvalidOid;
+	key.objid = procnum;
+
+	stats_data = pgstat_lookup_snapshot_entry(&key, &found);
+
+	if (found)
+		return stats_data;
+
+	/*
+	 * A miss after building a full snapshot means that the process was not
+	 * active at the snapshot point.
+	 */
+	if (pgstat_fetch_consistency == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT)
+		return NULL;
+
+	LWLockAcquire(&entry->lock, LW_SHARED);
+
+	if (entry->backend_type == B_INVALID)
+		stats_data = pgstat_cache_snapshot_entry(&key, NULL, 0);
+	else
+		stats_data = pgstat_cache_snapshot_entry(&key,
+												 (char *) entry +
+												 kind_info->per_backend_data_off,
+												 kind_info->per_backend_data_len);
+
+	LWLockRelease(&entry->lock);
+
+	return stats_data;
 }
 
-void
-pgstat_backend_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts)
+/*
+ * Transfer this process's entry into global statistics and invalidate it.
+ *
+ * The kind lock serializes this transfer with global snapshots and resets.
+ * The entry lock serializes it with routine flushes and per-backend reads.
+ */
+static void
+pgstat_acc_my_per_backend(PgStat_Kind kind)
 {
-	((PgStatShared_Backend *) header)->stats.stat_reset_timestamp = ts;
+	const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+	PgStatShared_PerBackendEntry *entry;
+	char	   *shared_struct;
+	LWLock	   *lock;
+	void	   *dst;
+
+	entry = pgstat_get_per_backend_entry(kind, MyProcNumber);
+
+	if (entry == NULL)
+		return;
+
+	shared_struct = pgstat_get_per_backend_shmem_data(kind);
+	lock = (LWLock *) (shared_struct +
+					   kind_info->per_backend_shared_lock_off);
+	dst = shared_struct + kind_info->shared_data_off;
+
+	LWLockAcquire(lock, LW_EXCLUSIVE);
+	LWLockAcquire(&entry->lock, LW_EXCLUSIVE);
+
+	if (entry->backend_type != B_INVALID)
+	{
+		kind_info->per_backend_acc_cb(dst, entry);
+		entry->backend_type = B_INVALID;
+	}
+
+	LWLockRelease(&entry->lock);
+	LWLockRelease(lock);
+}
+
+/*
+ * Transfer this process's entries for all per-backend statistics kinds.
+ *
+ * This is used both at process exit and before reusing a ProcNumber.
+ */
+void
+pgstat_acc_my_per_backend_entries(void)
+{
+	for (PgStat_Kind kind = PGSTAT_KIND_BUILTIN_MIN;
+		 kind <= PGSTAT_KIND_BUILTIN_MAX; kind++)
+	{
+		const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+
+		if (kind_info == NULL || kind_info->per_backend_entry_size == 0)
+			continue;
+
+		pgstat_acc_my_per_backend(kind);
+	}
+}
+
+/*
+ * Transfer every active entry into global statistics and invalidate it.
+ *
+ * This is called during clean server shutdown before the statistics file is
+ * written.
+ */
+static void
+pgstat_acc_all_per_backend(PgStat_Kind kind)
+{
+	const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+	char	   *shared_struct;
+	LWLock	   *lock;
+	void	   *dst;
+
+	shared_struct = pgstat_get_per_backend_shmem_data(kind);
+	lock = (LWLock *) (shared_struct +
+					   kind_info->per_backend_shared_lock_off);
+	dst = shared_struct + kind_info->shared_data_off;
+
+	LWLockAcquire(lock, LW_EXCLUSIVE);
+
+	for (ProcNumber procnum = 0; procnum < NumPerBackendStatSlots; procnum++)
+	{
+		PgStatShared_PerBackendEntry *entry;
+
+		entry = pgstat_get_per_backend_entry(kind, procnum);
+
+		LWLockAcquire(&entry->lock, LW_EXCLUSIVE);
+
+		if (entry->backend_type != B_INVALID)
+		{
+			kind_info->per_backend_acc_cb(dst, entry);
+			entry->backend_type = B_INVALID;
+		}
+
+		LWLockRelease(&entry->lock);
+	}
+
+	LWLockRelease(lock);
+}
+
+/*
+ * Transfer all entries for all per-backend statistics kinds.
+ *
+ * The caller uses this before writing the statistics file at clean shutdown.
+ */
+void
+pgstat_acc_all_per_backend_entries(void)
+{
+	for (PgStat_Kind kind = PGSTAT_KIND_BUILTIN_MIN;
+		 kind <= PGSTAT_KIND_BUILTIN_MAX; kind++)
+	{
+		const PgStat_KindInfo *kind_info = pgstat_get_kind_info(kind);
+
+		if (kind_info == NULL || kind_info->per_backend_entry_size == 0)
+			continue;
+
+		pgstat_acc_all_per_backend(kind);
+	}
 }
