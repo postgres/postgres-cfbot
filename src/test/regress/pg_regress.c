@@ -1818,12 +1818,19 @@ dep_free(_dep_graph *g)
 
 /*
  * schedule  = ( space | comment | group )+
- * group     = "test:" name+
+ * group     = "test" [ "batch" | "concurrently" | "sequentially" ] ":" items
+ * items     = name+                          -- batch (default) and concurrently
+ *           | ( "(" name+ ")" | name )+      -- sequentially
  * name      = (space "\" space comment? newline)+ test-name
  * comment   = "#" .*
  * space     = [ \t]*
  * newline   = "\n" | "\r\n"
  * test-name = [^ \t\n\r#\\,:()]+
+ *
+ * batch runs its names in parallel and shifts the barrier. concurrently and
+ * sequentially share one next barrier, created when it is missing, so those
+ * groups overlap. A parenthesized sequential list hangs off an auxiliary
+ * node so the next item still splits a single edge.
  */
 typedef struct
 {
@@ -1835,6 +1842,7 @@ typedef struct
 	char	   *p;
 	_dep_graph *graph;
 	_dep_node  *fence;
+	_dep_node  *open;			/* next barrier; NULL if none yet */
 } _sched;
 
 /*
@@ -1954,10 +1962,7 @@ schedule_read_name(_sched *s)
 	}
 
 	if (len == 0)
-		bail("syntax error in schedule file \"%s\" line %d: "
-			 "expected test name, got \"%.*s\"",
-			 s->schedule, s->line_num,
-			 (int) strcspn(s->p, "\r\n"), s->p);
+		return NULL;
     
 	name = pg_malloc(len + 1);
 	strncpy(name, s->p, len);
@@ -1966,13 +1971,80 @@ schedule_read_name(_sched *s)
 	return name;
 }
 
+/*
+ * One item from prev toward next: a name, or "(" names ")" joined by an
+ * auxiliary node. next may be NULL; the caller links the returned node.
+ * NULL means this group is finished.
+ */
+static _dep_node *
+schedule_read_item(_sched *s, _dep_node *prev, _dep_node *next)
+{
+	char	   *name;
+	_dep_node  *aux;
+	_dep_node  *test;
+	int			count;
+
+	name = schedule_read_name(s);
+
+	/* a test name */
+	if (name != NULL)
+	{
+		test = dep_add(s->graph, name);
+		dep_link(prev, test);
+		if (next != NULL)
+			dep_link(test, next);
+		return test;
+	}
+
+	/* end of a test group */
+	if (schedule_is_eol(*s->p))
+		return NULL;
+
+	/* an subgroup in brackets */
+	if (*s->p != '(')
+		bail("syntax error in schedule file \"%s\" %d: expected test name or '(' but got \"%s\"",
+			 s->schedule, s->line_num, s->p);
+	s->p++; /* skip the '(' */
+	aux = dep_add(s->graph, NULL);
+	count = 0;
+
+	/* process all tests in the group */
+	while((name = schedule_read_name(s)) != NULL)
+	{
+		test = dep_add(s->graph, name);
+		dep_link(prev, test);
+		dep_link(test, aux);
+		count++;
+	}
+
+	if (*s->p != ')')
+		bail("syntax error in schedule file \"%s\" %d: unclosed '('",
+			 s->schedule, s->line_num);
+
+	if (count == 0)
+		bail("empty test group in schedule file \"%s\" line %d",
+			 s->schedule, s->line_num);
+
+	s->p++; /* skip the ')' */
+
+	/* establish the dependency between this group and next fence */
+	if (next != NULL)
+		dep_link(aux, next);
+	return aux;
+}
+
 /* One group, or false at end of file. */
 static bool
 schedule_read_group(_sched *s)
 {
 	int start_line;
 	int			num_tests = 0;
+	bool		concurrent = false;
+	bool		sequential = false;
+	bool		batch;
 	_dep_node  *next;
+	_dep_node  *prev;
+	_dep_node  *item;
 
 	/* discard white spaces and comments */
 	for (;;)
@@ -1993,9 +2065,23 @@ schedule_read_group(_sched *s)
 			 s->schedule, s->line_num,
 			 (int) strcspn(s->p, "\r\n"), s->p);
 
-	
-	/* skip spaces after `test` */
+	/* skip spaces after `test`, then an optional kind */
 	s->p += 4;
+	schedule_skip_whitespace(s);
+	if (strncmp(s->p, "batch", 5) == 0)
+	{
+		s->p += 5;
+	}
+	else if (strncmp(s->p, "concurrently", 12) == 0)
+	{
+		s->p += 12;
+		concurrent = true;
+	}
+	else if (strncmp(s->p, "sequentially", 12) == 0)
+	{
+		s->p += 12;
+		sequential = true;
+	}
 	schedule_skip_whitespace(s);
 
 	/* check for the colon separator */
@@ -2004,23 +2090,42 @@ schedule_read_group(_sched *s)
 			 s->schedule, s->line_num);
 	start_line = s->line_num;
 
-	next = dep_add(s->graph, NULL);
+	/*
+	 * A batch shifts onto the pending barrier and then gets a new one.
+	 * Sequential and concurrent groups share the pending barrier, creating
+	 * it only when there is none.
+	 */
+	batch = !concurrent && !sequential;
+	if (batch && s->open != NULL)
+	{
+		s->fence = s->open;
+		s->open = NULL;
+	}
+	if (s->open == NULL)
+		s->open = dep_add(s->graph, NULL);
+	next = s->open;
+
+	/* Sequential walks prev. Linking each item to the barrier would skip the rest. */
+	prev = s->fence;
 	for (;;)
 	{
-		char	   *name = schedule_read_name(s);
-		_dep_node  *test;
-
-		if (name == NULL)
+		item = schedule_read_item(s, prev, sequential ? NULL : next);
+		if (item == NULL)
 			break;
 		num_tests++;
-		test = dep_add(s->graph, name);
-		dep_link(s->fence, test);
-		dep_link(test, next);
+		if (sequential)
+			prev = item;
 	}
 	if (num_tests == 0)
 		bail("empty test group in schedule file \"%s\" line %d",
 			 s->schedule, start_line);
-	s->fence = next;
+	if (sequential)
+		dep_link(prev, next);
+	if (batch)
+	{
+		s->fence = next;
+		s->open = NULL;
+	}
 	return true;
 }
 
@@ -2051,7 +2156,14 @@ log_group_concurrency(instr_time *test_start, instr_time *test_stop,
 		note("effective concurrency %.2f / %d", total / (group_stop - group_start), num_tests);
 }
 
-/* Wait until one running slot exits. Other tests keep running. */
+/*
+ * reap_one - return the index of the slot that exited
+ *
+ * Wait until one running slot exits. Assume that every background
+ * process is a test. The diff processes that compare results on failures
+ * don't affect this because they are started sycnhronously so none of
+ * those will be running concurrently with this function.
+ */
 static int
 reap_one(PID_TYPE *pids, int *statuses, instr_time *stoptimes, int nslots)
 {

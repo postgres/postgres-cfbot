@@ -14,7 +14,8 @@ test: test_setup
 # ----------
 # The first group of parallel tests
 # ----------
-test: \
+test concurrently: \
+    database \
     boolean \
     char \
     name \
@@ -24,27 +25,31 @@ test: \
     int4 \
     int8 \
     oid \
-    float4 \
-    float8 \
     bit \
     numeric \
     txid \
     uuid \
     enum \
     money \
-    rangetypes \
     pg_lsn \
     regproc
+# float4 and float8 create immutable parallel-unsafe I/O functions
+test sequentially: (float4 float8) opr_sanity
+
+# multirangetypes depends on rangetypes.
+# multirangetypes and strings must finish before type_sanity
+# (strings sets text column storage to external).
+test sequentially: rangetypes (multirangetypes strings) type_sanity
 
 # ----------
 # The second group of parallel tests
-# multirangetypes depends on rangetypes
-# multirangetypes shouldn't run concurrently with type_sanity
 # ----------
-test: \
-    strings \
+test concurrently: \
     md5 \
-    numerology \
+    numerology
+
+# geometry depends on point, lseg, line, box, path, polygon, circle
+test sequentially: ( \
     point \
     lseg \
     line \
@@ -52,36 +57,35 @@ test: \
     path \
     polygon \
     circle \
+) geometry
+
+# horology depends on date, time, timetz, timestamp, timestamptz, interval
+test sequentially: ( \
     date \
     time \
     timetz \
     timestamp \
     timestamptz \
     interval \
+) horology
+
+test concurrently: \
     inet \
     macaddr \
-    macaddr8 \
-    multirangetypes
+    macaddr8
 
 # ----------
 # Another group of parallel tests
-# geometry depends on point, lseg, line, box, path, polygon, circle
-# horology depends on date, time, timetz, timestamp, timestamptz, interval
 # ----------
-test: \
-    geometry \
-    horology \
+test concurrently: \
     tstypes \
     regex \
-    type_sanity \
-    opr_sanity \
     misc_sanity \
     comments \
     expressions \
     unicode \
     xid \
     mvcc \
-    database \
     stats_import \
     pg_ndistinct \
     pg_dependencies \
