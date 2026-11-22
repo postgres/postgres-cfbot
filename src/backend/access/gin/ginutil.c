@@ -73,6 +73,7 @@ ginhandler(PG_FUNCTION_ARGS)
 		.ambulkdelete = ginbulkdelete,
 		.amvacuumcleanup = ginvacuumcleanup,
 		.amcanreturn = NULL,
+		.amcanreturnorderby = NULL,
 		.amcostestimate = gincostestimate,
 		.amgettreeheight = NULL,
 		.amoptions = ginoptions,

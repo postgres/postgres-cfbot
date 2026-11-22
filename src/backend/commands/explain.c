@@ -1976,6 +1976,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 										   planstate, es);
 			show_scan_qual(((IndexScan *) plan)->indexorderbyorig,
 						   "Order By", planstate, ancestors, es);
+			if (es->verbose && ((IndexScan *) plan)->indexorderbynused > 0)
+				ExplainPropertyInteger("Order By Values Used", NULL,
+									   ((IndexScan *) plan)->indexorderbynused,
+									   es);
 			show_scan_qual(plan->qual, "Filter", planstate, ancestors, es);
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 1,

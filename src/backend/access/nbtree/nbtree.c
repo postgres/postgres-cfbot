@@ -158,6 +158,7 @@ bthandler(PG_FUNCTION_ARGS)
 		.ambulkdelete = btbulkdelete,
 		.amvacuumcleanup = btvacuumcleanup,
 		.amcanreturn = btcanreturn,
+		.amcanreturnorderby = NULL,
 		.amcostestimate = btcostestimate,
 		.amgettreeheight = btgettreeheight,
 		.amoptions = btoptions,

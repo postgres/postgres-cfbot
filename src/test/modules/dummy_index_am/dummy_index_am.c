@@ -325,6 +325,7 @@ dihandler(PG_FUNCTION_ARGS)
 		.ambulkdelete = dibulkdelete,
 		.amvacuumcleanup = divacuumcleanup,
 		.amcanreturn = NULL,
+		.amcanreturnorderby = NULL,
 		.amcostestimate = dicostestimate,
 		.amgettreeheight = NULL,
 		.amoptions = dioptions,

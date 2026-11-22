@@ -288,6 +288,7 @@ brinhandler(PG_FUNCTION_ARGS)
 		.ambulkdelete = brinbulkdelete,
 		.amvacuumcleanup = brinvacuumcleanup,
 		.amcanreturn = NULL,
+		.amcanreturnorderby = NULL,
 		.amcostestimate = brincostestimate,
 		.amgettreeheight = NULL,
 		.amoptions = brinoptions,

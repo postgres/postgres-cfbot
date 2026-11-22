@@ -316,6 +316,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 									  amroutine->amrestrpos != NULL);
 				info->amcostestimate = amroutine->amcostestimate;
 				Assert(info->amcostestimate != NULL);
+				info->amcanreturnorderby = amroutine->amcanreturnorderby;
 
 				/* Fetch index opclass options */
 				info->opclassoptions = RelationGetIndexAttOptions(indexRelation, true);
@@ -414,6 +415,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 				info->amhasgetbitmap = false;
 				info->amcanmarkpos = false;
 				info->amcostestimate = NULL;
+				info->amcanreturnorderby = NULL;
 
 				info->sortopfamily = NULL;
 				info->reverse_sort = NULL;
