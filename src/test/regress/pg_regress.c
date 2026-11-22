@@ -1716,6 +1716,107 @@ log_child_failure(int exitstatus)
 
 
 /*
+ * Dependency graph data structures
+ *
+ * Both edge and node are defined as a linked list, where
+ * an edge simply points to the next node 
+ */
+typedef struct _dep_edge
+{
+	struct _dep_node *to;
+	struct _dep_edge *next;
+} _dep_edge;
+
+typedef struct _dep_node
+{
+	void	   *data;
+	int			waiting;
+	_dep_edge  *out;
+	/* link for the graph node set */
+	struct _dep_node *next;
+	/* link on the ready list */
+	struct _dep_node *link;
+} _dep_node;
+
+typedef struct
+{
+	/* list of all nodes in the graph*/
+	_dep_node  *nodes;
+	/* linked list, nodes with all dependencies fullfilled */
+	_dep_node  *ready;
+} _dep_graph;
+
+static _dep_node *
+dep_add(_dep_graph *g, void *data)
+{
+	_dep_node  *n = pg_malloc0_object(_dep_node);
+
+	n->data = data;
+	n->next = g->nodes;
+	g->nodes = n;
+	return n;
+}
+
+/*
+ * By adding an edge from *from to *to, the depencency relation
+ * bethem them is established.
+ * i.e. *to cannot be started before *from is finished.
+ */
+static void
+dep_link(_dep_node *from, _dep_node *to)
+{
+	_dep_edge  *e = pg_malloc_object(_dep_edge);
+
+	e->to = to;
+	e->next = from->out;
+	from->out = e;
+	to->waiting++;
+}
+
+/*
+ * One node is done, update each dependent, decreasing their waiting count
+ * and moving them to the ready list if when the last dependency is fulfilled.
+ */
+static void
+dep_done(_dep_graph *g, _dep_node *n)
+{
+	_dep_edge  *e;
+
+	for (e = n->out; e != NULL; e = e->next)
+	{
+		if (--e->to->waiting == 0)
+		{
+			e->to->link = g->ready;
+			g->ready = e->to;
+		}
+	}
+}
+
+/*
+ * Destruct a dependency graph
+ */
+static void
+dep_free(_dep_graph *g)
+{
+	/* graph node list */
+	for(_dep_node *n_next, *n = g->nodes; n != NULL; n = n_next)
+	{
+		/* fanout of each node */
+		for(_dep_edge *e_next, *e = n->out; e != NULL; e = e_next)
+		{
+			e_next = e->next;
+			pg_free(e);
+		}
+		/* string holding test name */
+		if (n->data)
+			pg_free(n->data);
+		/* node itself */
+		n_next = n->next;
+		pg_free(n);
+	}
+}
+
+/*
  * schedule  = ( space | comment | group )+
  * group     = "test:" name+
  * name      = (space "\" space comment? newline)+ test-name
@@ -1732,6 +1833,8 @@ typedef struct
 	bool		line_has_name;
 	char		buf[1024];
 	char	   *p;
+	_dep_graph *graph;
+	_dep_node  *fence;
 } _sched;
 
 /*
@@ -1865,10 +1968,12 @@ schedule_read_name(_sched *s)
 
 /* One group, or false at end of file. */
 static bool
-schedule_read_group(_sched *s, char **tests, int *num_tests)
+schedule_read_group(_sched *s)
 {
 	int start_line;
-	*num_tests = 0;
+	int			num_tests = 0;
+	_dep_node  *next;
+
 	/* discard white spaces and comments */
 	for (;;)
 	{
@@ -1899,21 +2004,26 @@ schedule_read_group(_sched *s, char **tests, int *num_tests)
 			 s->schedule, s->line_num);
 	start_line = s->line_num;
 
-	/* read test names */
-	*num_tests = 0;
+	next = dep_add(s->graph, NULL);
 	for (;;)
 	{
 		char	   *name = schedule_read_name(s);
+		_dep_node  *test;
+
 		if (name == NULL)
 			break;
-		if (*num_tests >= max_concurrent_tests)
+		if (num_tests >= max_concurrent_tests)
 			bail("too many tests (%d) in schedule file \"%s\" line %d, test %s",
-				*num_tests, s->schedule, s->line_num, name);
-		tests[(*num_tests)++] = name;
+				 num_tests, s->schedule, s->line_num, name);
+		num_tests++;
+		test = dep_add(s->graph, name);
+		dep_link(s->fence, test);
+		dep_link(test, next);
 	}
-	if (*num_tests == 0)
+	if (num_tests == 0)
 		bail("empty test group in schedule file \"%s\" line %d",
 			 s->schedule, start_line);
+	s->fence = next;
 	return true;
 }
 
@@ -1959,70 +2069,77 @@ run_schedule(const char *schedule, test_start_function startfunc,
 	instr_time	starttimes[MAX_PARALLEL_TESTS];
 	instr_time	stoptimes[MAX_PARALLEL_TESTS];
 	int			statuses[MAX_PARALLEL_TESTS];
+	_dep_node  *nodes[MAX_PARALLEL_TESTS];
+	_dep_graph	graph;
+	_dep_node  *t;
 	_sched		rd;
 	double		total_test_time = 0;
+	double		schedule_elapsed_time = 0;	
 	instr_time	schedule_start_time;
 	instr_time	schedule_stop_time;
 	int			num_tests;
+	int			i;
 
 	memset(tests, 0, sizeof(tests));
 	memset(resultfiles, 0, sizeof(resultfiles));
 	memset(expectfiles, 0, sizeof(expectfiles));
 	memset(tags, 0, sizeof(tags));
 
+	memset(&graph, 0, sizeof(graph));
 	memset(&rd, 0, sizeof(rd));
 	rd.schedule = schedule;
 	rd.p = rd.buf;
+	rd.graph = &graph;
 	rd.file = fopen(schedule, "r");
 	if (!rd.file)
 		bail("could not open file \"%s\" for reading: %m", schedule);
+	t = dep_add(&graph, NULL);
+	rd.fence = t;
+	while (schedule_read_group(&rd))
+		;
+	fclose(rd.file);
 
 	INSTR_TIME_SET_CURRENT(schedule_start_time);
-	while (schedule_read_group(&rd, tests, &num_tests))
+	dep_done(&graph, t);
+	for (;;)
 	{
-		int			i;
+		num_tests = 0;
+		while (graph.ready != NULL &&
+			   (max_connections <= 0 || num_tests < max_connections) &&
+			   num_tests < max_concurrent_tests)
+		{
+			t = graph.ready;
+			graph.ready = t->link;
 
-		if (num_tests == 1)
-		{
-			pids[0] = (startfunc) (tests[0], &resultfiles[0], &expectfiles[0], &tags[0]);
-			INSTR_TIME_SET_CURRENT(starttimes[0]);
-			wait_for_tests(pids, statuses, stoptimes, NULL, 1);
-			/* status line is finished below */
+			/* a fence node */
+			if (t->data == NULL)
+			{
+				dep_done(&graph, t);
+				continue;
+			}
+			
+			/* a test node */
+			nodes[num_tests] = t;
+			tests[num_tests] = t->data;
+			resultfiles[num_tests] = NULL;
+			expectfiles[num_tests] = NULL;
+			tags[num_tests] = NULL;
+			pids[num_tests] = (startfunc) (tests[num_tests],
+										   &resultfiles[num_tests],
+										   &expectfiles[num_tests],
+										   &tags[num_tests]);
+			INSTR_TIME_SET_CURRENT(starttimes[num_tests]);
+			num_tests++;
 		}
-		else if (max_connections > 0 && max_connections < num_tests)
-		{
-			int			oldest = 0;
+		if (num_tests == 0)
+			break;
 
-			note_detail("parallel group (%d tests, in groups of %d): ",
-						num_tests, max_connections);
-			for (i = 0; i < num_tests; i++)
-			{
-				if (i - oldest >= max_connections)
-				{
-					wait_for_tests(pids + oldest, statuses + oldest,
-								   stoptimes + oldest,
-								   tests + oldest, i - oldest);
-					oldest = i;
-				}
-				pids[i] = (startfunc) (tests[i], &resultfiles[i], &expectfiles[i], &tags[i]);
-				INSTR_TIME_SET_CURRENT(starttimes[i]);
-			}
-			wait_for_tests(pids + oldest, statuses + oldest,
-						   stoptimes + oldest,
-						   tests + oldest, i - oldest);
-			note_end();
-		}
-		else
-		{
-			note_detail("parallel group (%d tests): ", num_tests);
-			for (i = 0; i < num_tests; i++)
-			{
-				pids[i] = (startfunc) (tests[i], &resultfiles[i], &expectfiles[i], &tags[i]);
-				INSTR_TIME_SET_CURRENT(starttimes[i]);
-			}
-			wait_for_tests(pids, statuses, stoptimes, tests, num_tests);
-			note_end();
-		}
+		note_detail("parallel group of %d tests: ", num_tests);
+		wait_for_tests(pids, statuses, stoptimes, tests, num_tests);
+		note_end();
+
+		for (i = 0; i < num_tests; i++)
+			dep_done(&graph, nodes[i]);
 
 		log_group_concurrency(starttimes, stoptimes, &total_test_time, num_tests);
 
@@ -2080,7 +2197,6 @@ run_schedule(const char *schedule, test_start_function startfunc,
 
 		for (i = 0; i < num_tests; i++)
 		{
-			pg_free(tests[i]);
 			tests[i] = NULL;
 			free_stringlist(&resultfiles[i]);
 			free_stringlist(&expectfiles[i]);
@@ -2088,12 +2204,13 @@ run_schedule(const char *schedule, test_start_function startfunc,
 		}
 	}
 	INSTR_TIME_SET_CURRENT(schedule_stop_time);
-	
-	note("schedule effective concurrency %.2f", 
-		total_test_time / (INSTR_TIME_GET_NANOSEC(schedule_stop_time) - INSTR_TIME_GET_NANOSEC(schedule_start_time))
+	schedule_elapsed_time = INSTR_TIME_GET_NANOSEC(schedule_stop_time) - INSTR_TIME_GET_NANOSEC(schedule_start_time);
+	note("schedule effective concurrency %.2f, %.2f seconds", 
+		total_test_time / schedule_elapsed_time, schedule_elapsed_time * 1e-9
 	);
 
-	fclose(rd.file);
+	/* cleanup */
+	dep_free(&graph);
 }
 
 /*
