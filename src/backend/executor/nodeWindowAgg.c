@@ -70,8 +70,7 @@ typedef struct WindowObjectData
 	void	   *localmem;		/* WinGetPartitionLocalMemory's chunk */
 	int			markptr;		/* tuplestore mark pointer for this fn */
 	int			readptr;		/* tuplestore read pointer for this fn */
-	int64		markpos;		/* row that markptr is positioned on */
-	int64		seekpos;		/* row that readptr is positioned on */
+	int64		markpos;		/* oldest row this fn may still fetch */
 	uint8	  **notnull_info;	/* not null info for each func args */
 	int64	   *num_notnull_info;	/* track size (number of tuples in
 									 * partition) of the notnull_info array
@@ -1294,9 +1293,15 @@ begin_partition(WindowAggState *winstate)
 		}
 	}
 
-	/* Create new tuplestore if not done already. */
+	/*
+	 * Create new tuplestore if not done already.  If we do have one, check
+	 * that it was cleared by release_partition; this is important since we
+	 * depend on absolute row numbering within the tuplestore.
+	 */
 	if (unlikely(winstate->buffer == NULL))
 		prepare_tuplestore(winstate);
+	else
+		Assert(tuplestore_tuple_count(winstate->buffer) == 0);
 
 	winstate->next_partition = false;
 
@@ -1304,16 +1309,15 @@ begin_partition(WindowAggState *winstate)
 	{
 		WindowObject agg_winobj = winstate->agg_winobj;
 
-		/* reset mark and see positions for aggregate functions */
-		agg_winobj->markpos = -1;
-		agg_winobj->seekpos = -1;
+		/* Reset mark position for aggregate functions */
+		agg_winobj->markpos = 0;
 
 		/* Also reset the row counters for aggregates */
 		winstate->aggregatedbase = 0;
 		winstate->aggregatedupto = 0;
 	}
 
-	/* reset mark and seek positions for each real window function */
+	/* Reset mark position for each real window function */
 	for (int i = 0; i < numfuncs; i++)
 	{
 		WindowStatePerFunc perfuncstate = &(winstate->perfunc[i]);
@@ -1322,8 +1326,7 @@ begin_partition(WindowAggState *winstate)
 		{
 			WindowObject winobj = perfuncstate->winobj;
 
-			winobj->markpos = -1;
-			winobj->seekpos = -1;
+			winobj->markpos = 0;
 
 			/* reset null map */
 			if (winobj->ignore_nulls == IGNORE_NULLS ||
@@ -3307,59 +3310,19 @@ window_gettupleslot(WindowObject winobj, int64 pos, TupleTableSlot *slot)
 	tuplestore_select_read_pointer(winstate->buffer, winobj->readptr);
 
 	/*
-	 * Advance or rewind until we are within one tuple of the one we want.
+	 * Position the read pointer on the wanted row by its absolute number; the
+	 * partition's rows are numbered from 0 in the tuplestore.
 	 */
-	if (winobj->seekpos < pos - 1)
-	{
-		if (!tuplestore_skiptuples(winstate->buffer,
-								   pos - 1 - winobj->seekpos,
-								   true))
-			elog(ERROR, "unexpected end of tuplestore");
-		winobj->seekpos = pos - 1;
-	}
-	else if (winobj->seekpos > pos + 1)
-	{
-		if (!tuplestore_skiptuples(winstate->buffer,
-								   winobj->seekpos - (pos + 1),
-								   false))
-			elog(ERROR, "unexpected end of tuplestore");
-		winobj->seekpos = pos + 1;
-	}
-	else if (winobj->seekpos == pos)
-	{
-		/*
-		 * There's no API to refetch the tuple at the current position.  We
-		 * have to move one tuple forward, and then one backward.  (We don't
-		 * do it the other way because we might try to fetch the row before
-		 * our mark, which isn't allowed.)  XXX this case could stand to be
-		 * optimized.
-		 */
-		tuplestore_advance(winstate->buffer, true);
-		winobj->seekpos++;
-	}
+	if (!tuplestore_seek(winstate->buffer, pos))
+		elog(ERROR, "unexpected end of tuplestore");
 
 	/*
-	 * Now we should be on the tuple immediately before or after the one we
-	 * want, so just fetch forwards or backwards as appropriate.
-	 *
 	 * Notice that we tell tuplestore_gettupleslot to make a physical copy of
 	 * the fetched tuple.  This ensures that the slot's contents remain valid
 	 * through manipulations of the tuplestore, which some callers depend on.
 	 */
-	if (winobj->seekpos > pos)
-	{
-		if (!tuplestore_gettupleslot(winstate->buffer, false, true, slot))
-			elog(ERROR, "unexpected end of tuplestore");
-		winobj->seekpos--;
-	}
-	else
-	{
-		if (!tuplestore_gettupleslot(winstate->buffer, true, true, slot))
-			elog(ERROR, "unexpected end of tuplestore");
-		winobj->seekpos++;
-	}
-
-	Assert(winobj->seekpos == pos);
+	if (!tuplestore_gettupleslot(winstate->buffer, true, true, slot))
+		elog(ERROR, "unexpected end of tuplestore");
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -3776,28 +3739,27 @@ void
 WinSetMarkPosition(WindowObject winobj, int64 markpos)
 {
 	WindowAggState *winstate;
+	int64		target;
 
 	Assert(WindowObjectIsValid(winobj));
 	winstate = winobj->winstate;
 
 	if (markpos < winobj->markpos)
 		elog(ERROR, "cannot move WindowObject's mark position backward");
+	winobj->markpos = markpos;
+	/* Don't try to move the mark pointer past current EOF */
+	target = tuplestore_tuple_count(winstate->buffer);
+	target = Min(markpos, target);
 	tuplestore_select_read_pointer(winstate->buffer, winobj->markptr);
-	if (markpos > winobj->markpos)
-	{
-		tuplestore_skiptuples(winstate->buffer,
-							  markpos - winobj->markpos,
-							  true);
-		winobj->markpos = markpos;
-	}
+	Assert(tuplestore_tell(winstate->buffer) <= target);
+	if (!tuplestore_seek(winstate->buffer, target))
+		elog(ERROR, "unexpected end of tuplestore");
+	Assert(!tuplestore_ateof(winstate->buffer));
 	tuplestore_select_read_pointer(winstate->buffer, winobj->readptr);
-	if (markpos > winobj->seekpos)
-	{
-		tuplestore_skiptuples(winstate->buffer,
-							  markpos - winobj->seekpos,
-							  true);
-		winobj->seekpos = markpos;
-	}
+	if (tuplestore_tell(winstate->buffer) < target &&
+		!tuplestore_seek(winstate->buffer, target))
+		elog(ERROR, "unexpected end of tuplestore");
+	Assert(!tuplestore_ateof(winstate->buffer));
 }
 
 /*
