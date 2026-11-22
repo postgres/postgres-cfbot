@@ -79,9 +79,12 @@ gbt_float8_dist(const void *a, const void *b, FmgrInfo *flinfo)
 	float8		arg2 = *(const float8 *) b;
 	float8		r;
 
+	/*
+	 * If the difference of two finite values overflows, this yields an
+	 * infinite distance.  Don't throw an error: KNN searches compute
+	 * distances for index entries they merely visit.
+	 */
 	r = arg1 - arg2;
-	if (unlikely(isinf(r)) && !isinf(arg1) && !isinf(arg2))
-		float_overflow_error();
 	if (unlikely(isnan(r)))
 	{
 		if (isnan(arg1) && isnan(arg2))
