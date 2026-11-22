@@ -269,6 +269,9 @@ static Tuplestorestate *tuplestore_begin_common(int eflags,
 												int maxKBytes);
 static void tuplestore_puttuple_common(Tuplestorestate *state, void *tuple);
 static void dumptuples(Tuplestorestate *state);
+static void switch_to_readfile(Tuplestorestate *state);
+static bool step_record_forward(Tuplestorestate *state);
+static bool step_record_backward(Tuplestorestate *state);
 #ifdef USE_ASSERT_CHECKING
 static void check_read_pointer_rows(Tuplestorestate *state);
 #else
@@ -930,6 +933,25 @@ tuplestore_puttuple_common(Tuplestorestate *state, void *tuple)
 			state->status = TSS_WRITEFILE;
 			dumptuples(state);
 			break;
+
+		case TSS_READFILE:
+
+			/*
+			 * Switch from reading to writing.
+			 */
+			if (!state->readptrs[state->activeptr].eof_reached)
+				BufFileTell(state->myfile,
+							&state->readptrs[state->activeptr].file,
+							&state->readptrs[state->activeptr].offset);
+			if (BufFileSeek(state->myfile,
+							state->writepos_file, state->writepos_offset,
+							SEEK_SET) != 0)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not seek in tuplestore temporary file")));
+			state->status = TSS_WRITEFILE;
+			pg_fallthrough;
+
 		case TSS_WRITEFILE:
 
 			/*
@@ -947,41 +969,6 @@ tuplestore_puttuple_common(Tuplestorestate *state, void *tuple)
 					BufFileTell(state->myfile,
 								&readptr->file,
 								&readptr->offset);
-				}
-			}
-
-			WRITETUP(state, tuple);
-			state->tuples++;
-			break;
-		case TSS_READFILE:
-
-			/*
-			 * Switch from reading to writing.
-			 */
-			if (!state->readptrs[state->activeptr].eof_reached)
-				BufFileTell(state->myfile,
-							&state->readptrs[state->activeptr].file,
-							&state->readptrs[state->activeptr].offset);
-			if (BufFileSeek(state->myfile,
-							state->writepos_file, state->writepos_offset,
-							SEEK_SET) != 0)
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not seek in tuplestore temporary file")));
-			state->status = TSS_WRITEFILE;
-
-			/*
-			 * Update read pointers as needed; see API spec above.
-			 */
-			readptr = state->readptrs;
-			for (i = 0; i < state->readptrcount; readptr++, i++)
-			{
-				if (readptr->eof_reached && i != state->activeptr)
-				{
-					readptr->eof_reached = false;
-					readptr->row = state->tuples;
-					readptr->file = state->writepos_file;
-					readptr->offset = state->writepos_offset;
 				}
 			}
 
@@ -1066,20 +1053,7 @@ tuplestore_gettuple(Tuplestorestate *state, bool forward,
 			/* Skip state change if we'll just return NULL */
 			if (readptr->eof_reached && forward)
 				return NULL;
-
-			/*
-			 * Switch from writing to reading.
-			 */
-			BufFileTell(state->myfile,
-						&state->writepos_file, &state->writepos_offset);
-			if (!readptr->eof_reached)
-				if (BufFileSeek(state->myfile,
-								readptr->file, readptr->offset,
-								SEEK_SET) != 0)
-					ereport(ERROR,
-							(errcode_for_file_access(),
-							 errmsg("could not seek in tuplestore temporary file")));
-			state->status = TSS_READFILE;
+			switch_to_readfile(state);
 			pg_fallthrough;
 
 		case TSS_READFILE:
@@ -1348,6 +1322,113 @@ tuplestore_skiptuples(Tuplestorestate *state, int64 ntuples, bool forward)
 }
 
 /*
+ * tuplestore_tell - return the active read pointer's absolute row number
+ *
+ * If the read pointer is "at EOF" then the result is state->tuples + 1;
+ * otherwise it is in the range 0..state->tuples.
+ */
+int64
+tuplestore_tell(Tuplestorestate *state)
+{
+	TSReadPointer *readptr = &state->readptrs[state->activeptr];
+
+	return readptr->eof_reached ? (state->tuples + 1) : readptr->row;
+}
+
+/*
+ * tuplestore_seek - move the active read pointer to an absolute row number
+ *
+ * The argument is interpreted as per tuplestore_tell(); in particular,
+ * row = state->tuples + 1 causes the pointer to be set "at EOF", while
+ * row = state->tuples causes the pointer to be set after the last stored
+ * row but not "at EOF".
+ *
+ * Returns true if successful, false if the argument is out of range
+ * (including pointing to a trimmed-away tuple); the tuplestore state
+ * is unchanged in the latter case.
+ *
+ * Moving backward requires EXEC_FLAG_BACKWARD.
+ */
+bool
+tuplestore_seek(Tuplestorestate *state, int64 row)
+{
+	TSReadPointer *readptr = &state->readptrs[state->activeptr];
+	int64		cur;
+
+	check_read_pointer_rows(state);
+
+	/* Quick exit if row is obviously bogus */
+	if (row < state->rowstrimmed || row > state->tuples + 1)
+		return false;
+	/* Quick exit for no-op requests */
+	cur = tuplestore_tell(state);
+	if (row == cur)
+		return true;
+	Assert(row > cur || (readptr->eflags & EXEC_FLAG_BACKWARD));
+
+	switch (state->status)
+	{
+		case TSS_INMEM:
+			{
+				int64		base = state->tuples - state->memtupcount;
+
+				if (row < base + state->memtupdeleted)
+					return false;
+				if (row > state->tuples)
+					readptr->eof_reached = true;
+				else
+				{
+					readptr->eof_reached = false;
+					readptr->row = row;
+					readptr->current = (int) (row - base);
+				}
+				return true;
+			}
+
+		case TSS_WRITEFILE:
+			switch_to_readfile(state);
+			pg_fallthrough;
+
+		case TSS_READFILE:
+			/* We must seek the file to the correct tuple */
+			if (readptr->eof_reached)
+			{
+				/* Return to the state of being just past the last tuple */
+				readptr->eof_reached = false;
+				readptr->row = state->tuples;
+			}
+
+			while (readptr->row < row)
+			{
+				/* This should fail only when we're advancing to "at EOF" */
+				if (!step_record_forward(state))
+				{
+					Assert(readptr->row == state->tuples);
+					readptr->eof_reached = true;
+					return true;
+				}
+				readptr->row++;
+				CHECK_FOR_INTERRUPTS();
+			}
+			while (readptr->row > row)
+			{
+				/* This should not fail given prior test against rowstrimmed */
+				if (!step_record_backward(state))
+					ereport(ERROR,
+							(errcode_for_file_access(),
+							 errmsg("could not seek in tuplestore temporary file")));
+				readptr->row--;
+				CHECK_FOR_INTERRUPTS();
+			}
+			return true;
+
+		default:
+			elog(ERROR, "invalid tuplestore state");
+			return false;		/* keep compiler quiet */
+	}
+}
+
+/*
  * dumptuples - remove tuples from memory and write to tape
  *
  * As a side effect, we must convert each read pointer's position from
@@ -1391,6 +1472,77 @@ dumptuples(Tuplestorestate *state)
 	/* Now we can reset memtupdeleted along with memtupcount */
 	state->memtupdeleted = 0;
 	state->memtupcount = 0;
+}
+
+/*
+ * switch_to_readfile - switch from state TSS_WRITEFILE to TSS_READFILE
+ *
+ * Save the write position and seek to the active read pointer's position.
+ */
+static void
+switch_to_readfile(Tuplestorestate *state)
+{
+	TSReadPointer *readptr = &state->readptrs[state->activeptr];
+
+	Assert(state->status == TSS_WRITEFILE);
+	BufFileTell(state->myfile,
+				&state->writepos_file, &state->writepos_offset);
+	if (!readptr->eof_reached)
+		if (BufFileSeek(state->myfile,
+						readptr->file, readptr->offset,
+						SEEK_SET) != 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not seek in tuplestore temporary file")));
+	state->status = TSS_READFILE;
+}
+
+/*
+ * step_record_forward - move the temp file position forward by one tuple
+ *
+ * Returns false, without moving, at the end of the file.
+ */
+static bool
+step_record_forward(Tuplestorestate *state)
+{
+	unsigned int tuplen = getlen(state, true);
+	pgoff_t		rest;
+
+	if (tuplen == 0)
+		return false;
+	if (state->backward)
+		rest = tuplen;
+	else
+		rest = tuplen - sizeof(unsigned int);
+	if (BufFileSeek(state->myfile, 0, rest, SEEK_CUR) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not seek in tuplestore temporary file")));
+	return true;
+}
+
+/*
+ * step_record_backward - move the temp file position backward by one tuple
+ *
+ * Returns false, without moving, at the start of the file.
+ */
+static bool
+step_record_backward(Tuplestorestate *state)
+{
+	unsigned int tuplen;
+
+	Assert(state->backward);
+	if (BufFileSeek(state->myfile, 0, -(pgoff_t) sizeof(unsigned int),
+					SEEK_CUR) != 0)
+		return false;
+	tuplen = getlen(state, false);
+	if (BufFileSeek(state->myfile, 0,
+					-(pgoff_t) (tuplen + sizeof(unsigned int)),
+					SEEK_CUR) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not seek in tuplestore temporary file")));
+	return true;
 }
 
 /*
