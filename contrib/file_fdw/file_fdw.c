@@ -36,6 +36,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
+#include "utils/backend_status.h"
 #include "utils/acl.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -120,6 +121,16 @@ typedef struct FileFdwExecutionState
 } FileFdwExecutionState;
 
 /*
+ * Since progress tracking of multiple COPY commands is not supported, the
+ * first file_fdw node of the plan needs to set pgstat_track_progress to false
+ * during startup, and set this variable to remember that it needs to be
+ * restored during shutdown.
+ */
+static bool pgstat_track_progress_disabled = false;
+/* The number of file_fdw nodes in the plan. */
+static int	nodes = 0;
+
+/*
  * SQL functions
  */
 PG_FUNCTION_INFO_V1(file_fdw_handler);
@@ -144,6 +155,7 @@ static ForeignScan *fileGetForeignPlan(PlannerInfo *root,
 static void fileExplainForeignScan(ForeignScanState *node, ExplainState *es);
 static void fileBeginForeignScan(ForeignScanState *node, int eflags);
 static TupleTableSlot *fileIterateForeignScan(ForeignScanState *node);
+static TupleTableSlot *fileIterateForeignScanInternal(ForeignScanState *node);
 static void fileReScanForeignScan(ForeignScanState *node);
 static void fileEndForeignScan(ForeignScanState *node);
 static bool fileAnalyzeForeignTable(Relation relation,
@@ -172,6 +184,8 @@ static void estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
 static int	file_acquire_sample_rows(Relation onerel, int elevel,
 									 HeapTuple *rows, int targrows,
 									 double *totalrows, double *totaldeadrows);
+static void suspend_progress_tracking_if_needed(void);
+static void resume_progress_tracking_if_needed(void);
 
 
 /*
@@ -617,6 +631,12 @@ fileGetForeignPlan(PlannerInfo *root,
 	Index		scan_relid = baserel->relid;
 
 	/*
+	 * This seems to be the appropriate place to count file_fdw nodes in the
+	 * plan.
+	 */
+	nodes++;
+
+	/*
 	 * We have no native ability to evaluate restriction clauses, so we just
 	 * put all the scan_clauses into the plan node's qual list for the
 	 * executor to check.  So all we have to do here is strip RestrictInfo
@@ -683,6 +703,12 @@ fileBeginForeignScan(ForeignScanState *node, int eflags)
 	FileFdwExecutionState *festate;
 
 	/*
+	 * Since fileEndForeignScan() deals with progress tracking regardless
+	 * EXPLAIN, we need to do here as well.
+	 */
+	suspend_progress_tracking_if_needed();
+
+	/*
 	 * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
 	 */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
@@ -728,6 +754,26 @@ fileBeginForeignScan(ForeignScanState *node, int eflags)
  */
 static TupleTableSlot *
 fileIterateForeignScan(ForeignScanState *node)
+{
+	TupleTableSlot *result = NULL;
+
+	PG_TRY();
+	{
+		result = fileIterateForeignScanInternal(node);
+	}
+	PG_CATCH();
+	{
+		resume_progress_tracking_if_needed();
+
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	return result;
+}
+
+static TupleTableSlot *
+fileIterateForeignScanInternal(ForeignScanState *node)
 {
 	FileFdwExecutionState *festate = (FileFdwExecutionState *) node->fdw_state;
 	EState	   *estate = CreateExecutorState();
@@ -846,6 +892,12 @@ static void
 fileEndForeignScan(ForeignScanState *node)
 {
 	FileFdwExecutionState *festate = (FileFdwExecutionState *) node->fdw_state;
+
+	/*
+	 * Since we cannot distinguish the EXPLAIN case in fileGetForeignPlan(),
+	 * this is needed regardless EXPLAIN.
+	 */
+	resume_progress_tracking_if_needed();
 
 	/* if festate is NULL, we are in EXPLAIN; nothing to do */
 	if (!festate)
@@ -1343,4 +1395,38 @@ file_acquire_sample_rows(Relation onerel, int elevel,
 					*totalrows, numrows)));
 
 	return numrows;
+}
+
+/*
+ * Save the value of pgstat_track_progress if this is the first file_fdw node
+ * of a plan containing multiple file_fdw nodes, and disable the progress
+ * tracking. The monitoring infrastructure currently does not support
+ * monitoring of multiple COPY commands.
+ */
+static void
+suspend_progress_tracking_if_needed(void)
+{
+	if (nodes > 1 && !pgstat_track_progress_disabled)
+	{
+		pgstat_track_progress = false;
+		pgstat_track_progress_disabled = true;
+	}
+}
+
+/*
+ * Enable progress tracking if we disabled it earlier.
+ *
+ * XXX Should we distinguish the COMMIT case and restore the tracking when
+ * called for the last node? Not sure.
+ */
+static void
+resume_progress_tracking_if_needed(void)
+{
+	if (pgstat_track_progress_disabled)
+	{
+		pgstat_track_progress = true;
+		pgstat_track_progress_disabled = false;
+	}
+
+	nodes = 0;
 }
