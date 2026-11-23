@@ -922,6 +922,8 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 		!_bt_parallel_seize(scan, &blkno, &lastcurrblkno, true))
 		return false;
 
+	RecordIndexScanStrategy(scan->instrument, BAS_NORMAL);
+
 	/*
 	 * Initialize the scan's arrays (if any) for the current scan direction
 	 * (except when they were already set to later values as part of

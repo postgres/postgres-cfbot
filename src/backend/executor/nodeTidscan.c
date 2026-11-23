@@ -25,7 +25,9 @@
 #include "access/sysattr.h"
 #include "access/tableam.h"
 #include "catalog/pg_type.h"
+#include "executor/execParallel.h"
 #include "executor/executor.h"
+#include "executor/instrument.h"
 #include "executor/nodeTidscan.h"
 #include "lib/qunique.h"
 #include "miscadmin.h"
@@ -146,9 +148,17 @@ TidListEval(TidScanState *tidstate)
 	 * the node might never get executed.
 	 */
 	if (tidstate->ss.ss_currentScanDesc == NULL)
+	{
+		uint32		flags = SO_NONE;
+
+		if (tidstate->ss.ps.state->es_instrument & INSTRUMENT_BUFFERS)
+			flags |= SO_SCAN_INSTRUMENT_STRATEGY;
+
 		tidstate->ss.ss_currentScanDesc =
 			table_beginscan_tid(tidstate->ss.ss_currentRelation,
-								tidstate->ss.ps.state->es_snapshot);
+								tidstate->ss.ps.state->es_snapshot,
+								flags);
+	}
 	scan = tidstate->ss.ss_currentScanDesc;
 
 	/*
@@ -473,8 +483,106 @@ ExecReScanTidScan(TidScanState *node)
 void
 ExecEndTidScan(TidScanState *node)
 {
-	if (node->ss.ss_currentScanDesc)
-		table_endscan(node->ss.ss_currentScanDesc);
+	TableScanDesc scan = node->ss.ss_currentScanDesc;
+
+	/* Collect scan statistics for this process into shared instrumentation */
+	if (node->tss_sinstrument != NULL && IsParallelWorker())
+	{
+		TidScanInstrumentation *si;
+
+		Assert(ParallelWorkerNumber < node->tss_sinstrument->num_workers);
+		si = &node->tss_sinstrument->sinstrument[ParallelWorkerNumber];
+
+		if (scan && scan->rs_instrument)
+			CombineTableScanInstrumentation(&si->stats, scan->rs_instrument);
+	}
+
+	if (scan)
+		table_endscan(scan);
+}
+
+/*
+ * Compute the amount of space needed for shared TID scan instrumentation.
+ */
+void
+ExecTidScanInstrumentEstimate(TidScanState *node, ParallelContext *pcxt)
+{
+	EState	   *estate = node->ss.ps.state;
+	Size		size;
+
+	if ((estate->es_instrument & INSTRUMENT_BUFFERS) == 0 ||
+		pcxt->nworkers == 0)
+		return;
+
+	size = add_size(offsetof(SharedTidScanInstrumentation, sinstrument),
+					mul_size(pcxt->nworkers, sizeof(TidScanInstrumentation)));
+
+	shm_toc_estimate_chunk(&pcxt->estimator, size);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+}
+
+/*
+ * Set up shared TID scan instrumentation.
+ */
+void
+ExecTidScanInstrumentInitDSM(TidScanState *node, ParallelContext *pcxt)
+{
+	EState	   *estate = node->ss.ps.state;
+	SharedTidScanInstrumentation *sinstrument;
+	Size		size;
+
+	if ((estate->es_instrument & INSTRUMENT_BUFFERS) == 0 ||
+		pcxt->nworkers == 0)
+		return;
+
+	size = add_size(offsetof(SharedTidScanInstrumentation, sinstrument),
+					mul_size(pcxt->nworkers, sizeof(TidScanInstrumentation)));
+
+	sinstrument = shm_toc_allocate(pcxt->toc, size);
+	memset(sinstrument, 0, size);
+	sinstrument->num_workers = pcxt->nworkers;
+
+	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id +
+				   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+				   sinstrument);
+
+	node->tss_sinstrument = sinstrument;
+}
+
+/*
+ * Look up the shared TID scan instrumentation in a parallel worker.
+ */
+void
+ExecTidScanInstrumentInitWorker(TidScanState *node, ParallelWorkerContext *pwcxt)
+{
+	EState	   *estate = node->ss.ps.state;
+
+	if ((estate->es_instrument & INSTRUMENT_BUFFERS) == 0)
+		return;
+
+	node->tss_sinstrument = shm_toc_lookup(pwcxt->toc,
+										   node->ss.ps.plan->plan_node_id +
+										   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+										   false);
+}
+
+/*
+ * Transfer TID scan instrumentation from DSM to private memory.
+ */
+void
+ExecTidScanRetrieveInstrumentation(TidScanState *node)
+{
+	SharedTidScanInstrumentation *sinstrument = node->tss_sinstrument;
+	Size		size;
+
+	if (sinstrument == NULL)
+		return;
+
+	size = offsetof(SharedTidScanInstrumentation, sinstrument)
+		+ sinstrument->num_workers * sizeof(TidScanInstrumentation);
+
+	node->tss_sinstrument = palloc(size);
+	memcpy(node->tss_sinstrument, sinstrument, size);
 }
 
 /* ----------------------------------------------------------------
