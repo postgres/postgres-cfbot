@@ -326,6 +326,7 @@ typedef struct OAuthValidatorCallbacks
     ValidatorStartupCB startup_cb;
     ValidatorShutdownCB shutdown_cb;
     ValidatorValidateCB validate_cb;
+    ValidatorExpireCB expire_cb;    /* Optional: check token expiration */
 } OAuthValidatorCallbacks;
 
 typedef const OAuthValidatorCallbacks *(*OAuthValidatorModuleInit) (void);
@@ -333,6 +334,15 @@ typedef const OAuthValidatorCallbacks *(*OAuthValidatorModuleInit) (void);
 
    Only the <function>validate_cb</function> callback is required, the others
    are optional.
+  </para>
+  <para>
+   The <literal>magic</literal> field identifies the ABI version of the module.
+   The server supports both <literal>PG_OAUTH_VALIDATOR_MAGIC_V1</literal> (the
+   original version without <function>expire_cb</function>) and
+   <literal>PG_OAUTH_VALIDATOR_MAGIC_V2</literal> (which adds
+   <function>expire_cb</function>).  New modules should use
+   <literal>PG_OAUTH_VALIDATOR_MAGIC</literal>, which always refers to the
+   latest version.
   </para>
  </sect1>
 
@@ -440,6 +450,28 @@ typedef struct ValidatorModuleResult
 <programlisting>
 typedef void (*ValidatorShutdownCB) (ValidatorModuleState *state);
 </programlisting>
+   </para>
+  </sect2>
+
+  <sect2 id="oauth-validator-callback-expire">
+   <title>Expire Callback</title>
+   <para>
+    The <function>expire_cb</function> callback is an optional callback that
+    can be used to check whether the OAuth token has expired. This is called
+    during credential validation to verify that the token is still valid.
+<programlisting>
+typedef bool (*ValidatorExpireCB) (const ValidatorModuleState *state);
+</programlisting>
+    The callback should return <literal>true</literal> if the token is still
+    valid, or <literal>false</literal> if the token has expired. If this
+    callback is not provided (set to NULL), the server assumes the token
+    remains valid.
+   </para>
+   <para>
+    This callback was added in <literal>PG_OAUTH_VALIDATOR_MAGIC_V2</literal>.
+    Modules compiled against the older <literal>PG_OAUTH_VALIDATOR_MAGIC_V1</literal>
+    do not have this field, and the server will not attempt to call it for
+    such modules.
    </para>
   </sect2>
 
