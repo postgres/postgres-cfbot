@@ -8400,6 +8400,7 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	Cost		startup_cost;
 	Cost		total_cost;
 	List	   *fdw_private;
+	List	   *fdw_restrictinfo = NIL;
 	ForeignPath *final_path;
 
 	/*
@@ -8472,6 +8473,19 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 				(IsA(path, ProjectionPath) &&
 				 IsA(((ProjectionPath *) path)->subpath, ForeignPath)))
 			{
+				ForeignPath *fpath;
+
+				/*
+				 * We need the ForeignPath's fdw_restrictinfo to pass down to
+				 * the final path, since create_scan_plan() consults it to
+				 * find any pseudoconstant quals that need a gating Result
+				 * node.
+				 */
+				if (IsA(path, ProjectionPath))
+					fpath = (ForeignPath *) ((ProjectionPath *) path)->subpath;
+				else
+					fpath = (ForeignPath *) path;
+
 				/*
 				 * Create foreign final path; this gets rid of a
 				 * no-longer-needed outer plan (if any), which makes the
@@ -8486,8 +8500,7 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 													   path->total_cost,
 													   path->pathkeys,
 													   NULL,	/* no extra plan */
-													   NIL, /* no fdw_restrictinfo
-															 * list */
+													   fpath->fdw_restrictinfo,
 													   NIL);	/* no fdw_private */
 
 				/* and add it to the final_rel */
@@ -8542,6 +8555,36 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Assess if it is safe to push down the LIMIT and OFFSET to the remote
 	 * server
 	 */
+
+	/*
+	 * If the underlying relation is a join, we need the list of RestrictInfo
+	 * nodes to apply to the join to pass down to the final path, since
+	 * create_scan_plan() consults it to find any pseudoconstant quals that
+	 * need a gating Result node.  All the join's ForeignPaths store the same
+	 * list, so take it from any of them; if there are none left, the LIMIT
+	 * cannot be pushed down.
+	 */
+	if (IS_JOIN_REL(input_rel))
+	{
+		ListCell   *lc;
+		bool		found = false;
+
+		foreach(lc, input_rel->pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
+
+			if (IsA(path, ProjectionPath))
+				path = ((ProjectionPath *) path)->subpath;
+			if (IsA(path, ForeignPath))
+			{
+				fdw_restrictinfo = ((ForeignPath *) path)->fdw_restrictinfo;
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			return;
+	}
 
 	/*
 	 * If the underlying relation has any local conditions, the LIMIT/OFFSET
@@ -8624,7 +8667,7 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 										   total_cost,
 										   pathkeys,
 										   NULL,	/* no extra plan */
-										   NIL, /* no fdw_restrictinfo list */
+										   fdw_restrictinfo,
 										   fdw_private);
 
 	/* and add it to the final_rel */
