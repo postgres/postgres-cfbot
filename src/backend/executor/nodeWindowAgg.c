@@ -3744,6 +3744,9 @@ WinSetMarkPosition(WindowObject winobj, int64 markpos)
 	Assert(WindowObjectIsValid(winobj));
 	winstate = winobj->winstate;
 
+	/* The mark used to start at -1; keep accepting -1 as "no row yet" */
+	if (markpos == -1)
+		markpos = 0;
 	if (markpos < winobj->markpos)
 		elog(ERROR, "cannot move WindowObject's mark position backward");
 	winobj->markpos = markpos;
