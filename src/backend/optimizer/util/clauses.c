@@ -1448,6 +1448,26 @@ full_join_expr_nonstrict_walker(Node *node, bool *found_nullable)
 		return true;
 	else if (IsA(node, JsonConstructorExpr))
 		return true;
+	else if (IsA(node, JsonExpr))
+	{
+		JsonExpr   *jsexpr = (JsonExpr *) node;
+
+		/* see contain_nonstrict_functions_walker() */
+		if (get_typtype(jsexpr->returning->typid) == TYPTYPE_DOMAIN)
+			return true;
+		if (contain_var_or_param_walker((Node *) jsexpr->passing_values,
+										NULL))
+			return true;
+		/* else fall through to check the context item, path and behaviors */
+	}
+	else if (IsA(node, JsonBehavior))
+	{
+		/* see contain_nonstrict_functions_walker() */
+		if (contain_var_or_param_walker(((JsonBehavior *) node)->expr,
+										NULL))
+			return true;
+		/* else fall through to check the expression */
+	}
 	else
 	{
 		/* Check other function-containing nodes */

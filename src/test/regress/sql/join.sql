@@ -2336,6 +2336,38 @@ select * from (select coalesce(x, '{0}') as x from (values (null::int[]), ('{1}'
   full join (values (1), (2)) b(x) on a.x[1] = b.x
   where coalesce(a.x[1], b.x) = 0;
 
+-- a JsonExpr isn't null-preserving in its PASSING values, nor in its context
+-- item if it returns a domain that could reject the NULL
+explain (costs off)
+select * from (values (null::int), (1)) a(x)
+  full join (values (0), (1)) b(x)
+    on a.x = json_value(jsonb '0', '$' passing b.x as p returning int)
+  where coalesce(a.x, json_value(jsonb '0', '$' passing b.x as p returning int)) = 0
+  order by a.x, b.x;
+
+select * from (values (null::int), (1)) a(x)
+  full join (values (0), (1)) b(x)
+    on a.x = json_value(jsonb '0', '$' passing b.x as p returning int)
+  where coalesce(a.x, json_value(jsonb '0', '$' passing b.x as p returning int)) = 0
+  order by a.x, b.x;
+
+create domain fj_int_nn as int not null;
+
+select * from (values (null::int), (1)) a(x)
+  full join (values ('0'::jsonb), ('1')) b(j)
+    on a.x = json_value(b.j, '$' returning fj_int_nn default 0 on error)
+  where coalesce(a.x, json_value(b.j, '$' returning fj_int_nn default 0 on error)) = 0
+  order by a.x, b.j;
+
+drop domain fj_int_nn;
+
+-- but one depending only on its context item is null-preserving
+explain (costs off)
+select * from (values (null::int), (1)) a(x)
+  full join (values ('0'::jsonb), ('1')) b(j)
+    on a.x = json_value(b.j, '$' returning int)
+  where coalesce(a.x, json_value(b.j, '$' returning int)) = 0;
+
 --
 -- check deductions from FULL JOIN clauses and COALESCE() = constant: the
 -- join clause's operands may appear in either order, but must come from
