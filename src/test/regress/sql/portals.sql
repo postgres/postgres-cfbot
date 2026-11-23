@@ -587,6 +587,49 @@ fetch all in c2;
 fetch backward all in c2;
 rollback;
 
+-- Turn around at tuplestore EOF before the Materialize input is done
+begin;
+declare c3 scroll cursor for select generate_series(1,5) as g;
+fetch 3 in c3;
+fetch backward 1 in c3;
+fetch backward 1 in c3;
+fetch 1 in c3;
+rollback;
+
+-- Same with the tuplestore spilled to a file while it is written
+begin;
+set local work_mem = '64kB';
+declare c4 scroll cursor for select generate_series(1,5000) as g;
+move 3000 in c4;
+fetch backward 1 in c4;
+fetch 1 in c4;
+rollback;
+
+-- Same through a CTE reader whose file position was saved for a SubPlan reader
+begin;
+set local work_mem = '64kB';
+declare c5 scroll cursor for
+  with c as materialized
+    (select g, repeat('x', 1000) as pad from generate_series(1, 200) g)
+  select x.g,
+         case when x.g <= 50 then
+           (select y.g from c y where y.g = x.g + 1 limit 1)
+         end as ahead
+  from c x;
+move 100 in c5;
+fetch backward 1 in c5;
+fetch 1 in c5;
+rollback;
+
+-- A held cursor whose re-execution returns one row fewer than its position
+create sequence portal_hold_seq;
+begin;
+declare c6 scroll cursor with hold for
+  select g from generate_series(1,10) g where nextval('portal_hold_seq') <= 7;
+move 4 in c6;
+commit;
+drop sequence portal_hold_seq;
+
 -- Check fetching of toasted datums via cursors.
 begin;
 

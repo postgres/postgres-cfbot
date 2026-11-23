@@ -1239,39 +1239,44 @@ bool
 tuplestore_skiptuples(Tuplestorestate *state, int64 ntuples, bool forward)
 {
 	TSReadPointer *readptr = &state->readptrs[state->activeptr];
-	int64		limit;
+	int64		cur;
+	int64		lowest;
+
+	Assert(forward || (readptr->eflags & EXEC_FLAG_BACKWARD));
 
 	if (ntuples <= 0)
 		return true;
+
+	/*
+	 * Act like ntuples calls of tuplestore_gettuple().  EOF is tell() =
+	 * tuples + 1, and the first backward step goes from it onto the last
+	 * tuple.
+	 */
+	cur = tuplestore_tell(state);
 
 	if (forward)
 	{
 		if (readptr->eof_reached)
 			return false;
-		else
-		{
-			limit = state->tuples - readptr->row + 1;
-			/* If ntuples > limit, return false after advancing to EOF */
-			if (!tuplestore_seek(state, readptr->row + Min(limit, ntuples)))
-				return false;
-			return (ntuples <= limit);
-		}
+		if (ntuples <= state->tuples - cur)
+			return tuplestore_seek(state, cur + ntuples);
+		/* Ran out of tuples: go to EOF */
+		(void) tuplestore_seek(state, state->tuples + 1);
+		return false;
 	}
 	else
 	{
-		if (readptr->eof_reached)
-		{
-			/* Return to the state of being just past the last tuple */
-			readptr->eof_reached = false;
-			readptr->row = state->tuples;
-		}
-		limit = readptr->row - state->rowstrimmed;
+		lowest = state->rowstrimmed;
 		if (state->status == TSS_INMEM)
-			limit -= state->memtupdeleted;
-		/* If ntuples > limit, return false after moving to start */
-		if (!tuplestore_seek(state, readptr->row - Min(limit, ntuples)))
-			return false;
-		return (ntuples <= limit);
+			lowest += state->memtupdeleted;
+		if (ntuples < cur - lowest)
+			return tuplestore_seek(state, cur - ntuples);
+		/* Ran out of tuples: go to the lowest position seek accepts */
+		Assert(!state->truncated);
+		if (state->truncated)
+			lowest++;
+		(void) tuplestore_seek(state, lowest);
+		return false;
 	}
 }
 
