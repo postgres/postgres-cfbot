@@ -1851,6 +1851,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		List	   *activeWindows = NIL;
 		grouping_sets_data *gset_data = NULL;
 		standard_qp_extra qp_extra;
+		List	   *or_cands;
 
 		/* A recursive query should always have setOperations */
 		Assert(!root->hasRecursion);
@@ -1954,6 +1955,13 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		qp_extra.setop = setops;
 
 		/*
+		 * Consider expanding eligible join OR clauses into UNION ALL (Append)
+		 * paths.  This needs to be close to query_planner(), because each arm
+		 * clones root and runs query_planner() on its modified quals.
+		 */
+		or_cands = plan_or_expansion_arms(root);
+
+		/*
 		 * Generate the best unsorted and presorted paths for the scan/join
 		 * portion of this Query, ie the processing represented by the
 		 * FROM/WHERE clauses.  (Note there may not be any presorted paths.)
@@ -1961,6 +1969,14 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		 * of the query's sort clause, distinct clause, etc.
 		 */
 		current_rel = query_planner(root, standard_qp_callback, &qp_extra);
+
+		/*
+		 * If we generated any OR-expansion candidates, build Append paths and
+		 * attach them to the topmost scan/join relation to compete against
+		 * standard join paths.
+		 */
+		if (or_cands != NIL)
+			add_or_expansion_paths(root, current_rel, or_cands);
 
 		/*
 		 * Convert the query's result tlist into PathTarget format.
