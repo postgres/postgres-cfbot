@@ -32,6 +32,7 @@
 static bool validate_oauth_credentials(void);
 static bool validate_cert_credentials(void);
 static bool validate_gss_credentials(void);
+static bool validate_ldap_credentials(void);
 
 /*
  * Initialize validation methods
@@ -46,6 +47,7 @@ InitializeValidationMethods(void)
 	RegisterCredentialValidator(CVT_OAUTH, validate_oauth_credentials);
 	RegisterCredentialValidator(CVT_CERT, validate_cert_credentials);
 	RegisterCredentialValidator(CVT_GSS, validate_gss_credentials);
+	RegisterCredentialValidator(CVT_LDAP, validate_ldap_credentials);
 }
 
 /*
@@ -189,6 +191,37 @@ validate_gss_credentials(void)
 												 port->user_name, reason);
 			return false;
 		}
+	}
+#endif
+
+	return true;
+}
+
+/*
+ * CVT_LDAP validator: an LDAP session keeps no credential with an expiry of
+ * its own, because the password is used for the bind and then discarded.  What
+ * can be re-checked is whether the account still exists in the directory and
+ * still satisfies the configured search filter.  CheckLDAPCredentialValidity()
+ * re-runs that search; see the comment there for its scope and limits.
+ *
+ * Note that this makes a round trip to the LDAP server on every validation
+ * cycle, so a larger credential_validation_interval is advisable for LDAP
+ * sessions.
+ */
+static bool
+validate_ldap_credentials(void)
+{
+#ifdef USE_LDAP
+	Port	   *port = MyProcPort;
+
+	if (port == NULL)
+		return true;
+
+	if (!CheckLDAPCredentialValidity(port))
+	{
+		SetCredentialValidationFailureDetail("LDAP check failed for user \"%s\": account no longer exists in the directory",
+											 port->user_name);
+		return false;
 	}
 #endif
 

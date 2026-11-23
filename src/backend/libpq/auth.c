@@ -148,6 +148,7 @@ static int	CheckBSDAuth(Port *port, char *user);
 #endif
 
 static int	CheckLDAPAuth(Port *port);
+static void save_ldap_validation_params(Port *port);
 
 /* LDAP_OPT_DIAGNOSTIC_MESSAGE is the newer spelling */
 #ifndef LDAP_OPT_DIAGNOSTIC_MESSAGE
@@ -157,6 +158,31 @@ static int	CheckLDAPAuth(Port *port);
 /* Default LDAP password mutator hook, can be overridden by a shared library */
 static char *dummy_ldap_password_mutator(char *input);
 auth_password_hook_typ ldap_password_hook = dummy_ldap_password_mutator;
+
+/*
+ * Session-lifetime snapshot of the pg_hba LDAP settings, taken at
+ * authentication time and used later by CheckLDAPCredentialValidity().  The
+ * HbaLine that port->hba points at lives in PostmasterContext, which is
+ * destroyed before the backend enters its main command loop, so the settings
+ * needed to re-validate the session must be copied somewhere longer-lived.
+ */
+static HbaLine *ldap_validation_hba = NULL;
+
+/*
+ * Credential validation waits at most credential_validation_ldap_timeout
+ * seconds on the directory server for each of connecting, binding and
+ * searching.  Validation runs inside an otherwise idle session and must not
+ * stall it for the LDAP library's much longer defaults; a timeout is treated
+ * like any other LDAP error (the session is left alone).  Not applied on
+ * Windows, which has no equivalent option.
+ */
+
+/*
+ * Set only while CheckLDAPCredentialValidity() calls
+ * InitializeLDAPConnection(), so that the connection it opens is bounded
+ * from the start, StartTLS included.  Zero (the normal case) means no limit.
+ */
+static int	ldap_connect_timeout_secs = 0;
 
 #endif							/* USE_LDAP */
 
@@ -176,6 +202,7 @@ static int	CheckCertAuth(Port *port);
 char	   *pg_krb_server_keyfile;
 bool		pg_krb_caseins_users;
 bool		pg_gss_accept_delegation;
+int			credential_validation_ldap_timeout;
 int			credential_validation_kdc_timeout;
 
 
@@ -2567,6 +2594,31 @@ InitializeLDAPConnection(Port *port, LDAP **ldap)
 		return STATUS_ERROR;
 	}
 
+#ifndef WIN32
+	if (ldap_connect_timeout_secs > 0)
+	{
+		struct timeval tv;
+
+		tv.tv_sec = ldap_connect_timeout_secs;
+		tv.tv_usec = 0;
+
+		/*
+		 * LDAP_OPT_NETWORK_TIMEOUT bounds connecting; LDAP_OPT_TIMEOUT the
+		 * wait for each synchronous operation, such as the bind
+		 */
+		if ((r = ldap_set_option(*ldap, LDAP_OPT_NETWORK_TIMEOUT, &tv)) != LDAP_SUCCESS ||
+			(r = ldap_set_option(*ldap, LDAP_OPT_TIMEOUT, &tv)) != LDAP_SUCCESS)
+		{
+			ereport(LOG,
+					(errmsg("could not set LDAP timeout: %s",
+							ldap_err2string(r)),
+					 errdetail_for_ldap(*ldap)));
+			ldap_unbind(*ldap);
+			return STATUS_ERROR;
+		}
+	}
+#endif
+
 	if (port->hba->ldaptls)
 	{
 #ifndef WIN32
@@ -2850,11 +2902,190 @@ CheckLDAPAuth(Port *port)
 	/* Save the original bind DN as the authenticated identity. */
 	set_authn_id(port, fulluser);
 
+	/*
+	 * Snapshot the LDAP settings while port->hba is still valid, so that
+	 * continuous credential validation can re-check the account later.
+	 */
+	save_ldap_validation_params(port);
+
 	ldap_unbind(ldap);
 	pfree(passwd);
 	pfree(fulluser);
 
 	return STATUS_OK;
+}
+
+/*
+ * Copy the LDAP-related pg_hba settings needed for credential re-validation
+ * into TopMemoryContext, where they survive for the life of the session.  See
+ * the comment on ldap_validation_hba above for why this is necessary.
+ */
+static void
+save_ldap_validation_params(Port *port)
+{
+	HbaLine    *src = port->hba;
+	HbaLine    *dst;
+
+	dst = (HbaLine *) MemoryContextAllocZero(TopMemoryContext, sizeof(HbaLine));
+
+	dst->ldaptls = src->ldaptls;
+	dst->ldapport = src->ldapport;
+	dst->ldapscope = src->ldapscope;
+
+#define LDAP_SAVE_STR(field) \
+	dst->field = src->field ? MemoryContextStrdup(TopMemoryContext, src->field) : NULL
+
+	LDAP_SAVE_STR(ldapscheme);
+	LDAP_SAVE_STR(ldapserver);
+	LDAP_SAVE_STR(ldapbinddn);
+	LDAP_SAVE_STR(ldapbindpasswd);
+	LDAP_SAVE_STR(ldapsearchattribute);
+	LDAP_SAVE_STR(ldapsearchfilter);
+	LDAP_SAVE_STR(ldapbasedn);
+
+#undef LDAP_SAVE_STR
+
+	ldap_validation_hba = dst;
+}
+
+/*
+ * Re-validate an LDAP-authenticated session for continuous credential
+ * validation.
+ *
+ * An LDAP session keeps no credential with an intrinsic expiry (the user's
+ * password is discarded right after the bind), so "still valid" is defined
+ * here as: the user still exists in the directory and still satisfies the
+ * configured search filter.  We re-bind with the configured search
+ * credentials (ldapbinddn / ldapbindpasswd) and re-run the same filter that
+ * was used at authentication time:
+ *
+ *   - exactly one matching entry -> still valid
+ *   - no matching entry          -> the account has been deleted, moved out of
+ *                                   the base DN, or no longer matches the
+ *                                   filter (e.g. a filter that excludes
+ *                                   disabled accounts) -> no longer valid
+ *
+ * This requires search+bind mode (ldapbasedn set): in simple-bind mode there
+ * are no retained credentials to bind with, so there is nothing to re-check
+ * and the session is treated as valid.  Likewise, any operational failure
+ * (cannot connect, bind fails, search errors, ambiguous result) is treated
+ * conservatively as "still valid", so that a transient directory or network
+ * problem does not tear down established sessions; only a definitive "user is
+ * gone" result (zero entries) terminates the session.
+ *
+ * Returns true if the session should be considered still valid, false if the
+ * LDAP account is gone.
+ */
+bool
+CheckLDAPCredentialValidity(Port *port)
+{
+	HbaLine    *hba = ldap_validation_hba;
+	Port		vport;
+	LDAP	   *ldap;
+	int			r;
+	char	   *filter;
+	LDAPMessage *search_message = NULL;
+	char	   *attributes[] = {LDAP_NO_ATTRS, NULL};
+	int			count;
+	char	   *c;
+
+	/*
+	 * Only search+bind mode can be re-validated; simple bind (ldapprefix /
+	 * ldapsuffix) retains no credentials with which to query the directory. A
+	 * missing snapshot means this is not a search+bind LDAP session.
+	 */
+	if (hba == NULL || hba->ldapbasedn == NULL)
+		return true;
+
+	/*
+	 * As in CheckLDAPAuth, refuse user names that could inject filter syntax.
+	 * Such a name could not have authenticated in the first place, so just
+	 * treat it as still valid rather than risk a malformed search.
+	 */
+	for (c = port->user_name; *c; c++)
+	{
+		if (*c == '*' || *c == '(' || *c == ')' || *c == '\\' || *c == '/')
+			return true;
+	}
+
+	/*
+	 * InitializeLDAPConnection() reads its settings from port->hba, but the
+	 * real port->hba has been freed by now (see ldap_validation_hba).  Point
+	 * a throwaway Port at our session-lifetime snapshot instead.
+	 */
+	vport = *port;
+	vport.hba = hba;
+
+	ldap_connect_timeout_secs = credential_validation_ldap_timeout;
+	r = InitializeLDAPConnection(&vport, &ldap);
+	ldap_connect_timeout_secs = 0;
+	if (r == STATUS_ERROR)
+		return true;			/* error already logged; fail open */
+
+	/* Bind with the search credentials (anonymous if none configured). */
+	r = ldap_simple_bind_s(ldap,
+						   hba->ldapbinddn ? hba->ldapbinddn : "",
+						   hba->ldapbindpasswd ? ldap_password_hook(hba->ldapbindpasswd) : "");
+	if (r != LDAP_SUCCESS)
+	{
+		ereport(LOG,
+				(errmsg("could not perform LDAP bind for credential validation of ldapbinddn \"%s\": %s",
+						hba->ldapbinddn ? hba->ldapbinddn : "",
+						ldap_err2string(r)),
+				 errdetail_for_ldap(ldap)));
+		ldap_unbind(ldap);
+		return true;
+	}
+
+	/* Build the same filter that was used at authentication time. */
+	if (hba->ldapsearchfilter)
+		filter = FormatSearchFilter(hba->ldapsearchfilter, port->user_name);
+	else if (hba->ldapsearchattribute)
+		filter = psprintf("(%s=%s)", hba->ldapsearchattribute, port->user_name);
+	else
+		filter = psprintf("(uid=%s)", port->user_name);
+
+#ifndef WIN32
+	{
+		struct timeval tv;
+
+		tv.tv_sec = credential_validation_ldap_timeout;
+		tv.tv_usec = 0;
+		r = ldap_search_ext_s(ldap, hba->ldapbasedn, hba->ldapscope,
+							  filter, attributes, 0, NULL, NULL, &tv, 0,
+							  &search_message);
+	}
+#else
+	r = ldap_search_s(ldap, hba->ldapbasedn, hba->ldapscope,
+					  filter, attributes, 0, &search_message);
+#endif
+
+	if (r != LDAP_SUCCESS)
+	{
+		/* includes a timeout (LDAP_TIMEOUT): fail open like any other error */
+		ereport(LOG,
+				(errmsg("could not search LDAP for filter \"%s\" during credential validation: %s",
+						filter, ldap_err2string(r)),
+				 errdetail_for_ldap(ldap)));
+		if (search_message != NULL)
+			ldap_msgfree(search_message);
+		ldap_unbind(ldap);
+		pfree(filter);
+		return true;			/* operational error; fail open */
+	}
+
+	count = ldap_count_entries(ldap, search_message);
+
+	ldap_msgfree(search_message);
+	ldap_unbind(ldap);
+	pfree(filter);
+
+	/*
+	 * Zero entries is a definitive "user is gone"; terminate the session.  An
+	 * ambiguous (>1) result should not happen for an account that
+	 * authenticated earlier, so treat it conservatively as still valid.
+	 */
+	return (count != 0);
 }
 
 /*

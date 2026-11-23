@@ -35,6 +35,7 @@
 extern PGDLLIMPORT char *pg_krb_server_keyfile;
 extern PGDLLIMPORT bool pg_krb_caseins_users;
 extern PGDLLIMPORT bool pg_gss_accept_delegation;
+extern PGDLLIMPORT int credential_validation_ldap_timeout;
 extern PGDLLIMPORT int credential_validation_kdc_timeout;
 
 extern void ClientAuthentication(Port *port);
@@ -61,6 +62,15 @@ extern PGDLLIMPORT auth_password_hook_typ ldap_password_hook;
  * with USE_KRB5_KDC_CHECK.
  */
 extern bool CheckKerberosPrincipalEnabled(Port *port, char *reason, size_t reasonlen);
+#endif
+
+#ifdef USE_LDAP
+/*
+ * Re-check that an LDAP-authenticated session's account is still valid in the
+ * directory.  Used by continuous credential validation.  Returns true if the
+ * session is still considered valid, false if the account is gone.
+ */
+extern bool CheckLDAPCredentialValidity(Port *port);
 #endif
 
 #endif							/* AUTH_H */

@@ -76,6 +76,8 @@ UserAuthToValidationType(UserAuth auth_method)
 			return CVT_CERT;
 		case uaGSS:
 			return CVT_GSS;
+		case uaLDAP:
+			return CVT_LDAP;
 		default:
 
 			/*

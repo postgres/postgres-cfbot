@@ -935,6 +935,7 @@
 
 #credential_validation_enabled = off    # re-validate session credentials periodically
 #credential_validation_interval = 60    # revalidation interval in seconds (5-3600)
+#credential_validation_ldap_timeout = 5 # max wait on the LDAP server per step, in seconds (1-60)
 #credential_validation_kdc_timeout = 5  # max wait on the Kerberos KDC, in seconds (1-60)
 
 #------------------------------------------------------------------------------

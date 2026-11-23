@@ -597,6 +597,16 @@
   max => '60',
 },
 
+{ name => 'credential_validation_ldap_timeout', type => 'int', context => 'PGC_SU_BACKEND', group => 'CONN_AUTH_AUTH',
+  short_desc => 'Sets the maximum time in seconds that LDAP credential validation waits on the directory server.',
+  long_desc => 'The limit applies separately to connecting, binding and searching.',
+  flags => 'GUC_UNIT_S',
+  variable => 'credential_validation_ldap_timeout',
+  boot_val => '5',
+  min => '1',
+  max => '60',
+},
+
 { name => 'cursor_tuple_fraction', type => 'real', context => 'PGC_USERSET', group => 'QUERY_TUNING_OTHER',
   short_desc => 'Sets the planner\'s estimate of the fraction of a cursor\'s rows that will be retrieved.',
   flags => 'GUC_EXPLAIN',

@@ -1140,7 +1140,8 @@ include_dir 'conf.d'
         depending on the authentication method, an additional method-specific
         check is applied, such as expiration of an <productname>OAuth</productname>
         bearer token, of the client certificate, or of the
-        <acronym>GSSAPI</acronym> security context.  The default is
+        <acronym>GSSAPI</acronym> security context, or the disappearance of
+        an <acronym>LDAP</acronym> account.  The default is
         <literal>off</literal>.
        </para>
        <para>
@@ -1173,6 +1174,25 @@ include_dir 'conf.d'
         principal whose password has expired is not ended.  This is not done
         on Windows, and sessions that use <acronym>SSPI</acronym> are not
         covered by the <acronym>GSSAPI</acronym> checks.
+       </para>
+       <para>
+        For <acronym>LDAP</acronym> sessions, the check repeats the search
+        that was used at authentication, with the configured search filter,
+        and terminates the session if the account is no longer found.  This
+        only applies to the search+bind mode (<literal>ldapbasedn</literal>
+        is set); a session authenticated with simple bind, which keeps no
+        credentials to search with, is always treated as valid.  A failure to
+        reach or search the directory is also treated as valid, so that a
+        temporary directory outage does not end established sessions.  The
+        check contacts the <acronym>LDAP</acronym> server every time it runs,
+        so a longer <xref linkend="guc-credential-validation-interval"/> is
+        advisable for these sessions.  The session cannot process other
+        input while the check waits for the directory, so connecting, binding
+        and searching are each limited to
+        <xref linkend="guc-credential-validation-ldap-timeout"/>; a timeout is
+        treated like any other failure to reach the directory.  This limit is
+        not applied on Windows, where the <acronym>LDAP</acronym> client
+        library's own timeouts apply.
        </para>
        <para>
         The re-validation period is controlled by
@@ -1219,6 +1239,31 @@ include_dir 'conf.d'
         enabled.  If this value is specified without units, it is taken as
         seconds.  The valid range is from 5 seconds to 3600 seconds (one hour),
         and the default is 60 seconds.
+       </para>
+       <para>
+        Like <xref linkend="guc-credential-validation-enabled"/>, this
+        parameter can only be set at session start and cannot be changed
+        within a session.
+       </para>
+      </listitem>
+     </varlistentry>
+     <varlistentry id="guc-credential-validation-ldap-timeout" xreflabel="credential_validation_ldap_timeout">
+      <term><varname>credential_validation_ldap_timeout</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>credential_validation_ldap_timeout</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+
+      <listitem>
+       <para>
+        Sets how long, for <acronym>LDAP</acronym> sessions, a credential
+        re-validation waits on the directory server.  The limit applies
+        separately to connecting, binding and searching, so one check can take
+        up to three times this value.  If a step times out, the check is
+        treated like any other failure to reach the directory and the session
+        is left open.  If this value is specified without units, it is taken
+        as seconds.  The valid range is from 1 second to 60 seconds, and the
+        default is 5 seconds.  It has no effect on Windows.
        </para>
        <para>
         Like <xref linkend="guc-credential-validation-enabled"/>, this
