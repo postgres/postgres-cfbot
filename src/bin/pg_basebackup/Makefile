@@ -12,13 +12,15 @@
 PGFILEDESC = "pg_basebackup/pg_receivewal/pg_recvlogical - streaming WAL and backup receivers"
 PGAPPICON=win32
 
-EXTRA_INSTALL=contrib/test_decoding
+EXTRA_INSTALL=contrib/test_decoding \
+	src/test/modules/injection_points
 
 subdir = src/bin/pg_basebackup
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
 # make these available to TAP test scripts
+export enable_injection_points
 export LZ4
 export TAR
 # Note that GZIP cannot be used directly as this environment variable is

@@ -30,6 +30,7 @@ extern int	WalSegSz;
 extern PGconn *conn;
 
 extern PGconn *GetConnection(void);
+extern PGconn *GetConnectionWithOptions(const char *options);
 
 /* Replication commands */
 extern bool CreateReplicationSlot(PGconn *conn, const char *slot_name,
