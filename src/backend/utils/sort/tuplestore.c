@@ -1344,8 +1344,8 @@ tuplestore_tell(Tuplestorestate *state)
  * row but not "at EOF".
  *
  * Returns true if successful, false if the argument is out of range
- * (including pointing to a trimmed-away tuple); the tuplestore state
- * is unchanged in the latter case.
+ * (including pointing to a trimmed-away tuple or the tuple a trim kept
+ * for a slot); the tuplestore state is unchanged in the latter case.
  *
  * Moving backward requires EXEC_FLAG_BACKWARD.
  */
@@ -1354,11 +1354,19 @@ tuplestore_seek(Tuplestorestate *state, int64 row)
 {
 	TSReadPointer *readptr = &state->readptrs[state->activeptr];
 	int64		cur;
+	int64		lowest;
 
 	check_read_pointer_rows(state);
 
+	/* Lowest position; after a trim, the tuple kept for a slot is not one */
+	lowest = state->rowstrimmed;
+	if (state->status == TSS_INMEM)
+		lowest += state->memtupdeleted;
+	if (state->truncated)
+		lowest++;
+
 	/* Quick exit if row is obviously bogus */
-	if (row < state->rowstrimmed || row > state->tuples + 1)
+	if (row < lowest || row > state->tuples + 1)
 		return false;
 	/* Quick exit for no-op requests */
 	cur = tuplestore_tell(state);
@@ -1372,8 +1380,6 @@ tuplestore_seek(Tuplestorestate *state, int64 row)
 			{
 				int64		base = state->tuples - state->memtupcount;
 
-				if (row < base + state->memtupdeleted)
-					return false;
 				if (row > state->tuples)
 					readptr->eof_reached = true;
 				else
@@ -1745,7 +1751,7 @@ tuplestore_trim(Tuplestorestate *state)
 	}
 	Assert(state->memtupdeleted == nremove);
 
-	/* mark tuplestore as truncated (used for Assert crosschecks only) */
+	/* mark tuplestore as truncated; tuplestore_seek() relies on this */
 	state->truncated = true;
 
 	/*
