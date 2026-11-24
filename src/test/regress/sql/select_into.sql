@@ -136,3 +136,22 @@ EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF)
 EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF)
   CREATE TABLE IF NOT EXISTS ctas_ine_tbl AS EXECUTE ctas_ine_query; -- ok
 DROP TABLE ctas_ine_tbl;
+
+-- CREATE TABLE AS EXECUTE needs a prepared SELECT, with or without EXPLAIN
+CREATE TABLE ctas_exec_src (a int);
+PREPARE ctas_exec_ins AS INSERT INTO ctas_exec_src VALUES (1) RETURNING *;
+PREPARE ctas_exec_into AS SELECT 1 AS a INTO ctas_exec_inner;
+CREATE TABLE ctas_exec_tbl AS EXECUTE ctas_exec_ins; -- error
+CREATE TABLE ctas_exec_tbl AS EXECUTE ctas_exec_into; -- error
+EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF, BUFFERS OFF)
+  CREATE TABLE ctas_exec_tbl AS EXECUTE ctas_exec_ins; -- error
+EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF, BUFFERS OFF)
+  CREATE TABLE ctas_exec_tbl AS EXECUTE ctas_exec_into; -- error
+EXPLAIN (COSTS OFF)
+  CREATE TABLE ctas_exec_tbl AS EXECUTE ctas_exec_ins; -- error
+SELECT count(*) FROM ctas_exec_src;
+SELECT relname FROM pg_class
+  WHERE relname IN ('ctas_exec_tbl', 'ctas_exec_inner');
+DEALLOCATE ctas_exec_ins;
+DEALLOCATE ctas_exec_into;
+DROP TABLE ctas_exec_src;

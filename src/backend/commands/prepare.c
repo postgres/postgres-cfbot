@@ -653,6 +653,14 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 
 	plan_list = cplan->stmt_list;
 
+	/* CREATE TABLE AS EXECUTE needs a single SELECT, as in ExecuteQuery() */
+	if (into &&
+		(list_length(plan_list) != 1 ||
+		 linitial_node(PlannedStmt, plan_list)->commandType != CMD_SELECT))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("prepared statement is not a SELECT")));
+
 	/* Explain each query */
 	foreach(p, plan_list)
 	{
