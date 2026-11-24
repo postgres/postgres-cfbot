@@ -31,6 +31,14 @@ ALTER TABLESPACE regress_tblspace SET (some_nonexistent_parameter = true);  -- f
 ALTER TABLESPACE regress_tblspace RESET (random_page_cost = 2.0); -- fail
 ALTER TABLESPACE regress_tblspace RESET (random_page_cost, effective_io_concurrency); -- ok
 
+-- available options and validation without a tablespace
+SELECT name, type, default_value, min_value
+  FROM pg_available_tablespace_options() ORDER BY name;
+SELECT pg_validate_tablespace_options('{random_page_cost=2,seq_page_cost=1.5}'); -- ok
+SELECT pg_validate_tablespace_options('{effective_io_concurrency=10000}'); -- fail
+SELECT pg_validate_tablespace_options('{some_nonexistent_parameter=true}'); -- fail
+SELECT pg_validate_tablespace_options('{}'); -- ok
+
 -- REINDEX (TABLESPACE)
 -- catalogs and system tablespaces
 -- system catalog, fail

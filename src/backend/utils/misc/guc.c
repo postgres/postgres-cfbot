@@ -257,7 +257,6 @@ static bool validate_option_array_item(const char *name, const char *value,
 static void write_auto_conf_file(int fd, const char *filename, ConfigVariable *head);
 static void replace_auto_config_value(ConfigVariable **head_p, ConfigVariable **tail_p,
 									  const char *name, const char *value);
-static bool valid_custom_variable_name(const char *name);
 static bool assignable_custom_variable_name(const char *name, bool skip_errors,
 											int elevel);
 static void do_serialize(char **destptr, Size *maxbytes,
@@ -953,7 +952,7 @@ add_guc_variable(struct config_generic *var, int elevel)
  * for what is an identifier agree with scan.l.  (If you change this rule,
  * adjust the errdetail in assignable_custom_variable_name().)
  */
-static bool
+bool
 valid_custom_variable_name(const char *name)
 {
 	bool		saw_sep = false;

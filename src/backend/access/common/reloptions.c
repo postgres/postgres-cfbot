@@ -27,6 +27,8 @@
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
+#include "funcapi.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "storage/lock.h"
 #include "utils/array.h"
@@ -35,6 +37,7 @@
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/tuplestore.h"
 
 /*
  * Contents of pg_class.reloptions
@@ -929,6 +932,34 @@ allocate_reloption(uint32 kinds, int type, const char *name, const char *desc,
 	MemoryContext oldcxt;
 	size_t		size;
 	relopt_gen *newoption;
+
+	/*
+	 * Tablespaces are shared by all databases, so their options must be known
+	 * to every backend.  All extensions share one namespace for them with the
+	 * built-in options, so insist on qualified names like custom GUCs have.
+	 * These errors are FATAL because the calling module may be partly
+	 * initialized already.
+	 */
+	if (kinds & RELOPT_KIND_TABLESPACE)
+	{
+		if (!process_shared_preload_libraries_in_progress)
+			ereport(FATAL,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("could not register tablespace option \"%s\"", name),
+					 errdetail("Tablespace options must be registered while initializing modules in \"shared_preload_libraries\".")));
+		if (!valid_custom_variable_name(name))
+			ereport(FATAL,
+					(errcode(ERRCODE_INVALID_NAME),
+					 errmsg("invalid tablespace option name \"%s\"", name),
+					 errdetail("Tablespace option names must be two or more simple identifiers separated by dots.")));
+		/* longer names would be truncated when dumped as one identifier */
+		if (strlen(name) >= NAMEDATALEN)
+			ereport(FATAL,
+					(errcode(ERRCODE_NAME_TOO_LONG),
+					 errmsg("tablespace option name \"%s\" is too long", name),
+					 errdetail("Tablespace option names must be shorter than %d bytes.",
+							   NAMEDATALEN)));
+	}
 
 	if (kinds != RELOPT_KIND_LOCAL)
 		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
@@ -2429,6 +2460,13 @@ attribute_reloptions(Datum reloptions, bool validate)
 
 /*
  * Option parser for tablespace reloptions
+ *
+ * Extensions loaded via shared_preload_libraries may register additional
+ * tablespace options with add_*_reloption(RELOPT_KIND_TABLESPACE, ...).
+ * parseRelOptions validates those exactly like the built-in ones, but
+ * TableSpaceOpts has no slot to put them in, so we run fillRelOptions
+ * without its parse-table check instead of going through build_reloptions.
+ * Readers of such options fetch them from pg_tablespace.spcoptions directly.
  */
 bytea *
 tablespace_reloptions(Datum reloptions, bool validate)
@@ -2439,11 +2477,26 @@ tablespace_reloptions(Datum reloptions, bool validate)
 		{"effective_io_concurrency", RELOPT_TYPE_INT, offsetof(TableSpaceOpts, effective_io_concurrency)},
 		{"maintenance_io_concurrency", RELOPT_TYPE_INT, offsetof(TableSpaceOpts, maintenance_io_concurrency)}
 	};
+	int			numoptions;
+	relopt_value *options;
+	void	   *rdopts;
 
-	return (bytea *) build_reloptions(reloptions, validate,
-									  RELOPT_KIND_TABLESPACE,
-									  sizeof(TableSpaceOpts),
-									  tab, lengthof(tab));
+	options = parseRelOptions(reloptions, validate, RELOPT_KIND_TABLESPACE,
+							  &numoptions);
+
+	if (numoptions == 0)
+	{
+		Assert(options == NULL);
+		return NULL;
+	}
+
+	rdopts = allocateReloptStruct(sizeof(TableSpaceOpts), options, numoptions);
+	fillRelOptions(rdopts, sizeof(TableSpaceOpts), options, numoptions,
+				   false, tab, lengthof(tab));
+
+	pfree(options);
+
+	return (bytea *) rdopts;
 }
 
 /*
@@ -2482,4 +2535,120 @@ AlterTableGetRelOptionsLockLevel(List *defList)
 	}
 
 	return lockmode;
+}
+
+/*
+ * pg_available_tablespace_options
+ *		List the tablespace options known to this backend, built-in ones and
+ *		those registered by extensions.
+ */
+Datum
+pg_available_tablespace_options(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (need_initialization)
+		initialize_reloptions();
+
+	for (int i = 0; relOpts[i]; i++)
+	{
+		relopt_gen *gen = relOpts[i];
+		Datum		values[6] = {0};
+		bool		nulls[6] = {0};
+
+		if ((gen->kinds & RELOPT_KIND_TABLESPACE) == 0)
+			continue;
+
+		values[0] = CStringGetTextDatum(gen->name);
+		nulls[2] = nulls[3] = nulls[4] = true;
+
+		switch (gen->type)
+		{
+			case RELOPT_TYPE_BOOL:
+				values[1] = CStringGetTextDatum("bool");
+				values[2] = CStringGetTextDatum(((relopt_bool *) gen)->default_val ?
+												"true" : "false");
+				nulls[2] = false;
+				break;
+			case RELOPT_TYPE_TERNARY:
+				values[1] = CStringGetTextDatum("ternary");
+				break;
+			case RELOPT_TYPE_INT:
+				{
+					relopt_int *opt = (relopt_int *) gen;
+
+					values[1] = CStringGetTextDatum("integer");
+					values[2] = CStringGetTextDatum(psprintf("%d", opt->default_val));
+					values[3] = CStringGetTextDatum(psprintf("%d", opt->min));
+					values[4] = CStringGetTextDatum(psprintf("%d", opt->max));
+					nulls[2] = nulls[3] = nulls[4] = false;
+				}
+				break;
+			case RELOPT_TYPE_REAL:
+				{
+					relopt_real *opt = (relopt_real *) gen;
+
+					values[1] = CStringGetTextDatum("real");
+					values[2] = CStringGetTextDatum(psprintf("%g", opt->default_val));
+					values[3] = CStringGetTextDatum(psprintf("%g", opt->min));
+					values[4] = CStringGetTextDatum(psprintf("%g", opt->max));
+					nulls[2] = nulls[3] = nulls[4] = false;
+				}
+				break;
+			case RELOPT_TYPE_ENUM:
+				{
+					relopt_enum *opt = (relopt_enum *) gen;
+
+					values[1] = CStringGetTextDatum("enum");
+					for (relopt_enum_elt_def *elt = opt->members;
+						 elt->string_val; elt++)
+					{
+						if (elt->symbol_val == opt->default_val)
+						{
+							values[2] = CStringGetTextDatum(elt->string_val);
+							nulls[2] = false;
+							break;
+						}
+					}
+				}
+				break;
+			case RELOPT_TYPE_STRING:
+				{
+					relopt_string *opt = (relopt_string *) gen;
+
+					values[1] = CStringGetTextDatum("string");
+					if (!opt->default_isnull)
+					{
+						values[2] = CStringGetTextDatum(opt->default_val);
+						nulls[2] = false;
+					}
+				}
+				break;
+		}
+
+		if (gen->desc)
+			values[5] = CStringGetTextDatum(gen->desc);
+		else
+			nulls[5] = true;
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	return (Datum) 0;
+}
+
+/*
+ * pg_validate_tablespace_options
+ *		Check a tablespace options array the way CREATE and ALTER TABLESPACE
+ *		would, without touching any tablespace.
+ */
+Datum
+pg_validate_tablespace_options(PG_FUNCTION_ARGS)
+{
+	(void) tablespace_reloptions(PG_GETARG_DATUM(0), true);
+
+	PG_RETURN_VOID();
 }

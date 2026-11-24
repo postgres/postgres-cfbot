@@ -446,6 +446,7 @@ void		transfer_all_new_dbs(DbInfoArr *old_db_arr,
 /* tablespace.c */
 
 void		init_tablespaces(void);
+void		check_tablespace_options(void);
 
 
 /* server.c */

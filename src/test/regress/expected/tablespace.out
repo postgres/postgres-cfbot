@@ -38,6 +38,34 @@ ERROR:  unrecognized parameter "some_nonexistent_parameter"
 ALTER TABLESPACE regress_tblspace RESET (random_page_cost = 2.0); -- fail
 ERROR:  RESET must not include values for parameters
 ALTER TABLESPACE regress_tblspace RESET (random_page_cost, effective_io_concurrency); -- ok
+-- available options and validation without a tablespace
+SELECT name, type, default_value, min_value
+  FROM pg_available_tablespace_options() ORDER BY name;
+            name            |  type   | default_value | min_value 
+----------------------------+---------+---------------+-----------
+ effective_io_concurrency   | integer | -1            | 0
+ maintenance_io_concurrency | integer | -1            | 0
+ random_page_cost           | real    | -1            | 0
+ seq_page_cost              | real    | -1            | 0
+(4 rows)
+
+SELECT pg_validate_tablespace_options('{random_page_cost=2,seq_page_cost=1.5}'); -- ok
+ pg_validate_tablespace_options 
+--------------------------------
+ 
+(1 row)
+
+SELECT pg_validate_tablespace_options('{effective_io_concurrency=10000}'); -- fail
+ERROR:  value 10000 out of bounds for option "effective_io_concurrency"
+DETAIL:  Valid values are between "0" and "1000".
+SELECT pg_validate_tablespace_options('{some_nonexistent_parameter=true}'); -- fail
+ERROR:  unrecognized parameter "some_nonexistent_parameter"
+SELECT pg_validate_tablespace_options('{}'); -- ok
+ pg_validate_tablespace_options 
+--------------------------------
+ 
+(1 row)
+
 -- REINDEX (TABLESPACE)
 -- catalogs and system tablespaces
 -- system catalog, fail

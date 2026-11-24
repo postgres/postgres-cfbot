@@ -92,6 +92,7 @@ Oid			binary_upgrade_next_pg_tablespace_oid = InvalidOid;
 static void create_tablespace_directories(const char *location,
 										  const Oid tablespaceoid);
 static bool destroy_tablespace_directories(Oid tablespaceoid, bool redo);
+static List *qualify_tablespace_options(List *options);
 
 
 /*
@@ -343,7 +344,7 @@ CreateTableSpace(CreateTableSpaceStmt *stmt)
 
 	/* Generate new proposed spcoptions (text array) */
 	newOptions = transformRelOptions((Datum) 0,
-									 stmt->options,
+									 qualify_tablespace_options(stmt->options),
 									 NULL, NULL, false, false);
 	(void) tablespace_reloptions(newOptions, true);
 	if (newOptions != (Datum) 0)
@@ -937,6 +938,30 @@ remove_tablespace_symlink(const char *linkloc)
 }
 
 /*
+ * Tablespace options have no namespaces, but extensions register theirs
+ * under qualified names like "ext.option", which the grammar splits into
+ * namespace and name.  Glue them back together.
+ */
+static List *
+qualify_tablespace_options(List *options)
+{
+	List	   *result = NIL;
+
+	foreach_node(DefElem, def, options)
+	{
+		if (def->defnamespace != NULL)
+		{
+			def = copyObject(def);
+			def->defname = psprintf("%s.%s", def->defnamespace, def->defname);
+			def->defnamespace = NULL;
+		}
+		result = lappend(result, def);
+	}
+
+	return result;
+}
+
+/*
  * Rename a tablespace
  */
 ObjectAddress
@@ -1080,8 +1105,8 @@ AlterTableSpaceOptions(AlterTableSpaceOptionsStmt *stmt)
 	datum = heap_getattr(tup, Anum_pg_tablespace_spcoptions,
 						 RelationGetDescr(rel), &isnull);
 	newOptions = transformRelOptions(isnull ? (Datum) 0 : datum,
-									 stmt->options, NULL, NULL, false,
-									 stmt->isReset);
+									 qualify_tablespace_options(stmt->options),
+									 NULL, NULL, false, stmt->isReset);
 	(void) tablespace_reloptions(newOptions, true);
 
 	/* Build new tuple. */
