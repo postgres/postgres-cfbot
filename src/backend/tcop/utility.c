@@ -2241,6 +2241,12 @@ AlterObjectTypeCommandTag(ObjectType objtype)
 {
 	CommandTag	tag;
 
+	/*
+	 * COLUMN and CONSTRAINT modifications should always return either
+	 * ALTER TABLE or ALTER FOREIGN TABLE.
+	 */
+	Assert(objtype != OBJECT_COLUMN && objtype != OBJECT_TABCONSTRAINT);
+
 	switch (objtype)
 	{
 		case OBJECT_AGGREGATE:
@@ -2254,9 +2260,6 @@ AlterObjectTypeCommandTag(ObjectType objtype)
 			break;
 		case OBJECT_COLLATION:
 			tag = CMDTAG_ALTER_COLLATION;
-			break;
-		case OBJECT_COLUMN:
-			tag = CMDTAG_ALTER_TABLE;
 			break;
 		case OBJECT_CONVERSION:
 			tag = CMDTAG_ALTER_CONVERSION;
@@ -2323,7 +2326,6 @@ AlterObjectTypeCommandTag(ObjectType objtype)
 			tag = CMDTAG_ALTER_SEQUENCE;
 			break;
 		case OBJECT_TABLE:
-		case OBJECT_TABCONSTRAINT:
 			tag = CMDTAG_ALTER_TABLE;
 			break;
 		case OBJECT_TABLESPACE:
@@ -2695,14 +2697,19 @@ CreateCommandTag(Node *parsetree)
 			break;
 
 		case T_RenameStmt:
+			{
+				ObjectType objtype = ((RenameStmt *) parsetree)->renameType;
 
-			/*
-			 * When the column is renamed, the command tag is created from its
-			 * relation type
-			 */
-			tag = AlterObjectTypeCommandTag(((RenameStmt *) parsetree)->renameType == OBJECT_COLUMN ?
-											((RenameStmt *) parsetree)->relationType :
-											((RenameStmt *) parsetree)->renameType);
+				/*
+				 * When a column or constraint is renamed, the command tag is
+				 * created from its relation type. Otherwise, the command tag
+				 * is created from the object type.
+				 */
+				if (objtype == OBJECT_COLUMN || objtype == OBJECT_TABCONSTRAINT)
+					objtype = ((RenameStmt *) parsetree)->relationType;
+
+				tag = AlterObjectTypeCommandTag(objtype);
+			}
 			break;
 
 		case T_AlterObjectDependsStmt:
