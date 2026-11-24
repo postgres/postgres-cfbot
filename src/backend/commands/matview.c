@@ -564,14 +564,29 @@ transientrel_destroy(DestReceiver *self)
  *
  * This is called after a new version of the data has been created in a
  * temporary table.  It performs a full outer join against the old version of
- * the data, producing "diff" results.  This join cannot work if there are any
- * duplicated rows in either the old or new versions, in the sense that every
- * column would compare as equal between the two rows.  It does work correctly
- * in the face of rows which have at least one NULL value, with all non-NULL
- * columns equal.  The behavior of NULLs on equality tests and on UNIQUE
- * indexes turns out to be quite convenient here; the tests we need to make
- * are consistent with default behavior.  If there is at least one UNIQUE
- * index on the materialized view, we have exactly the guarantee we need.
+ * the data, producing "diff" results.  A new row is matched to an old row only
+ * if the two rows are identical (record image equality, "*=") and, in
+ * addition, every column covered by a usable unique index compares equal
+ * using that index's equality operator.  Since those operators do not
+ * consider NULL equal to NULL, two rows that are identical but have a NULL in
+ * some unique-key column never match; the old row is deleted and the new one
+ * inserted, even though nothing has changed.  That is inefficient if there are
+ * many such rows, but it gives the right answer.
+ *
+ * The diff is only correct if every row matches at most one row on the other
+ * side of the join.  For the old rows, the unique index guarantees this: two
+ * old rows matching the same new row would have to be equal, and non-NULL, in
+ * every unique-key column, which the index does not allow.  The new rows have
+ * not been checked against the unique indexes yet, so there is no such
+ * guarantee for them.  If two new rows are identical and have no NULL in any
+ * unique-key column, both match the same old row, and the join concludes that
+ * nothing needs to be inserted.  We therefore check the new data for such rows
+ * before populating the diff table, and raise an error if any are found.
+ * Identical new rows that do have a NULL in a unique-key column are harmless:
+ * they cannot match any old row, so all of them are inserted, and the unique
+ * index then decides whether they are allowed.  A NULL in a column that no
+ * usable unique index covers does not prevent a match, so it gives no such
+ * protection.
  *
  * The temporary table used to hold the diff results contains just the TID of
  * the old record (if matched) and the ROW from the new table as a single
@@ -607,8 +622,12 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 	ListCell   *indexoidscan;
 	int16		relnatts;
 	Oid		   *opUsedForQual;
+	StringInfoData keynotnullbuf;
+	StringInfoData keyeqbuf;
 
 	initStringInfo(&querybuf);
+	initStringInfo(&keynotnullbuf);
+	initStringInfo(&keyeqbuf);
 	matviewRel = table_open(matviewOid, NoLock);
 	matviewname = quote_qualified_identifier(get_namespace_name(RelationGetNamespace(matviewRel)),
 											 RelationGetRelationName(matviewRel));
@@ -636,45 +655,6 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 		elog(ERROR, "SPI_exec failed: %s", querybuf.data);
 
 	/*
-	 * We need to ensure that there are not duplicate rows without NULLs in
-	 * the new data set before we can count on the "diff" results.  Check for
-	 * that in a way that allows showing the first duplicated row found.  Even
-	 * after we pass this test, a unique index on the materialized view may
-	 * find a duplicate key problem.
-	 *
-	 * Note: here and below, we use "tablename.*::tablerowtype" as a hack to
-	 * keep ".*" from being expanded into multiple columns in a SELECT list.
-	 * Compare ruleutils.c's get_variable().
-	 */
-	resetStringInfo(&querybuf);
-	appendStringInfo(&querybuf,
-					 "SELECT newdata.*::%s FROM %s newdata "
-					 "WHERE newdata.* IS NOT NULL AND EXISTS "
-					 "(SELECT 1 FROM %s newdata2 WHERE newdata2.* IS NOT NULL "
-					 "AND newdata2.* OPERATOR(pg_catalog.*=) newdata.* "
-					 "AND newdata2.ctid OPERATOR(pg_catalog.<>) "
-					 "newdata.ctid)",
-					 tempname, tempname, tempname);
-	if (SPI_execute(querybuf.data, false, 1) != SPI_OK_SELECT)
-		elog(ERROR, "SPI_exec failed: %s", querybuf.data);
-	if (SPI_processed > 0)
-	{
-		/*
-		 * Note that this ereport() is returning data to the user.  Generally,
-		 * we would want to make sure that the user has been granted access to
-		 * this data.  However, REFRESH MAT VIEW is only able to be run by the
-		 * owner of the mat view (or a superuser) and therefore there is no
-		 * need to check for access to data in the mat view.
-		 */
-		ereport(ERROR,
-				(errcode(ERRCODE_CARDINALITY_VIOLATION),
-				 errmsg("new data for materialized view \"%s\" contains duplicate rows without any null columns",
-						RelationGetRelationName(matviewRel)),
-				 errdetail("Row: %s",
-						   SPI_getvalue(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1))));
-	}
-
-	/*
 	 * Create the temporary "diff" table.
 	 *
 	 * Temporarily switch out of the SECURITY_RESTRICTED_OPERATION context,
@@ -699,7 +679,13 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 	if (SPI_exec(querybuf.data, 0) != SPI_OK_UTILITY)
 		elog(ERROR, "SPI_exec failed: %s", querybuf.data);
 
-	/* Start building the query for populating the diff table. */
+	/*
+	 * Start building the query for populating the diff table.
+	 *
+	 * Note: here and below, we use "tablename.*::tablerowtype" as a hack to
+	 * keep ".*" from being expanded into multiple columns in a SELECT list.
+	 * Compare ruleutils.c's get_variable().
+	 */
 	resetStringInfo(&querybuf);
 	appendStringInfo(&querybuf,
 					 "INSERT INTO %s "
@@ -802,6 +788,32 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 										 op,
 										 rightop, attrtype);
 
+				/*
+				 * Also build the conditions for the duplicate check below:
+				 * this column must be non-NULL for a new row to be able to
+				 * match an old one, and the same equality clause, applied
+				 * between two new rows, lets that check use a hash join.
+				 *
+				 * Test the column with IS DISTINCT FROM NULL, not IS NOT
+				 * NULL.  For a column of composite type, IS NOT NULL is false
+				 * if any field of the value is NULL, but such a value still
+				 * compares equal to an identical one, so it can match.
+				 */
+				if (foundUniqueIndex)
+				{
+					appendStringInfoString(&keynotnullbuf, " AND ");
+					appendStringInfoString(&keyeqbuf, " AND ");
+				}
+				appendStringInfo(&keynotnullbuf, "%s IS DISTINCT FROM NULL",
+								 leftop);
+
+				rightop = quote_qualified_identifier("newdata2",
+													 NameStr(attr->attname));
+				generate_operator_clause(&keyeqbuf,
+										 leftop, attrtype,
+										 op,
+										 rightop, attrtype);
+
 				foundUniqueIndex = true;
 			}
 		}
@@ -831,6 +843,57 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 						   " AND newdata.* OPERATOR(pg_catalog.*=) mv.*) "
 						   "WHERE newdata.* IS NULL OR mv.* IS NULL "
 						   "ORDER BY tid");
+
+	/*
+	 * Before we can count on the "diff" results, we must make sure that the
+	 * new data has no duplicate rows that could match the same old row; see
+	 * the function header comment.  Those are rows that are identical and
+	 * have no NULL in any unique-key column.  Since the rows are identical,
+	 * it is enough to test one of them for NULLs.  Check for that in a way
+	 * that allows showing the first duplicated row found.  Even after we pass
+	 * this test, a unique index on the materialized view may find a duplicate
+	 * key problem.
+	 *
+	 * The equality conditions on the unique-key columns don't change the
+	 * result, since identical rows with non-NULL keys always satisfy them.
+	 * They are there because "*=" is not hashable, and without them the check
+	 * would have to sort the whole new data set twice.
+	 */
+	{
+		StringInfoData dupcheckbuf;
+
+		initStringInfo(&dupcheckbuf);
+		appendStringInfo(&dupcheckbuf,
+						 "SELECT newdata.*::%s FROM %s newdata "
+						 "WHERE %s AND EXISTS "
+						 "(SELECT 1 FROM %s newdata2 "
+						 "WHERE %s "
+						 "AND newdata2.* OPERATOR(pg_catalog.*=) newdata.* "
+						 "AND newdata2.ctid OPERATOR(pg_catalog.<>) "
+						 "newdata.ctid)",
+						 tempname, tempname, keynotnullbuf.data, tempname,
+						 keyeqbuf.data);
+		if (SPI_execute(dupcheckbuf.data, false, 1) != SPI_OK_SELECT)
+			elog(ERROR, "SPI_exec failed: %s", dupcheckbuf.data);
+		if (SPI_processed > 0)
+		{
+			/*
+			 * Note that this ereport() is returning data to the user.
+			 * Generally, we would want to make sure that the user has been
+			 * granted access to this data.  However, REFRESH MAT VIEW is only
+			 * able to be run by the owner of the mat view (or a superuser)
+			 * and therefore there is no need to check for access to data in
+			 * the mat view.
+			 */
+			ereport(ERROR,
+					(errcode(ERRCODE_CARDINALITY_VIOLATION),
+					 errmsg("new data for materialized view \"%s\" contains duplicate rows",
+							RelationGetRelationName(matviewRel)),
+					 errdetail("Row: %s",
+							   SPI_getvalue(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1))));
+		}
+		pfree(dupcheckbuf.data);
+	}
 
 	/* Populate the temporary "diff" table. */
 	if (SPI_exec(querybuf.data, 0) != SPI_OK_INSERT)
