@@ -4710,8 +4710,37 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 									   (1.0 - extra->semifactors.outer_match_frac));
 	else if (path->jpath.jointype == JOIN_ANTI)
 		hashjointuples = outer_path_rows - outer_matched_rows;
-	else if (path->jpath.jointype == JOIN_SEMI || extra->inner_unique)
+	else if (path->jpath.jointype == JOIN_SEMI)
 		hashjointuples = outer_matched_rows;
+	else if (extra->inner_unique)
+	{
+		if (path->jpath.jointype == JOIN_INNER)
+		{
+			/*
+			 * A plain inner join with a provably unique inner side stops at the
+			 * first match, but the tuples it emits are the join's output, i.e.
+			 * the joinrel row estimate that every other node in the plan is
+			 * built on.  outer_matched_rows agrees with that when the semi-join
+			 * question is asked correctly and there is a single hash clause; it
+			 * need not agree otherwise, since eqjoinsel_semi() takes the
+			 * minimum over the clauses while the join size estimate
+			 * multiplies them.  Charge the join's own row estimate, so the
+			 * output count priced here is the same one the rest of the plan
+			 * is built on.
+			 */
+			hashjointuples = path->jpath.path.rows;
+		}
+		else
+		{
+			/*
+			 * Outer joins: what they emit is not the matched outer rows
+			 * either (a FULL join also emits unmatched inner rows), but
+			 * correcting that is a separate question, so keep the old
+			 * estimate.
+			 */
+			hashjointuples = outer_matched_rows;
+		}
+	}
 	else
 		hashjointuples = approx_tuple_count(root, &path->jpath, hashclauses);
 
@@ -5373,6 +5402,8 @@ compute_semi_anti_join_factors(PlannerInfo *root,
 	Selectivity nselec;
 	Selectivity avgmatch;
 	SpecialJoinInfo norm_sjinfo;
+	SpecialJoinInfo semi_sjinfo;
+	SpecialJoinInfo *sel_sjinfo;
 	List	   *joinquals;
 	ListCell   *l;
 
@@ -5399,14 +5430,35 @@ compute_semi_anti_join_factors(PlannerInfo *root,
 
 	/*
 	 * Get the JOIN_SEMI or JOIN_ANTI selectivity of the join clauses.
+	 *
+	 * eqjoinsel() decides whether it is being asked a semi-join question from
+	 * sjinfo->jointype and sjinfo->min_lefthand/righthand, not from its
+	 * jointype argument alone.  The caller can be any join whose inner side
+	 * is proven unique -- a plain inner join, or a LEFT, RIGHT or FULL join
+	 * (see add_paths_to_joinrel) -- and the sjinfo we get describes that
+	 * join, not a semi join, so the answer we get back is the ordinary
+	 * equality selectivity -- the fraction of the Cartesian product that
+	 * matches, not the fraction of outer rows that find a match.  Build a
+	 * SpecialJoinInfo that describes the same join as a SEMI join before
+	 * asking, so that jselec means what the rest of this function and its
+	 * callers assume it means.
 	 */
+	sel_sjinfo = sjinfo;
+	if (jointype != JOIN_SEMI && jointype != JOIN_ANTI &&
+		jointype != JOIN_RIGHT_SEMI && jointype != JOIN_RIGHT_ANTI)
+	{
+		init_dummy_sjinfo(&semi_sjinfo, outerrel->relids, innerrel->relids);
+		semi_sjinfo.jointype = JOIN_SEMI;
+		sel_sjinfo = &semi_sjinfo;
+	}
+
 	jselec = clauselist_selectivity(root,
 									joinquals,
 									0,
 									(jointype == JOIN_ANTI ||
 									 jointype == JOIN_RIGHT_ANTI) ?
 									JOIN_ANTI : JOIN_SEMI,
-									sjinfo);
+									sel_sjinfo);
 
 	/*
 	 * Also get the normal inner-join selectivity of the join clauses, to
