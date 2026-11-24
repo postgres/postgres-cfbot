@@ -320,12 +320,118 @@ END; $$;
 CREATE EVENT TRIGGER regress_event_trigger_report_end ON ddl_command_end
   EXECUTE PROCEDURE event_trigger_report_end();
 
+-- the commands of CREATE SCHEMA fire their own events, after the schema's
+CREATE FUNCTION event_trigger_report_start()
+ RETURNS event_trigger
+ LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE NOTICE 'START: command_tag=%', tg_tag;
+END; $$;
+CREATE EVENT TRIGGER regress_event_trigger_report_start ON ddl_command_start
+  EXECUTE PROCEDURE event_trigger_report_start();
+
 CREATE SCHEMA evttrig
 	CREATE TABLE one (col_a SERIAL PRIMARY KEY, col_b text DEFAULT 'forty two', col_c SERIAL)
 	CREATE INDEX one_idx ON one (col_b)
 	CREATE TABLE two (col_c INTEGER CHECK (col_c > 0) REFERENCES one DEFAULT 42)
 	CREATE TABLE id (col_d int NOT NULL GENERATED ALWAYS AS IDENTITY)
 	CREATE VIEW one_view AS SELECT * FROM two;
+
+DROP EVENT TRIGGER regress_event_trigger_report_start;
+DROP FUNCTION event_trigger_report_start();
+
+CREATE ROLE regress_evt_schema_user;
+CREATE ROLE regress_evt_schema_other;
+
+-- the commands of CREATE SCHEMA and their event triggers run as the owner of
+-- the schema, with the schema in the search_path
+CREATE FUNCTION event_trigger_report_context()
+ RETURNS event_trigger
+ LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE NOTICE 'START: command_tag=% user=% search_path=%',
+        tg_tag, current_user, current_setting('search_path');
+END; $$;
+CREATE EVENT TRIGGER regress_event_trigger_report_context ON ddl_command_start
+  WHEN TAG IN ('CREATE TABLE', 'GRANT')
+  EXECUTE PROCEDURE event_trigger_report_context();
+BEGIN;
+CREATE SCHEMA evttrig_owned AUTHORIZATION regress_evt_schema_other
+	CREATE TABLE t (a int)
+	GRANT SELECT ON t TO regress_evt_schema_user;
+ROLLBACK;
+DROP EVENT TRIGGER regress_event_trigger_report_context;
+DROP FUNCTION event_trigger_report_context();
+
+-- they follow the schema if an event trigger renames it
+CREATE FUNCTION event_trigger_rename_schema()
+ RETURNS event_trigger
+ LANGUAGE plpgsql
+AS $$
+BEGIN
+    ALTER SCHEMA evttrig_rename RENAME TO evttrig_renamed;
+END; $$;
+CREATE EVENT TRIGGER regress_event_trigger_rename_schema ON ddl_command_end
+  WHEN TAG IN ('CREATE SCHEMA')
+  EXECUTE PROCEDURE event_trigger_rename_schema();
+BEGIN;
+CREATE SCHEMA evttrig_rename CREATE TABLE t (a int);
+ROLLBACK;
+DROP EVENT TRIGGER regress_event_trigger_rename_schema;
+DROP FUNCTION event_trigger_rename_schema();
+
+-- their event triggers can change the role, unless the owner of the schema
+-- is different from the current user
+CREATE FUNCTION event_trigger_as_role()
+ RETURNS event_trigger
+ LANGUAGE plpgsql
+ SET role = regress_evt_schema_other
+AS $$
+BEGIN
+    RAISE NOTICE 'START: command_tag=% user=%', tg_tag, current_user;
+END; $$;
+CREATE EVENT TRIGGER regress_event_trigger_as_role ON ddl_command_start
+  WHEN TAG IN ('CREATE TABLE')
+  EXECUTE PROCEDURE event_trigger_as_role();
+BEGIN;
+CREATE SCHEMA evttrig_role CREATE TABLE t (a int);
+ROLLBACK;
+CREATE SCHEMA evttrig_role AUTHORIZATION regress_evt_schema_user
+	CREATE TABLE t (a int);  -- fails
+DROP EVENT TRIGGER regress_event_trigger_as_role;
+DROP FUNCTION event_trigger_as_role();
+
+-- the commands of CREATE SCHEMA only run as a schema owner we can become
+DO $$
+BEGIN
+    EXECUTE format('GRANT CREATE ON DATABASE %I TO regress_evt_schema_user',
+                   current_database());
+END $$;
+CREATE FUNCTION event_trigger_give_away()
+ RETURNS event_trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $$
+BEGIN
+    ALTER SCHEMA evttrig_give OWNER TO regress_evt_schema_other;
+END; $$;
+CREATE EVENT TRIGGER regress_event_trigger_give_away ON ddl_command_end
+  WHEN TAG IN ('CREATE SCHEMA')
+  EXECUTE PROCEDURE event_trigger_give_away();
+SET ROLE regress_evt_schema_user;
+CREATE SCHEMA evttrig_give CREATE TABLE t (a int);  -- fails
+RESET ROLE;
+DROP EVENT TRIGGER regress_event_trigger_give_away;
+DROP FUNCTION event_trigger_give_away();
+DO $$
+BEGIN
+    EXECUTE format('REVOKE CREATE ON DATABASE %I FROM regress_evt_schema_user',
+                   current_database());
+END $$;
+DROP ROLE regress_evt_schema_user;
+DROP ROLE regress_evt_schema_other;
 
 -- View with column additions
 CREATE OR REPLACE VIEW evttrig.one_view AS SELECT * FROM evttrig.two, evttrig.id;

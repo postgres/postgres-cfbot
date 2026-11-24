@@ -32,11 +32,11 @@ NOTICE:  DDL test: type simple, tag CREATE INDEX
 NOTICE:  DDL test: type simple, tag CREATE TABLE
 NOTICE:  DDL test: type simple, tag CREATE INDEX
 NOTICE:  DDL test: type alter table, tag ALTER TABLE
-NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint t4_a_fkey on table regress_schema_1.t4
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint t4_a_fkey on table t4
 NOTICE:  DDL test: type alter table, tag ALTER TABLE
-NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint t4_a_fkey1 on table regress_schema_1.t4
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint t4_a_fkey1 on table t4
 NOTICE:  DDL test: type alter table, tag ALTER TABLE
-NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint fk on table regress_schema_1.t4
+NOTICE:    subcommand: type ADD CONSTRAINT (and recurse) desc constraint fk on table t4
 DROP SCHEMA regress_schema_1 CASCADE;
 NOTICE:  drop cascades to 3 other objects
 DETAIL:  drop cascades to table regress_schema_1.t4

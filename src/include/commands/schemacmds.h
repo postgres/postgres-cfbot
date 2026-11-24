@@ -21,6 +21,9 @@
 extern Oid	CreateSchemaCommand(ParseState *pstate,
 								CreateSchemaStmt *stmt,
 								int stmt_location, int stmt_len);
+extern void CreateSchemaElements(ParseState *pstate, Oid schemaId,
+								 List *schemaElts, bool isCompleteQuery,
+								 int stmt_location, int stmt_len);
 extern ObjectAddress RenameSchema(const char *oldname, const char *newname);
 extern ObjectAddress AlterSchemaOwner(const char *name, Oid newOwnerId);
 extern void AlterSchemaOwner_oid(Oid schemaoid, Oid newOwnerId);

@@ -54,16 +54,11 @@ CreateSchemaCommand(ParseState *pstate, CreateSchemaStmt *stmt,
 {
 	const char *schemaName = stmt->schemaname;
 	Oid			namespaceId;
-	List	   *parsetree_list;
-	ListCell   *parsetree_item;
 	Oid			owner_uid;
 	Oid			saved_uid;
 	int			save_sec_context;
-	int			save_nestlevel;
-	char	   *nsp = namespace_search_path;
 	AclResult	aclresult;
 	ObjectAddress address;
-	StringInfoData pathbuf;
 
 	GetUserIdAndSecContext(&saved_uid, &save_sec_context);
 
@@ -156,6 +151,91 @@ CreateSchemaCommand(ParseState *pstate, CreateSchemaStmt *stmt,
 	CommandCounterIncrement();
 
 	/*
+	 * Report the new schema to possibly interested event triggers.  Note we
+	 * must do this here and not in ProcessUtilitySlow because otherwise the
+	 * objects created by the schema elements below are reported before the
+	 * schema, which would be wrong.
+	 */
+	ObjectAddressSet(address, NamespaceRelationId, namespaceId);
+	EventTriggerCollectSimpleCommand(address, InvalidObjectAddress,
+									 (Node *) stmt);
+
+	/* Reset current user and security context */
+	SetUserIdAndSecContext(saved_uid, save_sec_context);
+
+	/*
+	 * ProcessUtilitySlow() runs the schema elements itself, after reporting
+	 * the CREATE SCHEMA to event triggers.  Other callers may still pass them
+	 * here, in which case we run them as subcommands of whatever the caller
+	 * is doing.
+	 */
+	if (stmt->schemaElts != NIL)
+		CreateSchemaElements(pstate, namespaceId, stmt->schemaElts, false,
+							 stmt_location, stmt_len);
+
+	return namespaceId;
+}
+
+/*
+ * Execute the commands embedded in a CREATE SCHEMA command, after the schema
+ * itself has been created.
+ *
+ * If isCompleteQuery is true, the commands are run as complete queries, which
+ * fires event triggers for each of them, otherwise as subcommands.
+ *
+ * We look up the name and owner of the schema again, as event triggers may
+ * have run since it was created.
+ */
+void
+CreateSchemaElements(ParseState *pstate, Oid schemaId, List *schemaElts,
+					 bool isCompleteQuery,
+					 int stmt_location, int stmt_len)
+{
+	HeapTuple	tuple;
+	Form_pg_namespace nspform;
+	char	   *schemaName;
+	Oid			owner_uid;
+	Oid			saved_uid;
+	int			save_sec_context;
+	int			save_nestlevel;
+	char	   *nsp = namespace_search_path;
+	StringInfoData pathbuf;
+	List	   *parsetree_list;
+	ListCell   *parsetree_item;
+
+	tuple = SearchSysCache1(NAMESPACEOID, ObjectIdGetDatum(schemaId));
+	if (!HeapTupleIsValid(tuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_SCHEMA),
+				 errmsg("schema with OID %u does not exist", schemaId)));
+	nspform = (Form_pg_namespace) GETSTRUCT(tuple);
+	schemaName = pstrdup(NameStr(nspform->nspname));
+	owner_uid = nspform->nspowner;
+	ReleaseSysCache(tuple);
+
+	GetUserIdAndSecContext(&saved_uid, &save_sec_context);
+
+	/*
+	 * The owner may have been changed by an event trigger, so check again
+	 * that we can become it, as in CreateSchemaCommand().
+	 */
+	check_can_set_role(saved_uid, owner_uid);
+
+	/*
+	 * If the owner is different from the current user, temporarily set the
+	 * current user so that the objects will be created with the correct
+	 * ownership.  SECURITY_LOCAL_USERID_CHANGE keeps the commands, and the
+	 * event triggers fired for them, from changing the role in the meantime.
+	 *
+	 * Otherwise we leave the current user alone, and must not restore it at
+	 * the end either: nothing stops an event trigger from using SET ROLE
+	 * then, and restoring the userid would undo only half of that.
+	 */
+	if (saved_uid != owner_uid)
+		SetUserIdAndSecContext(owner_uid,
+							   save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
+
+	/*
 	 * Prepend the new schema to the current search path.
 	 *
 	 * We use the equivalent of a function SET option to allow the setting to
@@ -178,16 +258,6 @@ CreateSchemaCommand(ParseState *pstate, CreateSchemaStmt *stmt,
 							 GUC_ACTION_SAVE, true, 0, false);
 
 	/*
-	 * Report the new schema to possibly interested event triggers.  Note we
-	 * must do this here and not in ProcessUtilitySlow because otherwise the
-	 * objects created below are reported before the schema, which would be
-	 * wrong.
-	 */
-	ObjectAddressSet(address, NamespaceRelationId, namespaceId);
-	EventTriggerCollectSimpleCommand(address, InvalidObjectAddress,
-									 (Node *) stmt);
-
-	/*
 	 * Examine the list of commands embedded in the CREATE SCHEMA command, and
 	 * reorganize them into a sequentially executable order with no forward
 	 * references.  Note that the result is still a list of raw parsetrees ---
@@ -195,14 +265,16 @@ CreateSchemaCommand(ParseState *pstate, CreateSchemaStmt *stmt,
 	 * have actually executed the prior ones.
 	 */
 	parsetree_list = transformCreateSchemaStmtElements(pstate,
-													   stmt->schemaElts,
+													   schemaElts,
 													   schemaName);
 
 	/*
 	 * Execute each command contained in the CREATE SCHEMA.  Since the grammar
 	 * allows only utility commands in CREATE SCHEMA, there is no need to pass
 	 * them through parse_analyze_*() or the rewriter; we can just hand them
-	 * straight to ProcessUtility.
+	 * straight to ProcessUtility.  They are commands the user wrote, so
+	 * normally we run them as complete queries, like the commands of an
+	 * extension script.
 	 */
 	foreach(parsetree_item, parsetree_list)
 	{
@@ -222,7 +294,8 @@ CreateSchemaCommand(ParseState *pstate, CreateSchemaStmt *stmt,
 		ProcessUtility(wrapper,
 					   pstate->p_sourcetext,
 					   false,
-					   PROCESS_UTILITY_SUBCOMMAND,
+					   isCompleteQuery ?
+					   PROCESS_UTILITY_QUERY : PROCESS_UTILITY_SUBCOMMAND,
 					   NULL,
 					   NULL,
 					   None_Receiver,
@@ -237,10 +310,9 @@ CreateSchemaCommand(ParseState *pstate, CreateSchemaStmt *stmt,
 	 */
 	AtEOXact_GUC(true, save_nestlevel);
 
-	/* Reset current user and security context */
-	SetUserIdAndSecContext(saved_uid, save_sec_context);
-
-	return namespaceId;
+	/* Reset current user and security context, if we changed them */
+	if (saved_uid != owner_uid)
+		SetUserIdAndSecContext(saved_uid, save_sec_context);
 }
 
 
