@@ -233,6 +233,149 @@ GROUP BY s1.a;
 DROP TABLE eager_agg_s1;
 DROP TABLE eager_agg_s2;
 
+-- Ensure the partial aggregation can use an index scan that differs in sort
+-- direction from the ordering that the grouping keys took from ORDER BY
+CREATE TABLE eager_agg_d1 (a int, b int, c int);
+CREATE TABLE eager_agg_d2 (a int);
+INSERT INTO eager_agg_d1
+  SELECT i % 10, (i / 10) % 100, i FROM generate_series(1, 10000) i;
+INSERT INTO eager_agg_d2 SELECT i FROM generate_series(0, 9) i;
+CREATE INDEX eager_agg_d1_a_b_idx ON eager_agg_d1 (a, b);
+ANALYZE eager_agg_d1, eager_agg_d2;
+
+SET enable_hashagg TO off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT d1.a, d1.b, sum(d1.c)
+  FROM eager_agg_d1 d1
+  JOIN eager_agg_d2 d2 ON d1.a = d2.a
+GROUP BY d1.a, d1.b ORDER BY d1.a, d1.b DESC LIMIT 5;
+
+SELECT d1.a, d1.b, sum(d1.c)
+  FROM eager_agg_d1 d1
+  JOIN eager_agg_d2 d2 ON d1.a = d2.a
+GROUP BY d1.a, d1.b ORDER BY d1.a, d1.b DESC LIMIT 5;
+
+-- ... but not with enable_group_by_reordering off
+SET enable_group_by_reordering TO off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT d1.a, d1.b, sum(d1.c)
+  FROM eager_agg_d1 d1
+  JOIN eager_agg_d2 d2 ON d1.a = d2.a
+GROUP BY d1.a, d1.b ORDER BY d1.a, d1.b DESC LIMIT 5;
+
+RESET enable_group_by_reordering;
+
+-- Likewise for partial aggregation below a parallel join, with an index
+-- that differs from the grouping key in both sort direction and NULLS
+-- ordering
+DROP INDEX eager_agg_d1_a_b_idx;
+CREATE INDEX eager_agg_d1_a_idx ON eager_agg_d1 (a DESC NULLS LAST);
+
+SET enable_nestloop TO off;
+SET enable_hashjoin TO off;
+SET parallel_setup_cost TO 0;
+SET parallel_tuple_cost TO 0;
+SET min_parallel_table_scan_size TO 0;
+SET min_parallel_index_scan_size TO 0;
+SET max_parallel_workers_per_gather TO 2;
+
+EXPLAIN (COSTS OFF)
+SELECT d1.a, sum(d1.c)
+  FROM eager_agg_d1 d1
+  JOIN eager_agg_d2 d2 ON d1.a = d2.a
+GROUP BY d1.a;
+
+SELECT d1.a, sum(d1.c)
+  FROM eager_agg_d1 d1
+  JOIN eager_agg_d2 d2 ON d1.a = d2.a
+GROUP BY d1.a ORDER BY d1.a;
+
+-- ... but not with enable_group_by_reordering off
+SET enable_group_by_reordering TO off;
+
+EXPLAIN (COSTS OFF)
+SELECT d1.a, sum(d1.c)
+  FROM eager_agg_d1 d1
+  JOIN eager_agg_d2 d2 ON d1.a = d2.a
+GROUP BY d1.a;
+
+RESET enable_group_by_reordering;
+RESET enable_nestloop;
+RESET enable_hashjoin;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET min_parallel_index_scan_size;
+RESET max_parallel_workers_per_gather;
+
+RESET enable_hashagg;
+
+DROP TABLE eager_agg_d1;
+DROP TABLE eager_agg_d2;
+
+-- An index scan in the direction that the operator class has no operator for
+-- must not cause an error in the partial aggregation, though such an operator
+-- class is not valid
+CREATE TYPE eager_agg_color AS ENUM ('r', 'g', 'b');
+CREATE FUNCTION eager_agg_color_lt(eager_agg_color, eager_agg_color)
+  RETURNS bool LANGUAGE internal IMMUTABLE STRICT AS 'enum_lt';
+CREATE FUNCTION eager_agg_color_eq(eager_agg_color, eager_agg_color)
+  RETURNS bool LANGUAGE internal IMMUTABLE STRICT AS 'enum_eq';
+CREATE FUNCTION eager_agg_color_cmp(eager_agg_color, eager_agg_color)
+  RETURNS int LANGUAGE internal IMMUTABLE STRICT AS 'enum_cmp';
+CREATE OPERATOR <<< (LEFTARG = eager_agg_color, RIGHTARG = eager_agg_color,
+  FUNCTION = eager_agg_color_lt);
+CREATE OPERATOR === (LEFTARG = eager_agg_color, RIGHTARG = eager_agg_color,
+  FUNCTION = eager_agg_color_eq);
+-- FUNCTION 4 is needed for the grouping key to be usable in eager aggregation
+CREATE OPERATOR CLASS eager_agg_color_ops DEFAULT FOR TYPE eager_agg_color
+  USING btree AS
+  OPERATOR 1 <<<, OPERATOR 3 ===,
+  FUNCTION 1 eager_agg_color_cmp(eager_agg_color, eager_agg_color),
+  FUNCTION 4 btequalimage(oid);
+CREATE TABLE eager_agg_c1 (c eager_agg_color, d int, x int);
+CREATE TABLE eager_agg_c2 (k int);
+INSERT INTO eager_agg_c1
+  SELECT (ARRAY['r', 'g', 'b'])[1 + i % 3]::eager_agg_color, i % 50, i
+  FROM generate_series(1, 3000) i;
+INSERT INTO eager_agg_c2 SELECT generate_series(0, 49);
+CREATE INDEX ON eager_agg_c1 (c DESC) INCLUDE (d, x);
+VACUUM ANALYZE eager_agg_c1, eager_agg_c2;
+
+
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_index_scan_size = 0;
+SET enable_hashagg = off;
+
+EXPLAIN (COSTS OFF)
+SELECT c1.c, sum(c1.x)
+  FROM eager_agg_c1 c1
+  JOIN eager_agg_c2 c2 ON c1.d = c2.k
+GROUP BY c1.c;
+
+SELECT c1.c, sum(c1.x)
+  FROM eager_agg_c1 c1
+  JOIN eager_agg_c2 c2 ON c1.d = c2.k
+GROUP BY c1.c;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_index_scan_size;
+RESET enable_hashagg;
+
+DROP TABLE eager_agg_c1;
+DROP TABLE eager_agg_c2;
+DROP OPERATOR CLASS eager_agg_color_ops USING btree;
+DROP OPERATOR FAMILY eager_agg_color_ops USING btree;
+DROP OPERATOR <<< (eager_agg_color, eager_agg_color);
+DROP OPERATOR === (eager_agg_color, eager_agg_color);
+DROP FUNCTION eager_agg_color_lt(eager_agg_color, eager_agg_color);
+DROP FUNCTION eager_agg_color_eq(eager_agg_color, eager_agg_color);
+DROP FUNCTION eager_agg_color_cmp(eager_agg_color, eager_agg_color);
+DROP TYPE eager_agg_color;
+
 DROP TABLE eager_agg_t1;
 DROP TABLE eager_agg_t2;
 DROP TABLE eager_agg_t3;
