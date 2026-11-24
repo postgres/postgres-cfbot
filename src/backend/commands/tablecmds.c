@@ -9318,7 +9318,7 @@ ATExecSetExpression(AlteredTableInfo *tab, Relation rel, const char *colName,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("ALTER TABLE / SET EXPRESSION is not supported for virtual generated columns in tables that are part of a publication"),
 				 errdetail("Column \"%s\" of relation \"%s\" is a virtual generated column.",
-						   colName, RelationGetRelationName(rel))));
+						   colName, MsgQualifiedRelNameByRel(rel))));
 
 	rewrite = (attgenerated == ATTRIBUTE_GENERATED_STORED);
 
