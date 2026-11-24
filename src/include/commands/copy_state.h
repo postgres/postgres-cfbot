@@ -91,11 +91,12 @@ typedef struct CopyFromStateData
 	bool	   *convert_select_flags;	/* per-column CSV/TEXT CS flags */
 	Node	   *whereClause;	/* WHERE condition (or NULL) */
 
-	/* these are just for error messages, see CopyFromErrorCallback */
+	/* these are just for error reporting, see CopyFromErrorCallback */
 	const char *cur_relname;	/* table name for error messages */
 	uint64		cur_lineno;		/* line number for error messages */
 	const char *cur_attname;	/* current att for error messages */
 	const char *cur_attval;		/* current att value for error messages */
+	bool		cur_attval_built;	/* att value was built by a custom format */
 	bool		relname_only;	/* don't output line number, att, etc. */
 
 	/*
@@ -136,6 +137,15 @@ typedef struct CopyFromStateData
 	 */
 	bool		cur_row_skip;	/* ON_ERROR IGNORE dropped the row */
 	bool		cur_row_has_default;	/* a column is set to its default */
+
+	/*
+	 * Columns of a custom format that need their typmod or domain constraints
+	 * applied to the values the format builds by itself, and which columns of
+	 * the current row core has set instead.  See CopyFromCoerceDatums().
+	 */
+	struct CopyFromCoerceColumn *coerce_columns;
+	int			num_coerce_columns;
+	bool	   *row_set_by_core;	/* one for each column of attnumlist */
 
 	bool		simd_enabled;	/* use SIMD to scan for special chars? */
 

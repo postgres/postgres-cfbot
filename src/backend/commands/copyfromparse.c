@@ -163,6 +163,8 @@ static pg_always_inline bool CopyFromOneAttribute(CopyFromState cstate,
 												  int pos);
 static bool CopyFromCustomOneRow(CopyFromState cstate, ExprContext *econtext,
 								 Datum *values, bool *nulls);
+static bool CopyFromCoerceDatums(CopyFromState cstate, Datum *values,
+								 bool *nulls);
 static pg_always_inline bool CopyFromTextLikeOneRow(CopyFromState cstate,
 													ExprContext *econtext,
 													Datum *values,
@@ -1126,10 +1128,13 @@ CopyFromCallInputFunction(FunctionCallInfo fcinfo, char *str, Datum *result)
 }
 
 /*
- * Apply ON_ERROR to a field that the input function failed to convert.
+ * Apply ON_ERROR to a column whose value core failed to set: the input
+ * function rejected the field, or the typmod or the domain constraints of the
+ * column rejected a Datum that a custom format built.
  *
  * cstate->cur_attname is the column, and cstate->cur_attval is the field, or
- * NULL for a null field.
+ * NULL for a null field or a Datum that a format built, which
+ * cstate->cur_attval_built tells apart.
  *
  * Returns false for ON_ERROR IGNORE, in which case the row is to be dropped.
  * For SET_NULL, checks that the column accepts a null value and returns true,
@@ -1213,11 +1218,25 @@ CopyFromApplyOnError(CopyFromState cstate, Form_pg_attribute att)
 							   attval));
 			pfree(attval);
 		}
-		else
+		else if (!cstate->cur_attval_built)
 		{
 			if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
 				ereport(NOTICE,
 						errmsg("skipping row due to data type incompatibility at line %" PRIu64 " for column \"%s\": null input",
+							   cstate->cur_lineno,
+							   cstate->cur_attname));
+		}
+		else
+		{
+			/* a Datum that a custom format built, with no input text */
+			if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
+				ereport(NOTICE,
+						errmsg("skipping row due to data type incompatibility at line %" PRIu64 " for column \"%s\"",
+							   cstate->cur_lineno,
+							   cstate->cur_attname));
+			else if (cstate->opts.on_error == COPY_ON_ERROR_SET_NULL)
+				ereport(NOTICE,
+						errmsg("setting to null due to data type incompatibility at line %" PRIu64 " for column \"%s\"",
 							   cstate->cur_lineno,
 							   cstate->cur_attname));
 		}
@@ -1320,6 +1339,9 @@ CopyFromConvertField(CopyFromState cstate, int i, char *str,
 	/* A conversion overrides an earlier CopyFromSetDefault() call */
 	cstate->defaults[m] = false;
 
+	if (cstate->row_set_by_core != NULL)
+		cstate->row_set_by_core[i] = true;
+
 	if (cstate->convert_select_flags && !cstate->convert_select_flags[m])
 	{
 		/* ignore input field, leaving column as NULL */
@@ -1370,6 +1392,8 @@ CopyFromSetDefault(CopyFromState cstate, int i)
 
 	cstate->defaults[m] = true;
 	cstate->cur_row_has_default = true;
+	if (cstate->row_set_by_core != NULL)
+		cstate->row_set_by_core[i] = true;
 }
 
 /*
@@ -1412,6 +1436,78 @@ CopyFromConvertFields(CopyFromState cstate, char **fields, bool *isdefault,
 }
 
 /*
+ * Apply the typmod and domain constraints of the columns to the values that a
+ * custom format built by itself, as an input function would have done for a
+ * field that core converts.  ON_ERROR applies to the errors here too.
+ * Returns false if the row is to be dropped.
+ */
+static bool
+CopyFromCoerceDatums(CopyFromState cstate, Datum *values, bool *nulls)
+{
+	TupleDesc	tupDesc = RelationGetDescr(cstate->rel);
+
+	for (int k = 0; k < cstate->num_coerce_columns; k++)
+	{
+		CopyFromCoerceColumn *col = &cstate->coerce_columns[k];
+		Datum	   *value = &values[col->fieldno];
+		bool	   *isnull = &nulls[col->fieldno];
+		Form_pg_attribute att = TupleDescAttr(tupDesc, col->attnum - 1);
+		bool		ok = true;
+
+		/* Core has set the column already, by converting a field or not */
+		if (cstate->row_set_by_core[col->fieldno])
+			continue;
+
+		cstate->cur_attname = NameStr(att->attname);
+		cstate->cur_attval_built = !*isnull;
+
+		if (!*isnull && col->typmod_unsupported)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("COPY format \"%s\" cannot set a value of type %s by itself",
+						   cstate->opts.custom_format_entry->name,
+						   format_type_with_typemod(att->atttypid,
+													att->atttypmod)));
+
+		if (!*isnull && col->typmod_fcinfo != NULL)
+		{
+			FunctionCallInfo fcinfo = col->typmod_fcinfo;
+			Datum		result;
+
+			fcinfo->args[0].value = *value;
+			fcinfo->isnull = false;
+			result = FunctionCallInvoke(fcinfo);
+			if (SOFT_ERROR_OCCURRED(fcinfo->context))
+				ok = false;
+			else
+				*value = result;
+		}
+
+		if (ok && OidIsValid(col->domain_type))
+			ok = domain_check_safe(*value, *isnull, col->domain_type,
+								   &col->domain_extra, cstate->copycontext,
+								   (Node *) cstate->escontext);
+
+		if (!ok)
+		{
+			if (!CopyFromApplyOnError(cstate, att))
+			{
+				cstate->cur_attname = NULL;
+				cstate->cur_attval_built = false;
+				return false;
+			}
+			*value = (Datum) 0;
+			*isnull = true;
+		}
+
+		cstate->cur_attname = NULL;
+		cstate->cur_attval_built = false;
+	}
+
+	return true;
+}
+
+/*
  * Read one row for a custom format.
  *
  * The format fills one element of the arrays for each column of attnumlist.
@@ -1448,6 +1544,8 @@ CopyFromCustomOneRow(CopyFromState cstate, ExprContext *econtext,
 	cstate->cur_row_skip = false;
 	cstate->cur_row_erroneous = false;
 	cstate->cur_row_has_default = false;
+	for (int k = 0; k < cstate->num_coerce_columns; k++)
+		cstate->row_set_by_core[cstate->coerce_columns[k].fieldno] = false;
 
 	got_row = cstate->routine->CopyFromOneRow(cstate, econtext,
 											  row_values, row_nulls);
@@ -1468,6 +1566,10 @@ CopyFromCustomOneRow(CopyFromState cstate, ExprContext *econtext,
 					 errmsg("received copy data after end of data")));
 		return false;
 	}
+
+	if (!cstate->cur_row_skip && cstate->num_coerce_columns > 0 &&
+		!CopyFromCoerceDatums(cstate, row_values, row_nulls))
+		cstate->cur_row_skip = true;
 
 	if (cstate->cur_row_skip)
 	{

@@ -16,6 +16,8 @@
 #include "commands/copy.h"
 #include "commands/copyapi.h"
 #include "commands/copy_state.h"
+#include "utils/builtins.h"
+#include "utils/lsyscache.h"
 
 PG_MODULE_MAGIC;
 
@@ -27,10 +29,12 @@ typedef struct TestCopyFromState
 	int			pos;			/* next byte to process in buf */
 	bool		eof;			/* reached the end of the source? */
 	StringInfoData line;		/* the line being read */
+	bool	   *build_datum;	/* build the Datum of each column by itself? */
 } TestCopyFromState;
 
 static void
-TestCopyFromStart(CopyFromState cstate, TupleDesc tupDesc)
+TestCopyFromStartCommon(CopyFromState cstate, TupleDesc tupDesc,
+						bool build_datums)
 {
 	TestCopyFromState *tstate;
 	MemoryContext oldcxt;
@@ -42,9 +46,42 @@ TestCopyFromStart(CopyFromState cstate, TupleDesc tupDesc)
 	oldcxt = MemoryContextSwitchTo(cstate->copycontext);
 	tstate = palloc0_object(TestCopyFromState);
 	initStringInfo(&tstate->line);
+
+	/*
+	 * In test_datum_format, build the Datums of the text-like columns by
+	 * itself, leaving it to core to apply their typmod and domain
+	 * constraints.
+	 */
+	tstate->build_datum = palloc0_array(bool, list_length(cstate->attnumlist));
+	if (build_datums)
+	{
+		int			i = 0;
+
+		foreach_int(attnum, cstate->attnumlist)
+		{
+			Oid			basetype;
+
+			basetype = getBaseType(TupleDescAttr(tupDesc, attnum - 1)->atttypid);
+			tstate->build_datum[i++] = (basetype == TEXTOID ||
+										basetype == VARCHAROID ||
+										basetype == BPCHAROID);
+		}
+	}
 	MemoryContextSwitchTo(oldcxt);
 
 	cstate->format_private = tstate;
+}
+
+static void
+TestCopyFromStart(CopyFromState cstate, TupleDesc tupDesc)
+{
+	TestCopyFromStartCommon(cstate, tupDesc, false);
+}
+
+static void
+TestCopyDatumFromStart(CopyFromState cstate, TupleDesc tupDesc)
+{
+	TestCopyFromStartCommon(cstate, tupDesc, true);
 }
 
 /*
@@ -121,6 +158,12 @@ TestCopyFromOneRow(CopyFromState cstate, ExprContext *econtext, Datum *values, b
 		if (field != NULL && cstate->opts.default_print != NULL &&
 			strcmp(field, cstate->opts.default_print) == 0)
 			CopyFromSetDefault(cstate, i);
+		else if (tstate->build_datum[i])
+		{
+			nulls[i] = (field == NULL);
+			if (field != NULL)
+				values[i] = CStringGetTextDatum(field);
+		}
 		else if (!CopyFromConvertField(cstate, i, field, values, nulls))
 			return true;		/* the row is dropped */
 
@@ -225,6 +268,12 @@ static const CopyFromRoutine TestCopyFromRoutine = {
 	.CopyFromEnd = TestCopyFromEnd,
 };
 
+static const CopyFromRoutine TestCopyDatumFromRoutine = {
+	.CopyFromStart = TestCopyDatumFromStart,
+	.CopyFromOneRow = TestCopyFromOneRow,
+	.CopyFromEnd = TestCopyFromEnd,
+};
+
 static const CopyFromRoutine TestCopyBinaryFromRoutine = {
 	.CopyFromStart = TestCopyFromStart,
 	.CopyFromOneRow = TestCopyBinaryFromOneRow,
@@ -235,6 +284,15 @@ static const CopyCustomFormatEntry TestCopyFormat = {
 	.name = "test_format",
 	.to_routine = &TestCopyToRoutine,
 	.from_routine = &TestCopyFromRoutine,
+};
+
+/*
+ * Same as test_format, but builds the Datums of the text-like columns by itself,
+ * and supports only COPY FROM
+ */
+static const CopyCustomFormatEntry TestCopyDatumFormat = {
+	.name = "test_datum_format",
+	.from_routine = &TestCopyDatumFromRoutine,
 };
 
 /*
@@ -252,5 +310,6 @@ void
 _PG_init(void)
 {
 	RegisterCopyCustomFormat(&TestCopyFormat);
+	RegisterCopyCustomFormat(&TestCopyDatumFormat);
 	RegisterCopyCustomFormat(&TestCopyBinaryFormat);
 }

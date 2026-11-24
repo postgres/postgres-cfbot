@@ -43,6 +43,7 @@
 #include "miscadmin.h"
 #include "nodes/miscnodes.h"
 #include "optimizer/optimizer.h"
+#include "parser/parse_coerce.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/fd.h"
@@ -108,6 +109,8 @@ typedef struct CopyMultiInsertInfo
 
 /* non-export function prototypes */
 static void ClosePipeFromProgram(CopyFromState cstate);
+static void CopyFromSetupCoerceColumns(CopyFromState cstate,
+									   TupleDesc tupDesc);
 
 /*
  * Built-in format-specific routines. One-row callbacks are defined in
@@ -293,6 +296,14 @@ CopyFromErrorCallback(void *arg)
 					   cstate->cur_attname,
 					   attval);
 			pfree(attval);
+		}
+		else if (cstate->cur_attname && cstate->cur_attval_built)
+		{
+			/* error is relevant to a value that a custom format built */
+			errcontext("COPY %s, line %" PRIu64 ", column %s",
+					   cstate->cur_relname,
+					   cstate->cur_lineno,
+					   cstate->cur_attname);
 		}
 		else if (cstate->cur_attname)
 		{
@@ -1526,6 +1537,82 @@ CopyFrom(CopyFromState cstate)
 }
 
 /*
+ * Find the columns of a custom format that need their typmod or domain
+ * constraints applied to a value that the format builds by itself, since the
+ * format builds it as a value of the base type, as an input function would
+ * be given one to parse.
+ */
+static void
+CopyFromSetupCoerceColumns(CopyFromState cstate, TupleDesc tupDesc)
+{
+	int			attr_count = list_length(cstate->attnumlist);
+	int			fieldno = -1;
+
+	cstate->coerce_columns = palloc0_array(CopyFromCoerceColumn, attr_count);
+
+	foreach_int(attnum, cstate->attnumlist)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupDesc, attnum - 1);
+		CopyFromCoerceColumn *col;
+		int32		basetypmod = att->atttypmod;
+		Oid			basetype;
+		Oid			funcid = InvalidOid;
+		CoercionPathType path = COERCION_PATH_NONE;
+
+		fieldno++;
+
+		/* Nothing to do for a column the caller doesn't need (file_fdw) */
+		if (cstate->convert_select_flags &&
+			!cstate->convert_select_flags[attnum - 1])
+			continue;
+
+		basetype = getBaseTypeAndTypmod(att->atttypid, &basetypmod);
+		if (basetypmod >= 0)
+			path = find_typmod_coercion_function(basetype, &funcid);
+
+		if (path == COERCION_PATH_NONE && basetype == att->atttypid)
+			continue;
+
+		col = &cstate->coerce_columns[cstate->num_coerce_columns++];
+		col->fieldno = fieldno;
+		col->attnum = attnum;
+
+		if (path == COERCION_PATH_FUNC)
+		{
+			FmgrInfo   *flinfo = palloc_object(FmgrInfo);
+			int			nargs = get_func_nargs(funcid);
+
+			/*
+			 * The function takes the typmod, and possibly whether the cast is
+			 * explicit, which it isn't here, so that a value that is too long
+			 * is an error as for the input functions.
+			 */
+			fmgr_info(funcid, flinfo);
+			col->typmod_fcinfo = palloc(SizeForFunctionCallInfo(nargs));
+			InitFunctionCallInfoData(*col->typmod_fcinfo, flinfo, nargs,
+									 InvalidOid, (Node *) cstate->escontext,
+									 NULL);
+			col->typmod_fcinfo->args[0].isnull = false;
+			col->typmod_fcinfo->args[1].value = Int32GetDatum(basetypmod);
+			col->typmod_fcinfo->args[1].isnull = false;
+			if (nargs == 3)
+			{
+				col->typmod_fcinfo->args[2].value = BoolGetDatum(false);
+				col->typmod_fcinfo->args[2].isnull = false;
+			}
+		}
+		else if (path == COERCION_PATH_ARRAYCOERCE)
+			col->typmod_unsupported = true;
+
+		if (basetype != att->atttypid)
+			col->domain_type = att->atttypid;
+	}
+
+	if (cstate->num_coerce_columns > 0)
+		cstate->row_set_by_core = palloc0_array(bool, attr_count);
+}
+
+/*
  * Setup to read tuples from a file for COPY FROM.
  *
  * 'rel': Used as a template for the tuples
@@ -1919,6 +2006,9 @@ BeginCopyFrom(ParseState *pstate,
 			cstate->in_fcinfos[attnum - 1] = fcinfo;
 		}
 	}
+	if (cstate->opts.format == COPY_FORMAT_CUSTOM)
+		CopyFromSetupCoerceColumns(cstate, tupDesc);
+
 	cstate->defmap = defmap;
 	cstate->defexprs = defexprs;
 	cstate->volatile_defexprs = volatile_defexprs;

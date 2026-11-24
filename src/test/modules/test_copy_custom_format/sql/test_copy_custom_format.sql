@@ -25,6 +25,7 @@ COPY copy_data TO stdout WITH (format 'nonexistent');          -- ERROR: not rec
 COPY copy_data TO stdout WITH (format 'text', format 'csv');   -- ERROR: conflicting
 
 COPY copy_data TO stdout WITH (format 'test_format', freeze true);     -- ERROR: FREEZE with COPY TO
+COPY copy_data TO stdout WITH (format 'test_datum_format');           -- ERROR: no COPY TO
 
 -- The format has core convert the fields, so ON_ERROR, LOG_VERBOSITY and
 -- REJECT_LIMIT work as for the built-in formats.  Column c is filled with its
@@ -71,6 +72,38 @@ COPY copy_dflt_seq FROM stdin WITH (format 'test_format', default '\D', on_error
 \D,3
 \.
 SELECT * FROM copy_dflt_seq;
+
+-- test_datum_format builds the Datums of the text-like columns by itself, and
+-- core applies their typmod and domain constraints, which ON_ERROR covers too.
+CREATE DOMAIN short_text AS text CHECK (length(VALUE) < 4);
+CREATE DOMAIN nn_text AS text NOT NULL CHECK (length(VALUE) < 4);
+CREATE TABLE copy_datum (a varchar(3), b char(3), c short_text, d nn_text, n int);
+COPY copy_datum FROM stdin WITH (format 'test_datum_format');
+abc,ab,abc,x,1
+\.
+SELECT a, b, octet_length(b) AS b_len, c, d, n FROM copy_datum;
+COPY copy_datum FROM stdin WITH (format 'test_datum_format'); -- ERROR: too long
+abcd,a,a,a,2
+\.
+COPY copy_datum FROM stdin WITH (format 'test_datum_format'); -- ERROR: domain check
+a,a,abcd,a,3
+\.
+COPY copy_datum FROM stdin WITH (format 'test_datum_format'); -- ERROR: domain not null
+a,a,a,null,4
+\.
+COPY copy_datum FROM stdin WITH (format 'test_datum_format', on_error ignore, log_verbosity verbose);
+abcd,a,a,a,5
+a,a,abcd,a,6
+a,a,a,null,7
+ok,ok,ok,ok,8
+\.
+COPY copy_datum FROM stdin WITH (format 'test_datum_format', on_error set_null, log_verbosity verbose);
+abcd,a,abcd,a,9
+\.
+COPY copy_datum FROM stdin WITH (format 'test_datum_format', on_error set_null); -- ERROR: d can't be null
+abcd,a,a,abcd,10
+\.
+SELECT a, b, c, d, n FROM copy_datum ORDER BY n;
 
 -- The format's data ends at a line "END".  Core complains about data that
 -- follows, beyond what the format has read ahead into its 64-byte buffer.

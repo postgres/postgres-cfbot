@@ -545,6 +545,7 @@ CopyCustomFormatEntry
 CopyDest
 CopyFormat
 CopyFormatOptions
+CopyFromCoerceColumn
 CopyFromRoutine
 CopyFromState
 CopyFromStateData

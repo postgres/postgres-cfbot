@@ -79,6 +79,8 @@ LINE 1: COPY copy_data TO stdout WITH (format 'text', format 'csv');
                                                       ^
 COPY copy_data TO stdout WITH (format 'test_format', freeze true);     -- ERROR: FREEZE with COPY TO
 ERROR:  COPY FREEZE cannot be used with COPY TO
+COPY copy_data TO stdout WITH (format 'test_datum_format');           -- ERROR: no COPY TO
+ERROR:  COPY format "test_datum_format" cannot be used with COPY TO
 -- The format has core convert the fields, so ON_ERROR, LOG_VERBOSITY and
 -- REJECT_LIMIT work as for the built-in formats.  Column c is filled with its
 -- default value, which is not evaluated for the rows that are dropped.
@@ -145,6 +147,58 @@ SELECT * FROM copy_dflt_seq;
   1 | 1
   2 | 3
 (2 rows)
+
+-- test_datum_format builds the Datums of the text-like columns by itself, and
+-- core applies their typmod and domain constraints, which ON_ERROR covers too.
+CREATE DOMAIN short_text AS text CHECK (length(VALUE) < 4);
+CREATE DOMAIN nn_text AS text NOT NULL CHECK (length(VALUE) < 4);
+CREATE TABLE copy_datum (a varchar(3), b char(3), c short_text, d nn_text, n int);
+COPY copy_datum FROM stdin WITH (format 'test_datum_format');
+NOTICE:  CopyFromStart: the number of attributes of table: 5, the number of attributes to input: 5
+NOTICE:  CopyFromEnd
+SELECT a, b, octet_length(b) AS b_len, c, d, n FROM copy_datum;
+  a  |  b  | b_len |  c  | d | n 
+-----+-----+-------+-----+---+---
+ abc | ab  |     3 | abc | x | 1
+(1 row)
+
+COPY copy_datum FROM stdin WITH (format 'test_datum_format'); -- ERROR: too long
+NOTICE:  CopyFromStart: the number of attributes of table: 5, the number of attributes to input: 5
+ERROR:  value too long for type character varying(3)
+CONTEXT:  COPY copy_datum, line 1, column a
+COPY copy_datum FROM stdin WITH (format 'test_datum_format'); -- ERROR: domain check
+NOTICE:  CopyFromStart: the number of attributes of table: 5, the number of attributes to input: 5
+ERROR:  value for domain short_text violates check constraint "short_text_check"
+CONTEXT:  COPY copy_datum, line 1, column c
+COPY copy_datum FROM stdin WITH (format 'test_datum_format'); -- ERROR: domain not null
+NOTICE:  CopyFromStart: the number of attributes of table: 5, the number of attributes to input: 5
+ERROR:  domain nn_text does not allow null values
+CONTEXT:  COPY copy_datum, line 1, column d: null input
+COPY copy_datum FROM stdin WITH (format 'test_datum_format', on_error ignore, log_verbosity verbose);
+NOTICE:  CopyFromStart: the number of attributes of table: 5, the number of attributes to input: 5
+NOTICE:  skipping row due to data type incompatibility at line 1 for column "a"
+NOTICE:  skipping row due to data type incompatibility at line 2 for column "c"
+NOTICE:  skipping row due to data type incompatibility at line 3 for column "d": null input
+NOTICE:  3 rows were skipped due to data type incompatibility
+NOTICE:  CopyFromEnd
+COPY copy_datum FROM stdin WITH (format 'test_datum_format', on_error set_null, log_verbosity verbose);
+NOTICE:  CopyFromStart: the number of attributes of table: 5, the number of attributes to input: 5
+NOTICE:  setting to null due to data type incompatibility at line 1 for column "a"
+NOTICE:  setting to null due to data type incompatibility at line 1 for column "c"
+NOTICE:  in 1 row, columns were set to null due to data type incompatibility
+NOTICE:  CopyFromEnd
+COPY copy_datum FROM stdin WITH (format 'test_datum_format', on_error set_null); -- ERROR: d can't be null
+NOTICE:  CopyFromStart: the number of attributes of table: 5, the number of attributes to input: 5
+ERROR:  domain nn_text does not allow null values
+DETAIL:  ON_ERROR SET_NULL cannot be applied because column "d" (domain nn_text) does not accept null values.
+CONTEXT:  COPY copy_datum, line 1, column d
+SELECT a, b, c, d, n FROM copy_datum ORDER BY n;
+  a  |  b  |  c  | d  | n 
+-----+-----+-----+----+---
+ abc | ab  | abc | x  | 1
+ ok  | ok  | ok  | ok | 8
+     | a   |     | a  | 9
+(3 rows)
 
 -- The format's data ends at a line "END".  Core complains about data that
 -- follows, beyond what the format has read ahead into its 64-byte buffer.

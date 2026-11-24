@@ -116,8 +116,16 @@ typedef struct CopyFromRoutine
 	 * marker, core reports an error for any data that follows, but it can't
 	 * see what the format has already read into a buffer of its own.
 	 *
-	 * A custom format sets each column by one of the helpers below, which let
-	 * core convert a field and implement ON_ERROR.
+	 * A custom format sets each column either to a Datum it builds by itself,
+	 * or by one of the helpers below, which let core convert a field and
+	 * implement ON_ERROR.
+	 *
+	 * A Datum that the format builds is a value of the base type of the
+	 * column, without the typmod applied, as an input function would parse
+	 * it.  Core applies the typmod and the domain constraints of the column
+	 * to it once the callback returns, and ON_ERROR applies to the errors
+	 * there too.  Core can't apply the typmod of an array type, such as
+	 * varchar(3)[], so a format must use the helpers for such a column.
 	 */
 	bool		(*CopyFromOneRow) (CopyFromState cstate, ExprContext *econtext,
 								   Datum *values, bool *nulls);
