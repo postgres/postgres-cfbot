@@ -151,6 +151,15 @@ static int	CopyReadAttributesCSV(CopyFromState cstate);
 static Datum CopyReadBinaryAttribute(CopyFromState cstate, FmgrInfo *flinfo,
 									 Oid typioparam, int32 typmod,
 									 bool *isnull);
+static pg_noinline bool CopyFromApplyOnError(CopyFromState cstate,
+											 Form_pg_attribute att);
+static pg_always_inline bool CopyFromOneAttribute(CopyFromState cstate,
+												  ExprContext *econtext,
+												  int m,
+												  Form_pg_attribute att,
+												  FunctionCallInfo fcinfo,
+												  char *string,
+												  Datum *values, bool *nulls);
 static pg_always_inline bool CopyFromTextLikeOneRow(CopyFromState cstate,
 													ExprContext *econtext,
 													Datum *values,
@@ -1009,6 +1018,174 @@ CopyFromCallInputFunction(FunctionCallInfo fcinfo, char *str, Datum *result)
 }
 
 /*
+ * Apply ON_ERROR to a field that the input function failed to convert.
+ *
+ * cstate->cur_attname is the column, and cstate->cur_attval is the field, or
+ * NULL for a null field.
+ *
+ * Returns false for ON_ERROR IGNORE, in which case the row is to be dropped.
+ * For SET_NULL, checks that the column accepts a null value and returns true,
+ * and the caller sets the column to null.
+ *
+ * This runs only on errors, so we keep it out of line rather than let it
+ * bloat the per-field loop that inlines CopyFromOneAttribute().
+ */
+static pg_noinline bool
+CopyFromApplyOnError(CopyFromState cstate, Form_pg_attribute att)
+{
+	Assert(cstate->opts.on_error != COPY_ON_ERROR_STOP);
+
+	if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
+		cstate->num_errors++;
+	else if (cstate->opts.on_error == COPY_ON_ERROR_SET_NULL)
+	{
+		/*
+		 * Reset error state so the domain constraint check below can properly
+		 * report whether it succeeded or failed.
+		 */
+		cstate->escontext->error_occurred = false;
+
+		Assert(cstate->domain_with_constraint != NULL);
+
+		/*
+		 * For constrained domains, we need to ensure that an error is thrown
+		 * if the domain constraint rejects null values.
+		 */
+		if (cstate->domain_with_constraint[att->attnum - 1] &&
+			!domain_check_safe((Datum) 0, true, att->atttypid, NULL,
+							   CurrentMemoryContext,
+							   (Node *) cstate->escontext))
+			ereport(ERROR,
+					errcode(ERRCODE_NOT_NULL_VIOLATION),
+					errmsg("domain %s does not allow null values",
+						   format_type_be(att->atttypid)),
+					errdetail("ON_ERROR SET_NULL cannot be applied because column \"%s\" (domain %s) does not accept null values.",
+							  cstate->cur_attname,
+							  format_type_be(att->atttypid)),
+					errdatatype(att->atttypid));
+
+		/*
+		 * We count only the number of rows (not fields) where ON_ERROR
+		 * SET_NULL was applied.
+		 */
+		if (!cstate->cur_row_erroneous)
+		{
+			cstate->cur_row_erroneous = true;
+			cstate->num_errors++;
+		}
+	}
+
+	if (cstate->opts.log_verbosity == COPY_LOG_VERBOSITY_VERBOSE)
+	{
+		/*
+		 * Since we emit line number and column info in the below notice
+		 * message, we suppress error context information other than the
+		 * relation name.
+		 */
+		Assert(!cstate->relname_only);
+		cstate->relname_only = true;
+
+		if (cstate->cur_attval)
+		{
+			char	   *attval;
+
+			attval = CopyLimitPrintoutLength(cstate->cur_attval);
+
+			if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
+				ereport(NOTICE,
+						errmsg("skipping row due to data type incompatibility at line %" PRIu64 " for column \"%s\": \"%s\"",
+							   cstate->cur_lineno,
+							   cstate->cur_attname,
+							   attval));
+			else if (cstate->opts.on_error == COPY_ON_ERROR_SET_NULL)
+				ereport(NOTICE,
+						errmsg("setting to null due to data type incompatibility at line %" PRIu64 " for column \"%s\": \"%s\"",
+							   cstate->cur_lineno,
+							   cstate->cur_attname,
+							   attval));
+			pfree(attval);
+		}
+		else
+		{
+			if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
+				ereport(NOTICE,
+						errmsg("skipping row due to data type incompatibility at line %" PRIu64 " for column \"%s\": null input",
+							   cstate->cur_lineno,
+							   cstate->cur_attname));
+		}
+		/* reset relname_only */
+		cstate->relname_only = false;
+	}
+
+	return cstate->opts.on_error != COPY_ON_ERROR_IGNORE;
+}
+
+/*
+ * Convert one input field to a Datum for the given attribute, for the text
+ * and CSV formats.
+ *
+ * 'string' is the field value in the server encoding, or NULL for a null
+ * value.  If the field was the DEFAULT marker, the caller has set
+ * cstate->defaults for the attribute, and the default value is used.
+ *
+ * The result is stored in values[m] and nulls[m], which the caller has
+ * initialized to null.
+ *
+ * This honors ON_ERROR, LOG_VERBOSITY and domain constraints, and maintains
+ * the error context.  Returns false if the field could not be converted and
+ * ON_ERROR is IGNORE, in which case the caller must skip the row.
+ *
+ * The callers pass the attribute, its index and the call information of its
+ * input function rather than having this look them up, and we use
+ * pg_always_inline, so that the per-attribute loops of the callers don't have
+ * to reload them for every field.
+ */
+static pg_always_inline bool
+CopyFromOneAttribute(CopyFromState cstate, ExprContext *econtext, int m,
+					 Form_pg_attribute att, FunctionCallInfo fcinfo,
+					 char *string, Datum *values, bool *nulls)
+{
+	cstate->cur_attname = NameStr(att->attname);
+	cstate->cur_attval = string;
+
+	if (string != NULL)
+		nulls[m] = false;
+
+	if (cstate->defaults[m])
+	{
+		/* We must have switched into the per-tuple memory context */
+		Assert(econtext != NULL);
+		Assert(CurrentMemoryContext == econtext->ecxt_per_tuple_memory);
+
+		values[m] = ExecEvalExpr(cstate->defexprs[m], econtext, &nulls[m]);
+	}
+
+	/*
+	 * If ON_ERROR is specified, handle the different options
+	 */
+	else if (!CopyFromCallInputFunction(fcinfo, string, &values[m]))
+	{
+		if (!CopyFromApplyOnError(cstate, att))
+		{
+			/* The return below skips the clear at the bottom */
+			cstate->cur_attname = NULL;
+			cstate->cur_attval = NULL;
+
+			return false;
+		}
+
+		/* SET_NULL falls through to the clear at the bottom */
+		nulls[m] = true;
+		values[m] = (Datum) 0;
+	}
+
+	cstate->cur_attname = NULL;
+	cstate->cur_attval = NULL;
+
+	return true;
+}
+
+/*
  * Workhorse for CopyFromTextOneRow() and CopyFromCSVOneRow().
  *
  * We use pg_always_inline to reduce function call overhead
@@ -1020,16 +1197,12 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 {
 	TupleDesc	tupDesc;
 	AttrNumber	attr_count;
-	FmgrInfo   *in_functions = cstate->in_functions;
-	Oid		   *typioparams = cstate->typioparams;
 	FunctionCallInfo *in_fcinfos = cstate->in_fcinfos;
-	ExprState **defexprs = cstate->defexprs;
 	char	  **field_strings;
 	ListCell   *cur;
 	int			fldct;
 	int			fieldno;
 	char	   *string;
-	bool		current_row_erroneous = false;
 
 	tupDesc = RelationGetDescr(cstate->rel);
 	attr_count = list_length(cstate->attnumlist);
@@ -1037,6 +1210,8 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 	/* read raw fields in the next line */
 	if (!NextCopyFromRawFieldsInternal(cstate, &field_strings, &fldct, is_csv))
 		return false;
+
+	cstate->cur_row_erroneous = false;
 
 	/* check for overflowing fields */
 	if (attr_count > 0 && fldct > attr_count)
@@ -1091,135 +1266,9 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 			}
 		}
 
-		cstate->cur_attname = NameStr(att->attname);
-		cstate->cur_attval = string;
-
-		if (string != NULL)
-			nulls[m] = false;
-
-		if (cstate->defaults[m])
-		{
-			/* We must have switched into the per-tuple memory context */
-			Assert(econtext != NULL);
-			Assert(CurrentMemoryContext == econtext->ecxt_per_tuple_memory);
-
-			values[m] = ExecEvalExpr(defexprs[m], econtext, &nulls[m]);
-		}
-
-		/*
-		 * If ON_ERROR is specified, handle the different options
-		 */
-		else if (!CopyFromCallInputFunction(in_fcinfos[m], string,
-											&values[m]))
-		{
-			Assert(cstate->opts.on_error != COPY_ON_ERROR_STOP);
-
-			if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
-				cstate->num_errors++;
-			else if (cstate->opts.on_error == COPY_ON_ERROR_SET_NULL)
-			{
-				/*
-				 * Reset error state so the subsequent InputFunctionCallSafe
-				 * call (for domain constraint check) can properly report
-				 * whether it succeeded or failed.
-				 */
-				cstate->escontext->error_occurred = false;
-
-				Assert(cstate->domain_with_constraint != NULL);
-
-				/*
-				 * For constrained domains, we need an additional
-				 * InputFunctionCallSafe() to ensure that an error is thrown
-				 * if the domain constraint rejects null values.
-				 */
-				if (!cstate->domain_with_constraint[m] ||
-					InputFunctionCallSafe(&in_functions[m],
-										  NULL,
-										  typioparams[m],
-										  att->atttypmod,
-										  (Node *) cstate->escontext,
-										  &values[m]))
-				{
-					nulls[m] = true;
-					values[m] = (Datum) 0;
-				}
-				else
-					ereport(ERROR,
-							errcode(ERRCODE_NOT_NULL_VIOLATION),
-							errmsg("domain %s does not allow null values",
-								   format_type_be(typioparams[m])),
-							errdetail("ON_ERROR SET_NULL cannot be applied because column \"%s\" (domain %s) does not accept null values.",
-									  cstate->cur_attname,
-									  format_type_be(typioparams[m])),
-							errdatatype(typioparams[m]));
-
-				/*
-				 * We count only the number of rows (not fields) where
-				 * ON_ERROR SET_NULL was applied.
-				 */
-				if (!current_row_erroneous)
-				{
-					current_row_erroneous = true;
-					cstate->num_errors++;
-				}
-			}
-
-			if (cstate->opts.log_verbosity == COPY_LOG_VERBOSITY_VERBOSE)
-			{
-				/*
-				 * Since we emit line number and column info in the below
-				 * notice message, we suppress error context information other
-				 * than the relation name.
-				 */
-				Assert(!cstate->relname_only);
-				cstate->relname_only = true;
-
-				if (cstate->cur_attval)
-				{
-					char	   *attval;
-
-					attval = CopyLimitPrintoutLength(cstate->cur_attval);
-
-					if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
-						ereport(NOTICE,
-								errmsg("skipping row due to data type incompatibility at line %" PRIu64 " for column \"%s\": \"%s\"",
-									   cstate->cur_lineno,
-									   cstate->cur_attname,
-									   attval));
-					else if (cstate->opts.on_error == COPY_ON_ERROR_SET_NULL)
-						ereport(NOTICE,
-								errmsg("setting to null due to data type incompatibility at line %" PRIu64 " for column \"%s\": \"%s\"",
-									   cstate->cur_lineno,
-									   cstate->cur_attname,
-									   attval));
-					pfree(attval);
-				}
-				else
-				{
-					if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
-						ereport(NOTICE,
-								errmsg("skipping row due to data type incompatibility at line %" PRIu64 " for column \"%s\": null input",
-									   cstate->cur_lineno,
-									   cstate->cur_attname));
-				}
-				/* reset relname_only */
-				cstate->relname_only = false;
-			}
-
-			if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
-			{
-				/* The return below skips the clear at the bottom of the loop */
-				cstate->cur_attname = NULL;
-				cstate->cur_attval = NULL;
-
-				return true;
-			}
-
-			/* SET_NULL falls through to the clear at the bottom of the loop */
-		}
-
-		cstate->cur_attname = NULL;
-		cstate->cur_attval = NULL;
+		if (!CopyFromOneAttribute(cstate, econtext, m, att, in_fcinfos[m],
+								  string, values, nulls))
+			return true;		/* ON_ERROR IGNORE: skip the whole row */
 	}
 
 	Assert(fieldno == attr_count);

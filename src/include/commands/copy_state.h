@@ -93,6 +93,9 @@ typedef struct CopyFromStateData
 									 * execution */
 	uint64		num_errors;		/* total number of rows which contained soft
 								 * errors */
+	bool		cur_row_erroneous;	/* ON_ERROR SET_NULL has counted the
+									 * current row in num_errors; reset by
+									 * core at the start of each row */
 	int		   *defmap;			/* array of default att numbers related to
 								 * missing att */
 	ExprState **defexprs;		/* array of default att expressions for all
