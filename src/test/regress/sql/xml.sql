@@ -62,6 +62,10 @@ SELECT xmlelement(name foo, text 'bar');
 SELECT xmlelement(name foo, xml 'bar');
 SELECT xmlelement(name foo, text 'b<a/>r');
 SELECT xmlelement(name foo, xml 'b<a/>r');
+-- an XML declaration is not kept when an xml value is embedded as content
+SELECT xmlelement(name foo, '<?xml version="1.0" standalone="yes"?><a/>'::xml);
+SELECT xmlforest('<?xml version="1.1"?><a/>'::xml AS foo);
+SELECT xmlelement(name foo, array['<?xml version="1.0" standalone="no"?><a/>'::xml]);
 SELECT xmlelement(name foo, array[1, 2, 3]);
 SET xmlbinary TO base64;
 SELECT xmlelement(name foo, bytea 'bar');
