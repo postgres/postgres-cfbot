@@ -2267,9 +2267,9 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 		CacheInvalidateRelcache(userHeapRelation);
 
 		/* save lockrelid and locktag for below, then close but keep locks */
-		heaprelid = userHeapRelation->rd_lockInfo.lockRelId;
+		heaprelid = RelationGetLockRelId(userHeapRelation);
 		SET_LOCKTAG_RELATION(heaplocktag, heaprelid.dbId, heaprelid.relId);
-		indexrelid = userIndexRelation->rd_lockInfo.lockRelId;
+		indexrelid = RelationGetLockRelId(userIndexRelation);
 
 		table_close(userHeapRelation, NoLock);
 		index_close(userIndexRelation, NoLock);
