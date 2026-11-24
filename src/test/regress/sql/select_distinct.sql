@@ -154,6 +154,71 @@ RESET min_parallel_table_scan_size;
 RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 
+-- Worker-side hash deduplication is considered for parallel DISTINCT.
+-- When the group estimate is weak, the planner first checks whether the
+-- worst-case hash table fits in hash_mem.
+CREATE TABLE distinct_par_low (a int, b int);
+INSERT INTO distinct_par_low
+SELECT g % 10, g % 10 FROM generate_series(1, 20000) g;
+ANALYZE distinct_par_low;
+
+SET parallel_tuple_cost=0;
+SET parallel_setup_cost=0;
+SET min_parallel_table_scan_size=0;
+SET max_parallel_workers_per_gather=2;
+
+-- With statistics, the estimate is usable and the worker-side hash path is
+-- chosen.
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT a, b FROM distinct_par_low;
+
+-- Execute the plan and check the result.
+SELECT count(*) FROM (SELECT DISTINCT a, b FROM distinct_par_low) s;
+
+-- Without statistics the estimate falls back on defaults.  The worst-case
+-- hash table fits in hash_mem, so the partial hash path is still considered.
+CREATE TABLE distinct_par_nostat (a int, b int)
+  WITH (autovacuum_enabled = false);
+INSERT INTO distinct_par_nostat
+SELECT g % 10, g % 10 FROM generate_series(1, 20000) g;
+
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT a, b FROM distinct_par_nostat;
+
+-- With a small work_mem the worst-case hash table does not fit, so the
+-- partial hash path is costed with the worst-case group count and loses.
+SET work_mem = '64kB';
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT a, b FROM distinct_par_nostat;
+RESET work_mem;
+
+-- A near-unique composite key without extended statistics is capped by the
+-- multi-column correlation clamp.  The worst-case table still fits in
+-- hash_mem, so the partial hash path is considered.
+CREATE TABLE distinct_par_unique (a int, b int);
+INSERT INTO distinct_par_unique
+SELECT g / 1000, g % 1000 FROM generate_series(1, 20000) g;
+ANALYZE distinct_par_unique;
+
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT a, b FROM distinct_par_unique;
+
+-- With a small work_mem the worst-case table does not fit, so the partial
+-- hash path is costed with the worst-case group count and loses.
+SET work_mem = '64kB';
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT a, b FROM distinct_par_unique;
+RESET work_mem;
+
+RESET max_parallel_workers_per_gather;
+RESET min_parallel_table_scan_size;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+
+DROP TABLE distinct_par_low;
+DROP TABLE distinct_par_nostat;
+DROP TABLE distinct_par_unique;
+
 --
 -- Test the planner's ability to use a LIMIT 1 instead of a Unique node when
 -- all of the distinct_pathkeys have been marked as redundant
