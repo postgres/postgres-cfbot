@@ -4354,6 +4354,7 @@ xml_xpathobjtoxmlarray(xmlXPathObjectPtr xpathobj,
 
 					for (i = 0; i < result; i++)
 					{
+						CHECK_FOR_INTERRUPTS();
 						datum = PointerGetDatum(xml_xmlnodetoxmltype(xpathobj->nodesetval->nodeTab[i],
 																	 xmlerrcxt));
 						(void) accumArrayResult(astate, datum, false,
@@ -5079,6 +5080,7 @@ XmlTableGetValue(TableFuncScanState *state, int colnum,
 					initStringInfo(&str);
 					for (int i = 0; i < count; i++)
 					{
+						CHECK_FOR_INTERRUPTS();
 						textstr =
 							xml_xmlnodetoxmltype(xpathobj->nodesetval->nodeTab[i],
 												 xtCxt->xmlerrcxt);
