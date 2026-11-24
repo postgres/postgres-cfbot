@@ -449,6 +449,13 @@ tuplestore_alloc_read_pointer(Tuplestorestate *state, int eflags)
 	state->readptrs[state->readptrcount] = state->readptrs[0];
 	state->readptrs[state->readptrcount].eflags = eflags;
 
+	/* In READFILE, an active pointer 0's position is the seek point */
+	if (state->status == TSS_READFILE && state->activeptr == 0 &&
+		!state->readptrs[0].eof_reached)
+		BufFileTell(state->myfile,
+					&state->readptrs[state->readptrcount].file,
+					&state->readptrs[state->readptrcount].offset);
+
 	state->eflags |= eflags;
 
 	return state->readptrcount++;
