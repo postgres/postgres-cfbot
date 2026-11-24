@@ -101,6 +101,14 @@ REFRESH MATERIALIZED VIEW [ CONCURRENTLY ] <replaceable class="parameter">name</
   </para>
 
   <para>
+   <command>REFRESH MATERIALIZED VIEW</command> without
+   the <literal>CONCURRENTLY</literal> option is not MVCC-safe.  After it
+   commits, a concurrent transaction that is using a snapshot taken before
+   that commit, and that had not yet accessed the materialized view, sees
+   the new contents.  See <xref linkend="mvcc-caveats"/> for more details.
+  </para>
+
+  <para>
    While <command>REFRESH MATERIALIZED VIEW</command> is running, the <xref
    linkend="guc-search-path"/> is temporarily changed to <literal>pg_catalog,
    pg_temp</literal>.

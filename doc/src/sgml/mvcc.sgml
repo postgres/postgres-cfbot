@@ -1905,6 +1905,19 @@ SELECT pg_advisory_lock(q.id) FROM
    </para>
 
    <para>
+    <link linkend="sql-refreshmaterializedview"><command>REFRESH
+    MATERIALIZED VIEW</command></link> without
+    the <literal>CONCURRENTLY</literal> option is not MVCC-safe either, in
+    a different way.  After the refresh commits, the materialized view
+    shows its new contents to concurrent transactions that are using a
+    snapshot taken before the refresh committed, provided they did not
+    access the materialized view before the refresh started.  Such a
+    transaction sees data in the materialized view that is newer than its
+    snapshot.  With the <literal>CONCURRENTLY</literal> option the command
+    is MVCC-safe.
+   </para>
+
+   <para>
     Support for the Serializable transaction isolation level has not yet
     been added to hot standby replication targets (described in
     <xref linkend="hot-standby"/>).  The strictest isolation level currently
