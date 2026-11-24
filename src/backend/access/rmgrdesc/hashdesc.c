@@ -16,6 +16,24 @@
 
 #include "access/hash_xlog.h"
 
+/*
+ * Append the block number of the primary bucket page, if the record carries
+ * it in its main data after a struct of rec_size bytes.  It does so when the
+ * page is not registered because the operation holds only a pin on it.
+ */
+static void
+hash_desc_primary_bucket(StringInfo buf, XLogReaderState *record, Size rec_size)
+{
+	if (XLogRecGetDataLen(record) >= rec_size + sizeof(BlockNumber))
+	{
+		BlockNumber bucket_blkno;
+
+		memcpy(&bucket_blkno, XLogRecGetData(record) + rec_size,
+			   sizeof(BlockNumber));
+		appendStringInfo(buf, ", primary_blkno %u", bucket_blkno);
+	}
+}
+
 void
 hash_desc(StringInfo buf, XLogReaderState *record)
 {
@@ -83,6 +101,7 @@ hash_desc(StringInfo buf, XLogReaderState *record)
 				appendStringInfo(buf, "ntups %d, is_primary %c",
 								 xlrec->ntups,
 								 xlrec->is_prim_bucket_same_wrt ? 'T' : 'F');
+				hash_desc_primary_bucket(buf, record, SizeOfHashMovePageContents);
 				break;
 			}
 		case XLOG_HASH_SQUEEZE_PAGE:
@@ -95,6 +114,7 @@ hash_desc(StringInfo buf, XLogReaderState *record)
 								 xlrec->ntups,
 								 xlrec->is_prim_bucket_same_wrt ? 'T' : 'F',
 								 xlrec->is_prev_bucket_same_wrt ? 'T' : 'F');
+				hash_desc_primary_bucket(buf, record, SizeOfHashSqueezePage);
 				break;
 			}
 		case XLOG_HASH_DELETE:
@@ -104,6 +124,7 @@ hash_desc(StringInfo buf, XLogReaderState *record)
 				appendStringInfo(buf, "clear_dead_marking %c, is_primary %c",
 								 xlrec->clear_dead_marking ? 'T' : 'F',
 								 xlrec->is_primary_bucket_page ? 'T' : 'F');
+				hash_desc_primary_bucket(buf, record, SizeOfHashDelete);
 				break;
 			}
 		case XLOG_HASH_UPDATE_META_PAGE:
