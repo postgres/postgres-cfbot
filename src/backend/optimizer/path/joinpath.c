@@ -2507,12 +2507,22 @@ hash_inner_and_outer(PlannerInfo *root,
 			if (innerrel->partial_pathlist != NIL &&
 				enable_parallel_hash)
 			{
+				JoinPathExtraData parallel_extra = *extra;
+
+				/*
+				 * A grouped relation's partial paths emit each group once per
+				 * worker, so it is not unique across workers.
+				 */
+				if (IS_GROUPED_REL(innerrel))
+					parallel_extra.inner_unique = false;
+
 				cheapest_partial_inner =
 					(Path *) linitial(innerrel->partial_pathlist);
 				try_partial_hashjoin_path(root, joinrel,
 										  cheapest_partial_outer,
 										  cheapest_partial_inner,
-										  hashclauses, jointype, extra,
+										  hashclauses, jointype,
+										  &parallel_extra,
 										  true /* parallel_hash */ );
 			}
 

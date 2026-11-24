@@ -1,0 +1,1201 @@
+--
+-- UNIQUEKEYS
+--
+create table uk_a (id int primary key, x int, y int);
+create table uk_b (id int primary key, x int, y int);
+create table uk_c (id int primary key, x int, y int);
+create table uk_d (a int, b int, x int, primary key (a, b));
+--
+-- Test proving a join relation unique from the UniqueKeys of its base
+-- relations.  We use a left join to make the join relation of interest the
+-- inner side, and look at whether that join is marked as "Inner Unique".
+--
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+-- the clause leaves one row of uk_b, which leaves one row of uk_c
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b join uk_c c on b.x = c.id) on a.x = b.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y
+   Inner Unique: true
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Nested Loop
+         Output: b.id, b.x, b.y, c.id, c.x, c.y
+         Inner Unique: true
+         ->  Index Scan using uk_b_pkey on public.uk_b b
+               Output: b.id, b.x, b.y
+               Index Cond: (b.id = a.x)
+         ->  Index Scan using uk_c_pkey on public.uk_c c
+               Output: c.id, c.x, c.y
+               Index Cond: (c.id = b.x)
+(14 rows)
+
+-- the clause leaves one row of uk_c, but that doesn't limit uk_b
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b join uk_c c on b.x = c.id) on a.x = c.id;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y
+   Join Filter: (a.x = c.id)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Materialize
+         Output: b.id, b.x, b.y, c.id, c.x, c.y
+         ->  Nested Loop
+               Output: b.id, b.x, b.y, c.id, c.x, c.y
+               Inner Unique: true
+               ->  Seq Scan on public.uk_b b
+                     Output: b.id, b.x, b.y
+               ->  Index Scan using uk_c_pkey on public.uk_c c
+                     Output: c.id, c.x, c.y
+                     Index Cond: (c.id = b.x)
+(15 rows)
+
+-- each relation has a clause of its own
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b cross join uk_c c) on a.x = b.id and a.y = c.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y
+   Inner Unique: true
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Nested Loop
+         Output: b.id, b.x, b.y, c.id, c.x, c.y
+         ->  Index Scan using uk_b_pkey on public.uk_b b
+               Output: b.id, b.x, b.y
+               Index Cond: (b.id = a.x)
+         ->  Index Scan using uk_c_pkey on public.uk_c c
+               Output: c.id, c.x, c.y
+               Index Cond: (c.id = a.y)
+(13 rows)
+
+-- but a clause for only one of them is not enough
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b cross join uk_c c) on a.x = b.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Nested Loop
+         Output: b.id, b.x, b.y, c.id, c.x, c.y
+         ->  Index Scan using uk_b_pkey on public.uk_b b
+               Output: b.id, b.x, b.y
+               Index Cond: (b.id = a.x)
+         ->  Seq Scan on public.uk_c c
+               Output: c.id, c.x, c.y
+(11 rows)
+
+-- a key column that is equal to a constant is not needed
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_d d join uk_c c on d.x = c.id) on a.x = d.b and d.a = 1;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, d.a, d.b, d.x, c.id, c.x, c.y
+   Inner Unique: true
+   Join Filter: (a.x = d.b)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Materialize
+         Output: d.a, d.b, d.x, c.id, c.x, c.y
+         ->  Nested Loop
+               Output: d.a, d.b, d.x, c.id, c.x, c.y
+               Inner Unique: true
+               ->  Bitmap Heap Scan on public.uk_d d
+                     Output: d.a, d.b, d.x
+                     Recheck Cond: (d.a = 1)
+                     ->  Bitmap Index Scan on uk_d_pkey
+                           Index Cond: (d.a = 1)
+               ->  Index Scan using uk_c_pkey on public.uk_c c
+                     Output: c.id, c.x, c.y
+                     Index Cond: (c.id = d.x)
+(19 rows)
+
+-- a chain of three relations, the last one with a two-column key
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b join uk_c c on b.x = c.id join uk_d d on c.x = d.a and c.y = d.b)
+  on a.x = b.id;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y, d.a, d.b, d.x
+   Inner Unique: true
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Nested Loop
+         Output: b.id, b.x, b.y, c.id, c.x, c.y, d.a, d.b, d.x
+         Inner Unique: true
+         ->  Nested Loop
+               Output: b.id, b.x, b.y, c.id, c.x, c.y
+               Inner Unique: true
+               ->  Index Scan using uk_b_pkey on public.uk_b b
+                     Output: b.id, b.x, b.y
+                     Index Cond: (b.id = a.x)
+               ->  Index Scan using uk_c_pkey on public.uk_c c
+                     Output: c.id, c.x, c.y
+                     Index Cond: (c.id = b.x)
+         ->  Index Scan using uk_d_pkey on public.uk_d d
+               Output: d.a, d.b, d.x
+               Index Cond: ((d.a = c.x) AND (d.b = c.y))
+(20 rows)
+
+-- a left join's clause leaves one row of its nullable side.  Keep the
+-- planner from rearranging the left joins, so that the join relation of
+-- interest remains the inner side.
+set join_collapse_limit = 1;
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b left join uk_c c on b.x = c.id) on a.x = b.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y
+   Inner Unique: true
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Nested Loop Left Join
+         Output: b.id, b.x, b.y, c.id, c.x, c.y
+         Inner Unique: true
+         ->  Index Scan using uk_b_pkey on public.uk_b b
+               Output: b.id, b.x, b.y
+               Index Cond: (b.id = a.x)
+         ->  Index Scan using uk_c_pkey on public.uk_c c
+               Output: c.id, c.x, c.y
+               Index Cond: (c.id = b.x)
+(14 rows)
+
+-- but not if it doesn't cover a key of the nullable side
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b left join uk_c c on b.x = c.x) on a.x = b.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Nested Loop Left Join
+         Output: b.id, b.x, b.y, c.id, c.x, c.y
+         Join Filter: (b.x = c.x)
+         ->  Index Scan using uk_b_pkey on public.uk_b b
+               Output: b.id, b.x, b.y
+               Index Cond: (b.id = a.x)
+         ->  Seq Scan on public.uk_c c
+               Output: c.id, c.x, c.y
+(12 rows)
+
+reset join_collapse_limit;
+-- a subquery in the join relation is asked whether it is distinct
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b join (select distinct x, y from uk_c) s
+   on b.x = s.x and b.y = s.y) on a.x = b.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, uk_c.x, uk_c.y
+   Inner Unique: true
+   Join Filter: (a.x = b.id)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Materialize
+         Output: b.id, b.x, b.y, uk_c.x, uk_c.y
+         ->  Nested Loop
+               Output: b.id, b.x, b.y, uk_c.x, uk_c.y
+               Inner Unique: true
+               Join Filter: ((b.x = uk_c.x) AND (b.y = uk_c.y))
+               ->  Index Scan using uk_b_pkey on public.uk_b b
+                     Output: b.id, b.x, b.y
+               ->  Materialize
+                     Output: uk_c.x, uk_c.y
+                     ->  HashAggregate
+                           Output: uk_c.x, uk_c.y
+                           Group Key: uk_c.x, uk_c.y
+                           ->  Seq Scan on public.uk_c
+                                 Output: uk_c.id, uk_c.x, uk_c.y
+(21 rows)
+
+-- which takes clauses on all of its DISTINCT columns
+explain (verbose, costs off)
+select * from uk_a a left join
+  (uk_b b join (select distinct x, y from uk_c) s
+   on b.x = s.x) on a.x = b.id;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, uk_c.x, uk_c.y
+   Join Filter: (a.x = b.id)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Materialize
+         Output: b.id, b.x, b.y, uk_c.x, uk_c.y
+         ->  Nested Loop
+               Output: b.id, b.x, b.y, uk_c.x, uk_c.y
+               Join Filter: (b.x = uk_c.x)
+               ->  Index Scan using uk_b_pkey on public.uk_b b
+                     Output: b.id, b.x, b.y
+               ->  Materialize
+                     Output: uk_c.x, uk_c.y
+                     ->  HashAggregate
+                           Output: uk_c.x, uk_c.y
+                           Group Key: uk_c.x, uk_c.y
+                           ->  Seq Scan on public.uk_c
+                                 Output: uk_c.id, uk_c.x, uk_c.y
+(19 rows)
+
+-- the right-hand side of a semijoin or antijoin need not be unique
+explain (verbose, costs off)
+select * from uk_a a left join
+  (select * from uk_b b
+   where exists (select 1 from uk_c c where c.x = b.x)) s on a.x = s.id;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y
+   Inner Unique: true
+   Join Filter: (a.x = b.id)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Materialize
+         Output: b.id, b.x, b.y
+         ->  Nested Loop
+               Output: b.id, b.x, b.y
+               Inner Unique: true
+               Join Filter: (b.x = c.x)
+               ->  Index Scan using uk_b_pkey on public.uk_b b
+                     Output: b.id, b.x, b.y
+               ->  Materialize
+                     Output: c.x
+                     ->  HashAggregate
+                           Output: c.x
+                           Group Key: c.x
+                           ->  Seq Scan on public.uk_c c
+                                 Output: c.id, c.x, c.y
+(21 rows)
+
+explain (verbose, costs off)
+select * from uk_a a left join
+  (select * from uk_b b
+   where not exists (select 1 from uk_c c where c.x = b.x)) s on a.x = s.id;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y
+   Inner Unique: true
+   Join Filter: (a.x = b.id)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Materialize
+         Output: b.id, b.x, b.y
+         ->  Nested Loop Anti Join
+               Output: b.id, b.x, b.y
+               Join Filter: (c.x = b.x)
+               ->  Seq Scan on public.uk_b b
+                     Output: b.id, b.x, b.y
+               ->  Materialize
+                     Output: c.x
+                     ->  Seq Scan on public.uk_c c
+                           Output: c.x
+(17 rows)
+
+-- but its left-hand side must be
+explain (verbose, costs off)
+select * from uk_a a left join
+  (select * from uk_b b
+   where exists (select 1 from uk_c c where c.x = b.x)) s on a.x = s.x;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Nested Loop Left Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y
+   Join Filter: (a.x = b.x)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Materialize
+         Output: b.id, b.x, b.y
+         ->  Nested Loop
+               Output: b.id, b.x, b.y
+               Inner Unique: true
+               Join Filter: (b.x = c.x)
+               ->  Seq Scan on public.uk_b b
+                     Output: b.id, b.x, b.y
+               ->  Materialize
+                     Output: c.x
+                     ->  HashAggregate
+                           Output: c.x
+                           Group Key: c.x
+                           ->  Seq Scan on public.uk_c c
+                                 Output: c.id, c.x, c.y
+(20 rows)
+
+reset enable_hashjoin;
+reset enable_mergejoin;
+-- A clause on a column that is nulled by an outer join works like one on the
+-- column itself.  The join of interest is put under a full join, because a
+-- left join's clause would let the planner reduce the outer join below it.
+explain (verbose, costs off)
+select * from uk_a a full join
+  (uk_b b left join uk_c c on b.x = c.x) on a.x = b.id and a.y = c.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Hash Full Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y
+   Inner Unique: true
+   Hash Cond: ((a.x = b.id) AND (a.y = c.id))
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Hash
+         Output: b.id, b.x, b.y, c.id, c.x, c.y
+         ->  Merge Left Join
+               Output: b.id, b.x, b.y, c.id, c.x, c.y
+               Merge Cond: (b.x = c.x)
+               ->  Sort
+                     Output: b.id, b.x, b.y
+                     Sort Key: b.x
+                     ->  Seq Scan on public.uk_b b
+                           Output: b.id, b.x, b.y
+               ->  Sort
+                     Output: c.id, c.x, c.y
+                     Sort Key: c.x
+                     ->  Seq Scan on public.uk_c c
+                           Output: c.id, c.x, c.y
+(21 rows)
+
+-- but not if the expression can be non-NULL in a null-extended row
+explain (verbose, costs off)
+select * from uk_a a full join
+  (uk_b b left join uk_c c on b.x = c.x)
+  on a.x = b.id and a.y = coalesce(c.id, 0);
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Hash Full Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y
+   Hash Cond: ((a.x = b.id) AND (a.y = COALESCE(c.id, 0)))
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Hash
+         Output: b.id, b.x, b.y, c.id, c.x, c.y
+         ->  Merge Left Join
+               Output: b.id, b.x, b.y, c.id, c.x, c.y
+               Merge Cond: (b.x = c.x)
+               ->  Sort
+                     Output: b.id, b.x, b.y
+                     Sort Key: b.x
+                     ->  Seq Scan on public.uk_b b
+                           Output: b.id, b.x, b.y
+               ->  Sort
+                     Output: c.id, c.x, c.y
+                     Sort Key: c.x
+                     ->  Seq Scan on public.uk_c c
+                           Output: c.id, c.x, c.y
+(20 rows)
+
+-- a full join's clauses do not limit either of its sides
+explain (verbose, costs off)
+select * from uk_a a full join
+  (uk_b b full join uk_c c on b.x = c.x) on a.x = b.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Hash Full Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y
+   Hash Cond: (a.x = b.id)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Hash
+         Output: b.id, b.x, b.y, c.id, c.x, c.y
+         ->  Merge Full Join
+               Output: b.id, b.x, b.y, c.id, c.x, c.y
+               Merge Cond: (b.x = c.x)
+               ->  Sort
+                     Output: b.id, b.x, b.y
+                     Sort Key: b.x
+                     ->  Seq Scan on public.uk_b b
+                           Output: b.id, b.x, b.y
+               ->  Sort
+                     Output: c.id, c.x, c.y
+                     Sort Key: c.x
+                     ->  Seq Scan on public.uk_c c
+                           Output: c.id, c.x, c.y
+(20 rows)
+
+explain (verbose, costs off)
+select * from uk_a a full join
+  (uk_b b full join uk_c c on b.x = c.x) on a.x = b.id and a.y = c.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Hash Full Join
+   Output: a.id, a.x, a.y, b.id, b.x, b.y, c.id, c.x, c.y
+   Inner Unique: true
+   Hash Cond: ((a.x = b.id) AND (a.y = c.id))
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Hash
+         Output: b.id, b.x, b.y, c.id, c.x, c.y
+         ->  Merge Full Join
+               Output: b.id, b.x, b.y, c.id, c.x, c.y
+               Merge Cond: (b.x = c.x)
+               ->  Sort
+                     Output: b.id, b.x, b.y
+                     Sort Key: b.x
+                     ->  Seq Scan on public.uk_b b
+                           Output: b.id, b.x, b.y
+               ->  Sort
+                     Output: c.id, c.x, c.y
+                     Sort Key: c.x
+                     ->  Seq Scan on public.uk_c c
+                           Output: c.id, c.x, c.y
+(21 rows)
+
+-- a relation nulled by a full join needs a clause of its own, even if it
+-- has at most one row
+explain (verbose, costs off)
+select * from uk_c c left join
+  ((select * from uk_a where id = 1) a full join
+   (select * from uk_b where id = 1) b on a.x = b.x)
+  on c.x = coalesce(a.y, b.y);
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Hash Left Join
+   Output: c.id, c.x, c.y, uk_a.id, uk_a.x, uk_a.y, uk_b.id, uk_b.x, uk_b.y
+   Hash Cond: (c.x = COALESCE(uk_a.y, uk_b.y))
+   ->  Seq Scan on public.uk_c c
+         Output: c.id, c.x, c.y
+   ->  Hash
+         Output: uk_a.id, uk_a.x, uk_a.y, uk_b.id, uk_b.x, uk_b.y
+         ->  Hash Full Join
+               Output: uk_a.id, uk_a.x, uk_a.y, uk_b.id, uk_b.x, uk_b.y
+               Inner Unique: true
+               Hash Cond: (uk_a.x = uk_b.x)
+               ->  Index Scan using uk_a_pkey on public.uk_a
+                     Output: uk_a.id, uk_a.x, uk_a.y
+                     Index Cond: (uk_a.id = 1)
+               ->  Hash
+                     Output: uk_b.id, uk_b.x, uk_b.y
+                     ->  Index Scan using uk_b_pkey on public.uk_b
+                           Output: uk_b.id, uk_b.x, uk_b.y
+                           Index Cond: (uk_b.id = 1)
+(19 rows)
+
+--
+-- Test skipping DISTINCT and GROUP BY steps when the input is already
+-- distinct
+--
+create table uk_n (id int primary key, u int unique, v int, w int);
+create unique index on uk_n (v) nulls not distinct;
+-- a single relation with its key among the DISTINCT columns
+explain (costs off)
+select distinct id, x from uk_a;
+    QUERY PLAN    
+------------------
+ Seq Scan on uk_a
+(1 row)
+
+-- but not without the key
+explain (costs off)
+select distinct x, y from uk_a;
+       QUERY PLAN       
+------------------------
+ HashAggregate
+   Group Key: x, y
+   ->  Seq Scan on uk_a
+(3 rows)
+
+-- a key column that is equal to a constant is not needed
+explain (costs off)
+select distinct b, x from uk_d where a = 1;
+              QUERY PLAN              
+--------------------------------------
+ Bitmap Heap Scan on uk_d
+   Recheck Cond: (a = 1)
+   ->  Bitmap Index Scan on uk_d_pkey
+         Index Cond: (a = 1)
+(4 rows)
+
+-- a join needs the keys of all its relations
+explain (costs off)
+select distinct a.id, b.id from uk_a a join uk_b b on a.x = b.x;
+           QUERY PLAN           
+--------------------------------
+ Merge Join
+   Merge Cond: (a.x = b.x)
+   ->  Sort
+         Sort Key: a.x
+         ->  Seq Scan on uk_a a
+   ->  Sort
+         Sort Key: b.x
+         ->  Seq Scan on uk_b b
+(8 rows)
+
+explain (costs off)
+select distinct a.id, b.x from uk_a a join uk_b b on a.x = b.x;
+              QUERY PLAN              
+--------------------------------------
+ HashAggregate
+   Group Key: a.id, b.x
+   ->  Merge Join
+         Merge Cond: (a.x = b.x)
+         ->  Sort
+               Sort Key: a.x
+               ->  Seq Scan on uk_a a
+         ->  Sort
+               Sort Key: b.x
+               ->  Seq Scan on uk_b b
+(10 rows)
+
+-- unless the join clauses supply them
+explain (costs off)
+select distinct a.id, a.y from uk_a a join uk_b b on a.x = b.id;
+           QUERY PLAN           
+--------------------------------
+ Hash Join
+   Hash Cond: (a.x = b.id)
+   ->  Seq Scan on uk_a a
+   ->  Hash
+         ->  Seq Scan on uk_b b
+(5 rows)
+
+-- a unique index on a nullable column allows duplicate NULLs
+explain (costs off)
+select distinct u from uk_n;
+       QUERY PLAN       
+------------------------
+ HashAggregate
+   Group Key: u
+   ->  Seq Scan on uk_n
+(3 rows)
+
+-- unless a strict restriction clause filters them out
+explain (costs off)
+select distinct u from uk_n where u > 0;
+              QUERY PLAN               
+---------------------------------------
+ Bitmap Heap Scan on uk_n
+   Recheck Cond: (u > 0)
+   ->  Bitmap Index Scan on uk_n_u_key
+         Index Cond: (u > 0)
+(4 rows)
+
+-- or the index is NULLS NOT DISTINCT
+explain (costs off)
+select distinct v from uk_n;
+    QUERY PLAN    
+------------------
+ Seq Scan on uk_n
+(1 row)
+
+-- a column that a join clause equates to something cannot be NULL
+explain (costs off)
+select distinct a.id, n.w from uk_a a join uk_n n on a.x = n.u;
+           QUERY PLAN           
+--------------------------------
+ Hash Join
+   Hash Cond: (a.x = n.u)
+   ->  Seq Scan on uk_a a
+   ->  Hash
+         ->  Seq Scan on uk_n n
+(5 rows)
+
+explain (costs off)
+select distinct a.id, n.w from uk_a a left join uk_n n on a.x = n.u;
+           QUERY PLAN           
+--------------------------------
+ Hash Left Join
+   Hash Cond: (a.x = n.u)
+   ->  Seq Scan on uk_a a
+   ->  Hash
+         ->  Seq Scan on uk_n n
+(5 rows)
+
+-- but that takes a join clause on each column of the key
+explain (costs off)
+select distinct a.id, n.u from uk_a a join uk_n n on a.x = n.w;
+              QUERY PLAN              
+--------------------------------------
+ HashAggregate
+   Group Key: a.id, n.u
+   ->  Merge Join
+         Merge Cond: (n.w = a.x)
+         ->  Sort
+               Sort Key: n.w
+               ->  Seq Scan on uk_n n
+         ->  Sort
+               Sort Key: a.x
+               ->  Seq Scan on uk_a a
+(10 rows)
+
+-- outer joins
+explain (costs off)
+select distinct a.id, b.y from uk_a a left join uk_b b on a.x = b.id;
+           QUERY PLAN           
+--------------------------------
+ Hash Left Join
+   Hash Cond: (a.x = b.id)
+   ->  Seq Scan on uk_a a
+   ->  Hash
+         ->  Seq Scan on uk_b b
+(5 rows)
+
+explain (costs off)
+select distinct a.id, b.y from uk_a a left join uk_b b on a.x = b.x;
+              QUERY PLAN              
+--------------------------------------
+ HashAggregate
+   Group Key: a.id, b.y
+   ->  Merge Left Join
+         Merge Cond: (a.x = b.x)
+         ->  Sort
+               Sort Key: a.x
+               ->  Seq Scan on uk_a a
+         ->  Sort
+               Sort Key: b.x
+               ->  Seq Scan on uk_b b
+(10 rows)
+
+explain (costs off)
+select distinct a.id, b.id from uk_a a left join uk_b b on a.x = b.x;
+           QUERY PLAN           
+--------------------------------
+ Merge Left Join
+   Merge Cond: (a.x = b.x)
+   ->  Sort
+         Sort Key: a.x
+         ->  Seq Scan on uk_a a
+   ->  Sort
+         Sort Key: b.x
+         ->  Seq Scan on uk_b b
+(8 rows)
+
+explain (costs off)
+select distinct a.id, b.id from uk_a a full join uk_b b on a.x = b.x;
+           QUERY PLAN           
+--------------------------------
+ Merge Full Join
+   Merge Cond: (a.x = b.x)
+   ->  Sort
+         Sort Key: a.x
+         ->  Seq Scan on uk_a a
+   ->  Sort
+         Sort Key: b.x
+         ->  Seq Scan on uk_b b
+(8 rows)
+
+-- a left join's null-extended row cannot be mistaken for a row that has a
+-- NULL in its key
+explain (costs off)
+select distinct a.id, n.v from uk_a a left join uk_n n on a.x = n.w;
+           QUERY PLAN           
+--------------------------------
+ Merge Right Join
+   Merge Cond: (n.w = a.x)
+   ->  Sort
+         Sort Key: n.w
+         ->  Seq Scan on uk_n n
+   ->  Sort
+         Sort Key: a.x
+         ->  Seq Scan on uk_a a
+(8 rows)
+
+-- but a full join's can
+explain (costs off)
+select distinct n1.v, n2.v from uk_n n1 full join uk_n n2 on n1.w = n2.w;
+              QUERY PLAN               
+---------------------------------------
+ HashAggregate
+   Group Key: n1.v, n2.v
+   ->  Merge Full Join
+         Merge Cond: (n1.w = n2.w)
+         ->  Sort
+               Sort Key: n1.w
+               ->  Seq Scan on uk_n n1
+         ->  Sort
+               Sort Key: n2.w
+               ->  Seq Scan on uk_n n2
+(10 rows)
+
+-- unless a NOT NULL column tells them apart
+explain (costs off)
+select distinct n1.v, n1.id, n2.v, n2.id
+from uk_n n1 full join uk_n n2 on n1.w = n2.w;
+           QUERY PLAN            
+---------------------------------
+ Merge Full Join
+   Merge Cond: (n1.w = n2.w)
+   ->  Sort
+         Sort Key: n1.w
+         ->  Seq Scan on uk_n n1
+   ->  Sort
+         Sort Key: n2.w
+         ->  Seq Scan on uk_n n2
+(8 rows)
+
+-- or a strict restriction clause filters out the NULLs
+explain (costs off)
+select distinct n1.v, n2.v
+from (select * from uk_n where v > 0) n1 full join
+  (select * from uk_n where v > 0) n2 on n1.w = n2.w;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Hash Full Join
+   Hash Cond: (uk_n.w = uk_n_1.w)
+   ->  Bitmap Heap Scan on uk_n
+         Recheck Cond: (v > 0)
+         ->  Bitmap Index Scan on uk_n_v_idx
+               Index Cond: (v > 0)
+   ->  Hash
+         ->  Bitmap Heap Scan on uk_n uk_n_1
+               Recheck Cond: (v > 0)
+               ->  Bitmap Index Scan on uk_n_v_idx
+                     Index Cond: (v > 0)
+(11 rows)
+
+-- subqueries
+explain (costs off)
+select distinct x, y from (select distinct x, y from uk_c) s;
+         QUERY PLAN          
+-----------------------------
+ HashAggregate
+   Group Key: uk_c.x, uk_c.y
+   ->  Seq Scan on uk_c
+(3 rows)
+
+explain (costs off)
+select distinct b.id, s.y
+from uk_b b join (select x, y from uk_c group by x, y) s on b.x = s.x;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Hash Join
+   Hash Cond: (b.x = s.x)
+   ->  Seq Scan on uk_b b
+   ->  Hash
+         ->  Subquery Scan on s
+               ->  HashAggregate
+                     Group Key: uk_c.x, uk_c.y
+                     ->  Seq Scan on uk_c
+(8 rows)
+
+explain (costs off)
+select distinct b.id, s.y
+from uk_b b join (select id, x, y from uk_c group by id, x, y) s on b.x = s.x;
+                QUERY PLAN                
+------------------------------------------
+ HashAggregate
+   Group Key: b.id, s.y
+   ->  Merge Join
+         Merge Cond: (b.x = s.x)
+         ->  Sort
+               Sort Key: b.x
+               ->  Seq Scan on uk_b b
+         ->  Sort
+               Sort Key: s.x
+               ->  Subquery Scan on s
+                     ->  Seq Scan on uk_c
+(11 rows)
+
+-- a lateral subquery needs the relations it refers to
+explain (costs off)
+select distinct a.id, s.x
+from uk_a a, lateral (select distinct b.x from uk_b b where b.y = a.y) s;
+                 QUERY PLAN                 
+--------------------------------------------
+ Nested Loop
+   ->  Index Scan using uk_a_pkey on uk_a a
+   ->  Unique
+         ->  Sort
+               Sort Key: b.x
+               ->  Seq Scan on uk_b b
+                     Filter: (y = a.y)
+(7 rows)
+
+explain (costs off)
+select distinct a.x, s.x
+from uk_a a, lateral (select distinct b.x from uk_b b where b.y = a.y) s;
+                 QUERY PLAN                  
+---------------------------------------------
+ HashAggregate
+   Group Key: a.x, b.x
+   ->  Nested Loop
+         ->  Seq Scan on uk_a a
+         ->  Unique
+               ->  Sort
+                     Sort Key: b.x
+                     ->  Seq Scan on uk_b b
+                           Filter: (y = a.y)
+(9 rows)
+
+-- semijoins and antijoins
+explain (costs off)
+select distinct b.id from uk_b b
+where exists (select 1 from uk_c c where c.x = b.x);
+              QUERY PLAN              
+--------------------------------------
+ Hash Join
+   Hash Cond: (b.x = c.x)
+   ->  Seq Scan on uk_b b
+   ->  Hash
+         ->  HashAggregate
+               Group Key: c.x
+               ->  Seq Scan on uk_c c
+(7 rows)
+
+explain (costs off)
+select distinct b.id from uk_b b
+where not exists (select 1 from uk_c c where c.x = b.x);
+           QUERY PLAN           
+--------------------------------
+ Hash Anti Join
+   Hash Cond: (b.x = c.x)
+   ->  Seq Scan on uk_b b
+   ->  Hash
+         ->  Seq Scan on uk_c c
+(5 rows)
+
+explain (costs off)
+select distinct b.x from uk_b b
+where exists (select 1 from uk_c c where c.x = b.x);
+                 QUERY PLAN                 
+--------------------------------------------
+ HashAggregate
+   Group Key: b.x
+   ->  Hash Join
+         Hash Cond: (b.x = c.x)
+         ->  Seq Scan on uk_b b
+         ->  Hash
+               ->  HashAggregate
+                     Group Key: c.x
+                     ->  Seq Scan on uk_c c
+(9 rows)
+
+-- GROUP BY without aggregates is handled likewise
+explain (costs off)
+select a.id, a.y from uk_a a join uk_b b on a.x = b.id group by a.id, a.y;
+           QUERY PLAN           
+--------------------------------
+ Hash Join
+   Hash Cond: (a.x = b.id)
+   ->  Seq Scan on uk_a a
+   ->  Hash
+         ->  Seq Scan on uk_b b
+(5 rows)
+
+-- but aggregates need the grouping step
+explain (costs off)
+select id, count(*) from uk_a group by id;
+       QUERY PLAN       
+------------------------
+ HashAggregate
+   Group Key: id
+   ->  Seq Scan on uk_a
+(3 rows)
+
+-- as does DISTINCT ON, and set-returning functions in the targetlist
+explain (costs off)
+select distinct on (id) id, x from uk_a;
+                QUERY PLAN                
+------------------------------------------
+ Unique
+   ->  Index Scan using uk_a_pkey on uk_a
+(2 rows)
+
+explain (costs off)
+select distinct id, generate_series(1, 2) from uk_a;
+               QUERY PLAN               
+----------------------------------------
+ HashAggregate
+   Group Key: id, generate_series(1, 2)
+   ->  ProjectSet
+         ->  Seq Scan on uk_a
+(4 rows)
+
+-- DISTINCT over grouped input needs all the grouping columns
+explain (costs off)
+select distinct x, count(*) from uk_a group by x;
+       QUERY PLAN       
+------------------------
+ HashAggregate
+   Group Key: x
+   ->  Seq Scan on uk_a
+(3 rows)
+
+explain (costs off)
+select distinct x, count(*) from uk_a group by x, y;
+          QUERY PLAN          
+------------------------------
+ HashAggregate
+   Group Key: x, count(*)
+   ->  HashAggregate
+         Group Key: x, y
+         ->  Seq Scan on uk_a
+(5 rows)
+
+-- or grouping columns that the scan/join relation is distinct for
+explain (costs off)
+select distinct a.id, count(*) from uk_a a join uk_b b on a.x = b.id
+group by a.id, b.y;
+              QUERY PLAN              
+--------------------------------------
+ HashAggregate
+   Group Key: a.id, b.y
+   ->  Hash Join
+         Hash Cond: (a.x = b.id)
+         ->  Seq Scan on uk_a a
+         ->  Hash
+               ->  Seq Scan on uk_b b
+(7 rows)
+
+explain (costs off)
+select distinct b.id, count(*) from uk_a a join uk_b b on a.x = b.id
+group by a.id, b.id;
+                 QUERY PLAN                 
+--------------------------------------------
+ HashAggregate
+   Group Key: b.id, count(*)
+   ->  HashAggregate
+         Group Key: a.id, b.id
+         ->  Hash Join
+               Hash Cond: (a.x = b.id)
+               ->  Seq Scan on uk_a a
+               ->  Hash
+                     ->  Seq Scan on uk_b b
+(9 rows)
+
+-- unless there are grouping sets
+explain (costs off)
+select distinct x, count(*) from uk_a group by grouping sets ((x), ());
+          QUERY PLAN          
+------------------------------
+ HashAggregate
+   Group Key: x, count(*)
+   ->  MixedAggregate
+         Hash Key: x
+         Group Key: ()
+         ->  Seq Scan on uk_a
+(6 rows)
+
+-- aggregation without GROUP BY returns one row
+explain (costs off)
+select distinct count(*) from uk_a;
+       QUERY PLAN       
+------------------------
+ Aggregate
+   ->  Seq Scan on uk_a
+(2 rows)
+
+-- window functions do not change the rows of their input
+explain (costs off)
+select distinct id, sum(x) over (partition by y) from uk_a;
+            QUERY PLAN            
+----------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY y)
+   ->  Sort
+         Sort Key: y
+         ->  Seq Scan on uk_a
+(5 rows)
+
+explain (costs off)
+select distinct x, sum(x) over (partition by y) from uk_a;
+               QUERY PLAN               
+----------------------------------------
+ HashAggregate
+   Group Key: x, sum(x) OVER w1
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY y)
+         ->  Sort
+               Sort Key: y
+               ->  Seq Scan on uk_a
+(7 rows)
+
+--
+-- Test child relations under partitionwise join.
+--
+create table uk_p (id int primary key, x int, y int) partition by range (id);
+create table uk_p1 partition of uk_p for values from (0) to (100);
+create table uk_p2 partition of uk_p for values from (100) to (200);
+create table uk_q (id int primary key, x int, y int) partition by range (id);
+create table uk_q1 partition of uk_q for values from (0) to (100);
+create table uk_q2 partition of uk_q for values from (100) to (200);
+create table uk_r (id int, x int, y int) partition by range (id);
+create table uk_r1 partition of uk_r for values from (0) to (100);
+create table uk_r2 partition of uk_r for values from (100) to (200);
+-- Disable hash and merge joins, so that the nullable side of a left join is
+-- the inner side.
+set enable_partitionwise_join = on;
+set max_parallel_workers_per_gather = 0;
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+-- a child relation is unique through its own index
+explain (verbose, costs off)
+select * from uk_p p join uk_q q on p.id = q.id;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Append
+   ->  Nested Loop
+         Output: p_1.id, p_1.x, p_1.y, q_1.id, q_1.x, q_1.y
+         Inner Unique: true
+         ->  Seq Scan on public.uk_p1 p_1
+               Output: p_1.id, p_1.x, p_1.y
+         ->  Index Scan using uk_q1_pkey on public.uk_q1 q_1
+               Output: q_1.id, q_1.x, q_1.y
+               Index Cond: (q_1.id = p_1.id)
+   ->  Nested Loop
+         Output: p_2.id, p_2.x, p_2.y, q_2.id, q_2.x, q_2.y
+         Inner Unique: true
+         ->  Seq Scan on public.uk_p2 p_2
+               Output: p_2.id, p_2.x, p_2.y
+         ->  Index Scan using uk_q2_pkey on public.uk_q2 q_2
+               Output: q_2.id, q_2.x, q_2.y
+               Index Cond: (q_2.id = p_2.id)
+(17 rows)
+
+-- a child join is unique if its parent is
+explain (verbose, costs off)
+select * from uk_p p left join
+  (uk_q q join uk_p p2 on q.id = p2.id) on p.id = q.id;
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Append
+   ->  Nested Loop Left Join
+         Output: p_1.id, p_1.x, p_1.y, q_1.id, q_1.x, q_1.y, p2_1.id, p2_1.x, p2_1.y
+         Inner Unique: true
+         ->  Seq Scan on public.uk_p1 p_1
+               Output: p_1.id, p_1.x, p_1.y
+         ->  Nested Loop
+               Output: q_1.id, q_1.x, q_1.y, p2_1.id, p2_1.x, p2_1.y
+               Inner Unique: true
+               ->  Index Scan using uk_q1_pkey on public.uk_q1 q_1
+                     Output: q_1.id, q_1.x, q_1.y
+                     Index Cond: (q_1.id = p_1.id)
+               ->  Index Scan using uk_p1_pkey on public.uk_p1 p2_1
+                     Output: p2_1.id, p2_1.x, p2_1.y
+                     Index Cond: (p2_1.id = q_1.id)
+   ->  Nested Loop Left Join
+         Output: p_2.id, p_2.x, p_2.y, q_2.id, q_2.x, q_2.y, p2_2.id, p2_2.x, p2_2.y
+         Inner Unique: true
+         ->  Seq Scan on public.uk_p2 p_2
+               Output: p_2.id, p_2.x, p_2.y
+         ->  Nested Loop
+               Output: q_2.id, q_2.x, q_2.y, p2_2.id, p2_2.x, p2_2.y
+               Inner Unique: true
+               ->  Index Scan using uk_q2_pkey on public.uk_q2 q_2
+                     Output: q_2.id, q_2.x, q_2.y
+                     Index Cond: (q_2.id = p_2.id)
+               ->  Index Scan using uk_p2_pkey on public.uk_p2 p2_2
+                     Output: p2_2.id, p2_2.x, p2_2.y
+                     Index Cond: (p2_2.id = q_2.id)
+(29 rows)
+
+-- but not if its parent is not
+explain (verbose, costs off)
+select * from uk_p p left join
+  (uk_q q join uk_r r on q.id = r.id) on p.id = q.id;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Append
+   ->  Nested Loop Left Join
+         Output: p_1.id, p_1.x, p_1.y, q_1.id, q_1.x, q_1.y, r_1.id, r_1.x, r_1.y
+         Join Filter: (p_1.id = q_1.id)
+         ->  Seq Scan on public.uk_p1 p_1
+               Output: p_1.id, p_1.x, p_1.y
+         ->  Materialize
+               Output: q_1.id, q_1.x, q_1.y, r_1.id, r_1.x, r_1.y
+               ->  Nested Loop
+                     Output: q_1.id, q_1.x, q_1.y, r_1.id, r_1.x, r_1.y
+                     Inner Unique: true
+                     ->  Seq Scan on public.uk_r1 r_1
+                           Output: r_1.id, r_1.x, r_1.y
+                     ->  Index Scan using uk_q1_pkey on public.uk_q1 q_1
+                           Output: q_1.id, q_1.x, q_1.y
+                           Index Cond: (q_1.id = r_1.id)
+   ->  Nested Loop Left Join
+         Output: p_2.id, p_2.x, p_2.y, q_2.id, q_2.x, q_2.y, r_2.id, r_2.x, r_2.y
+         Join Filter: (p_2.id = q_2.id)
+         ->  Seq Scan on public.uk_p2 p_2
+               Output: p_2.id, p_2.x, p_2.y
+         ->  Materialize
+               Output: q_2.id, q_2.x, q_2.y, r_2.id, r_2.x, r_2.y
+               ->  Nested Loop
+                     Output: q_2.id, q_2.x, q_2.y, r_2.id, r_2.x, r_2.y
+                     Inner Unique: true
+                     ->  Seq Scan on public.uk_r2 r_2
+                           Output: r_2.id, r_2.x, r_2.y
+                     ->  Index Scan using uk_q2_pkey on public.uk_q2 q_2
+                           Output: q_2.id, q_2.x, q_2.y
+                           Index Cond: (q_2.id = r_2.id)
+(31 rows)
+
+reset enable_partitionwise_join;
+reset max_parallel_workers_per_gather;
+reset enable_hashjoin;
+reset enable_mergejoin;
+--
+-- Test relations that are partially aggregated by eager aggregation.
+--
+create table uk_ea1 (id int primary key, x int);
+create table uk_ea2 (id int, y int, z int);
+insert into uk_ea1 select i, i % 10 from generate_series(1, 1000) i;
+insert into uk_ea2 select i % 100, i, i % 3 from generate_series(1, 1000) i;
+analyze uk_ea1, uk_ea2;
+-- uk_ea2 is grouped by the join column
+explain (verbose, costs off)
+select a.x, sum(b.y) from uk_ea1 a join uk_ea2 b on a.id = b.id
+group by a.x;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Finalize HashAggregate
+   Output: a.x, sum(b.y)
+   Group Key: a.x
+   ->  Merge Join
+         Output: a.x, (PARTIAL sum(b.y))
+         Inner Unique: true
+         Merge Cond: (a.id = b.id)
+         ->  Index Scan using uk_ea1_pkey on public.uk_ea1 a
+               Output: a.id, a.x
+         ->  Sort
+               Output: b.id, (PARTIAL sum(b.y))
+               Sort Key: b.id
+               ->  Partial HashAggregate
+                     Output: b.id, PARTIAL sum(b.y)
+                     Group Key: b.id
+                     ->  Seq Scan on public.uk_ea2 b
+                           Output: b.id, b.y, b.z
+(17 rows)
+
+-- uk_ea2 is grouped by more than the join column
+explain (verbose, costs off)
+select a.x, b.z, sum(b.y) from uk_ea1 a join uk_ea2 b on a.id = b.id
+group by a.x, b.z;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Finalize HashAggregate
+   Output: a.x, b.z, sum(b.y)
+   Group Key: a.x, b.z
+   ->  Merge Join
+         Output: a.x, b.z, (PARTIAL sum(b.y))
+         Merge Cond: (a.id = b.id)
+         ->  Index Scan using uk_ea1_pkey on public.uk_ea1 a
+               Output: a.id, a.x
+         ->  Sort
+               Output: b.z, b.id, (PARTIAL sum(b.y))
+               Sort Key: b.id
+               ->  Partial HashAggregate
+                     Output: b.z, b.id, PARTIAL sum(b.y)
+                     Group Key: b.z, b.id
+                     ->  Seq Scan on public.uk_ea2 b
+                           Output: b.id, b.y, b.z
+(16 rows)
+
+drop table uk_ea1, uk_ea2;
+drop table uk_a, uk_b, uk_c, uk_d, uk_n, uk_p, uk_q, uk_r;

@@ -292,6 +292,9 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->fdw_private = NULL;
 	rel->unique_for_rels = NIL;
 	rel->non_unique_for_rels = NIL;
+	rel->uniquekeys = NIL;
+	rel->notnull_eclass_indexes = NULL;
+	rel->own_eclass_indexes = NULL;
 	rel->unique_rel = NULL;
 	rel->unique_pathkeys = NIL;
 	rel->unique_groupclause = NIL;
@@ -542,6 +545,10 @@ build_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	 * clear size estimates
 	 */
 	grouped_rel->rows = 0;
+
+	/* what is proven for the grouped rel need not hold for the ungrouped */
+	grouped_rel->unique_for_rels = NIL;
+	grouped_rel->non_unique_for_rels = NIL;
 
 	return grouped_rel;
 }
@@ -913,6 +920,9 @@ build_join_rel(PlannerInfo *root,
 	joinrel->fdw_private = NULL;
 	joinrel->unique_for_rels = NIL;
 	joinrel->non_unique_for_rels = NIL;
+	joinrel->uniquekeys = NIL;
+	joinrel->notnull_eclass_indexes = NULL;
+	joinrel->own_eclass_indexes = NULL;
 	joinrel->unique_rel = NULL;
 	joinrel->unique_pathkeys = NIL;
 	joinrel->unique_groupclause = NIL;
