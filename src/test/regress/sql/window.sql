@@ -356,6 +356,14 @@ SELECT sum(unique1) over (ORDER BY four groups between 9223372036854775807 follo
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
 
+-- frame head on the next row, not yet stored, when the tuplestore spills
+SET work_mem = '64kB';
+SELECT count(*), sum(s) FROM
+  (SELECT sum(i) OVER (ORDER BY i ROWS BETWEEN 2000 FOLLOWING
+                       AND UNBOUNDED FOLLOWING) s
+   FROM generate_series(1, 2002) i) t;
+RESET work_mem;
+
 -- RANGE offset PRECEDING/FOLLOWING tests
 
 SELECT sum(unique1) over (order by four range between 2::int8 preceding and 1::int2 preceding),
