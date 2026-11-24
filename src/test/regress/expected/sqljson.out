@@ -270,6 +270,27 @@ SELECT pg_typeof(JSON_SERIALIZE(NULL));
  text
 (1 row)
 
+-- jsonb input
+SELECT JSON_SERIALIZE('{"b": [1, 2], "a": "x"}'::jsonb);
+     json_serialize      
+-------------------------
+ {"a": "x", "b": [1, 2]}
+(1 row)
+
+SELECT JSON_SERIALIZE('[1, 2, 4]'::jsonb RETURNING bytea);
+    json_serialize    
+----------------------
+ \x5b312c20322c20345d
+(1 row)
+
+SELECT JSON_SERIALIZE('[1, 2, 4]'::jsonb RETURNING varchar(3));
+ERROR:  value too long for type character varying(3)
+SELECT JSON_SERIALIZE(NULL::jsonb);
+ json_serialize 
+----------------
+ 
+(1 row)
+
 -- only string types or bytea allowed
 SELECT JSON_SERIALIZE('{ "a" : 1 } ' RETURNING jsonb);
 ERROR:  cannot use type jsonb in RETURNING clause of JSON_SERIALIZE()
