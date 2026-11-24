@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * noblock.c
- *	  set a file descriptor as blocking or non-blocking
+ *	  set a file descriptor as blocking or non-blocking, or close-on-exec
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -62,5 +62,24 @@ pg_set_block(pgsocket sock)
 
 	/* Returns non-0 on failure, while fcntl() returns -1 on failure */
 	return (ioctlsocket(sock, FIONBIO, &ioctlsocket_ret) == 0);
+#endif
+}
+
+/*
+ * Put socket into close-on-exec mode.
+ * Returns true on success, false on failure.
+ */
+bool
+socket_set_cloexec(pgsocket sock)
+{
+#if !defined(WIN32)
+	return (fcntl(sock, F_SETFD, FD_CLOEXEC) != -1);
+#else
+	if (!SetHandleInformation((HANDLE) sock, HANDLE_FLAG_INHERIT, 0))
+	{
+		_dosmaperr(GetLastError());
+		return false;
+	}
+	return true;
 #endif
 }

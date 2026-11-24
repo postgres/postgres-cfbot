@@ -518,6 +518,12 @@ extern int	pgkill(int pid, int sig);
 #define recv(s, buf, len, flags) pgwin32_recv(s, buf, len, flags)
 #define send(s, buf, len, flags) pgwin32_send(s, buf, len, flags)
 
+/*
+ * pgwin32_socket() maps this to WSA_FLAG_NO_HANDLE_INHERIT.  Frontend code
+ * calls Winsock directly, which would reject it.
+ */
+#define SOCK_CLOEXEC 0x80000
+
 extern SOCKET pgwin32_socket(int af, int type, int protocol);
 extern int	pgwin32_bind(SOCKET s, struct sockaddr *addr, int addrlen);
 extern int	pgwin32_listen(SOCKET s, int backlog);
