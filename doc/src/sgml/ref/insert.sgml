@@ -187,10 +187,10 @@ INSERT INTO <replaceable class="parameter">table_name</replaceable> [ AS <replac
         A substitute name for <replaceable
         class="parameter">table_name</replaceable>.  When an alias is
         provided, it completely hides the actual name of the table.
-        This is particularly useful when <literal>ON CONFLICT DO UPDATE</literal>
+        This is particularly useful when <literal>ON CONFLICT DO SELECT/UPDATE</literal>
         targets a table named <varname>excluded</varname>, since that will otherwise
         be taken as the name of the special table representing the row proposed
-        for insertion.
+        for insertion (see note below).
        </para>
       </listitem>
      </varlistentry>
@@ -353,6 +353,37 @@ INSERT INTO <replaceable class="parameter">table_name</replaceable> [ AS <replac
         <literal>SELECT</literal> path is taken, the new values will be
         identical to the old values, since no modification takes place.
        </para>
+
+       <para>
+        If the <command>INSERT</command> has an <literal>ON CONFLICT DO
+        SELECT/UPDATE</literal> clause, a column name or <literal>*</literal>
+        may be qualified using <literal>EXCLUDED</literal> to return the
+        values excluded from insertion, in the event of a conflict.  If there
+        is no conflict, then all excluded values will be <literal>NULL</literal>.
+       </para>
+
+       <note>
+        <para>
+         The special <varname>excluded</varname> table is made available
+         whenever an <command>INSERT</command> has an <literal>ON CONFLICT DO
+         SELECT/UPDATE</literal> clause.  It has the same columns as the
+         target table, and in the event of a conflict, it is populated with
+         the values that would have been inserted.  This includes any values
+         that were supplied by defaults, as well as the effects of any per-row
+         <literal>BEFORE INSERT</literal> triggers, since those may have
+         contributed to the row being excluded from insertion.
+        </para>
+        <para>
+         The <varname>excluded</varname> table is accessible from the
+         <literal>SET</literal> and <literal>WHERE</literal> clauses of an
+         <literal>ON CONFLICT DO UPDATE</literal> action, the
+         <literal>WHERE</literal> clause of an <literal>ON CONFLICT DO
+         SELECT</literal> action, and the <literal>RETURNING</literal> list.
+         <literal>SELECT</literal> privilege is required on any columns in the
+         target table where the corresponding <varname>excluded</varname>
+         columns are read.
+        </para>
+       </note>
       </listitem>
      </varlistentry>
 
@@ -468,15 +499,7 @@ INSERT INTO <replaceable class="parameter">table_name</replaceable> [ AS <replac
         <literal>DO SELECT</literal> and <literal>DO UPDATE</literal> have
         access to the existing row using the table's name (or an alias),
         and to the row proposed for insertion using the special
-        <varname>excluded</varname> table.  <literal>SELECT</literal>
-        privilege is required on any column in the target table where
-        corresponding <varname>excluded</varname> columns are read.
-       </para>
-       <para>
-        Note that the effects of all per-row <literal>BEFORE
-        INSERT</literal> triggers are reflected in
-        <varname>excluded</varname> values, since those effects may
-        have contributed to the row being excluded from insertion.
+        <varname>excluded</varname> table (see note above).
        </para>
       </listitem>
      </varlistentry>
