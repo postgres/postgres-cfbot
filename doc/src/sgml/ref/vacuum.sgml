@@ -80,8 +80,9 @@ VACUUM [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] [ <re
    with normal reading and writing of the table, as an exclusive lock
    is not obtained.  However, extra space is not returned to the operating
    system (in most cases); it's just kept available for re-use within the
-   same table.  It also allows us to leverage multiple CPUs in order to process
-   indexes.  This feature is known as <firstterm><xref linkend="parallel-vacuum"/></firstterm>.
+   same table.  It also allows us to leverage multiple CPUs in order to scan
+   the table and process indexes.  This feature is known as
+   <firstterm><xref linkend="parallel-vacuum"/></firstterm>.
    To disable this feature, one can use <literal>PARALLEL</literal> option and
    specify parallel workers as zero.  <command>VACUUM FULL</command> rewrites
    the entire contents of the table into a new disk file with no extra space,
@@ -267,8 +268,8 @@ VACUUM [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] [ <re
     <listitem>
      <para>
       Specifies the maximum number of parallel workers that can be used
-      for <xref linkend="parallel-vacuum"/>, which is further limited
-      by <xref linkend="guc-max-parallel-maintenance-workers"/>. This
+      for each phase of <xref linkend="parallel-vacuum"/>, which is further
+      limited by <xref linkend="guc-max-parallel-maintenance-workers"/>. This
       option can't be used with the <literal>FULL</literal> option.
      </para>
     </listitem>
