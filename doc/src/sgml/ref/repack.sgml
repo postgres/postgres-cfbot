@@ -334,8 +334,16 @@ REPACK [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] USING
      <command>REPACK</command> with the <literal>CONCURRENTLY</literal>
      option is not MVCC-safe.  After the repacking transaction commits,
      the table will appear empty to concurrent transactions, if they are
-     using a snapshot taken before repacking started.
+     using a snapshot taken before the repacking transaction committed.
+     That includes a snapshot taken while <command>REPACK</command> was
+     running.
      See <xref linkend="mvcc-caveats"/> for more details.
+    </para>
+    <para>
+     To prevent the use of the <literal>CONCURRENTLY</literal> option on a
+     server, set <xref linkend="guc-max-repack-replication-slots"/> to
+     zero.  <command>REPACK</command> without
+     <literal>CONCURRENTLY</literal> remains available.
     </para>
    </warning>
 
