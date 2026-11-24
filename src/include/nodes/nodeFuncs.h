@@ -178,6 +178,12 @@ extern bool check_functions_in_node(Node *node, check_function_callback checker,
 #define raw_expression_tree_walker(n, w, c) \
 	raw_expression_tree_walker_impl(n, (tree_walker_callback) (w), c)
 
+/*
+ * planstate_tree_walker visits each planstate node exactly once, even if it
+ * is reachable through multiple paths (e.g. shared subplans).  To support
+ * this, the first member of the context struct passed to the callback must
+ * be a Bitmapset *, which the walker uses to track visited plan_node_ids.
+ */
 #define planstate_tree_walker(ps, w, c) \
 	planstate_tree_walker_impl(ps, (planstate_tree_walker_callback) (w), c)
 

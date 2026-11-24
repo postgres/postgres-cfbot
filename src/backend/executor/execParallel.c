@@ -112,24 +112,43 @@ struct SharedExecutorInstrumentation
 	 * follows.
 	 */
 };
+
 #define GetInstrumentationArray(sei) \
 	(StaticAssertVariableIsOfTypeMacro(sei, SharedExecutorInstrumentation *), \
 	 (NodeInstrumentation *) (((char *) sei) + sei->instrument_offset))
 
-/* Context object for ExecParallelEstimate. */
 typedef struct ExecParallelEstimateContext
 {
+	Bitmapset *visited;
 	ParallelContext *pcxt;
 	int			nnodes;
 } ExecParallelEstimateContext;
 
-/* Context object for ExecParallelInitializeDSM. */
 typedef struct ExecParallelInitializeDSMContext
 {
+	Bitmapset *visited;
 	ParallelContext *pcxt;
 	SharedExecutorInstrumentation *instrumentation;
 	int			nnodes;
 } ExecParallelInitializeDSMContext;
+
+typedef struct ExecParallelReInitializeDSMContext
+{
+	Bitmapset *visited;
+	ParallelContext *pcxt;
+} ExecParallelReInitializeDSMContext;
+
+typedef struct ExecParallelInstrumentationContext
+{
+	Bitmapset *visited;
+	SharedExecutorInstrumentation *instrumentation;
+} ExecParallelInstrumentationContext;
+
+typedef struct ExecParallelInitializeWorkerContext
+{
+	Bitmapset *visited;
+	ParallelWorkerContext *pwcxt;
+} ExecParallelInitializeWorkerContext;
 
 /* Helper functions that run in the parallel leader. */
 static char *ExecSerializePlan(Plan *plan, EState *estate);
@@ -140,9 +159,9 @@ static bool ExecParallelInitializeDSM(PlanState *planstate,
 static shm_mq_handle **ExecParallelSetupTupleQueues(ParallelContext *pcxt,
 													bool reinitialize);
 static bool ExecParallelReInitializeDSM(PlanState *planstate,
-										ParallelContext *pcxt);
+										ExecParallelReInitializeDSMContext *r);
 static bool ExecParallelRetrieveInstrumentation(PlanState *planstate,
-												SharedExecutorInstrumentation *instrumentation);
+												ExecParallelInstrumentationContext *i);
 
 /* Helper function that runs in the parallel worker. */
 static DestReceiver *ExecParallelGetReceiver(dsm_segment *seg, shm_toc *toc);
@@ -674,8 +693,8 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 {
 	ParallelExecutorInfo *pei;
 	ParallelContext *pcxt;
-	ExecParallelEstimateContext e;
-	ExecParallelInitializeDSMContext d;
+	ExecParallelEstimateContext e = {0};
+	ExecParallelInitializeDSMContext d = {0};
 	FixedParallelExecutorState *fpes;
 	char	   *pstmt_data;
 	char	   *pstmt_space;
@@ -772,7 +791,6 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	 * count of how many PlanState nodes there are.
 	 */
 	e.pcxt = pcxt;
-	e.nnodes = 0;
 	ExecParallelEstimate(planstate, &e);
 
 	/* Estimate space for instrumentation, if required. */
@@ -934,7 +952,6 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	 */
 	d.pcxt = pcxt;
 	d.instrumentation = instrumentation;
-	d.nnodes = 0;
 
 	/* Install our DSA area while initializing the plan. */
 	estate->es_query_dsa = pei->area;
@@ -990,6 +1007,7 @@ ExecParallelReinitialize(PlanState *planstate,
 {
 	EState	   *estate = planstate->state;
 	FixedParallelExecutorState *fpes;
+	ExecParallelReInitializeDSMContext rcxt = {NULL, pei->pcxt};
 
 	/* Old workers must already be shut down */
 	Assert(pei->finished);
@@ -1025,7 +1043,7 @@ ExecParallelReinitialize(PlanState *planstate,
 
 	/* Traverse plan tree and let each child node reset associated state. */
 	estate->es_query_dsa = pei->area;
-	ExecParallelReInitializeDSM(planstate, pei->pcxt);
+	ExecParallelReInitializeDSM(planstate, &rcxt);
 	estate->es_query_dsa = NULL;
 }
 
@@ -1034,7 +1052,7 @@ ExecParallelReinitialize(PlanState *planstate,
  */
 static bool
 ExecParallelReInitializeDSM(PlanState *planstate,
-							ParallelContext *pcxt)
+							ExecParallelReInitializeDSMContext *rcxt)
 {
 	if (planstate == NULL)
 		return false;
@@ -1047,46 +1065,46 @@ ExecParallelReInitializeDSM(PlanState *planstate,
 		case T_SeqScanState:
 			if (planstate->plan->parallel_aware)
 				ExecSeqScanReInitializeDSM((SeqScanState *) planstate,
-										   pcxt);
+										   rcxt->pcxt);
 			break;
 		case T_IndexScanState:
 			if (planstate->plan->parallel_aware)
 				ExecIndexScanReInitializeDSM((IndexScanState *) planstate,
-											 pcxt);
+											 rcxt->pcxt);
 			break;
 		case T_IndexOnlyScanState:
 			if (planstate->plan->parallel_aware)
 				ExecIndexOnlyScanReInitializeDSM((IndexOnlyScanState *) planstate,
-												 pcxt);
+												 rcxt->pcxt);
 			break;
 		case T_ForeignScanState:
 			if (planstate->plan->parallel_aware)
 				ExecForeignScanReInitializeDSM((ForeignScanState *) planstate,
-											   pcxt);
+											   rcxt->pcxt);
 			break;
 		case T_TidRangeScanState:
 			if (planstate->plan->parallel_aware)
 				ExecTidRangeScanReInitializeDSM((TidRangeScanState *) planstate,
-												pcxt);
+												rcxt->pcxt);
 			break;
 		case T_AppendState:
 			if (planstate->plan->parallel_aware)
-				ExecAppendReInitializeDSM((AppendState *) planstate, pcxt);
+				ExecAppendReInitializeDSM((AppendState *) planstate, rcxt->pcxt);
 			break;
 		case T_CustomScanState:
 			if (planstate->plan->parallel_aware)
 				ExecCustomScanReInitializeDSM((CustomScanState *) planstate,
-											  pcxt);
+											  rcxt->pcxt);
 			break;
 		case T_BitmapHeapScanState:
 			if (planstate->plan->parallel_aware)
 				ExecBitmapHeapReInitializeDSM((BitmapHeapScanState *) planstate,
-											  pcxt);
+											  rcxt->pcxt);
 			break;
 		case T_HashJoinState:
 			if (planstate->plan->parallel_aware)
 				ExecHashJoinReInitializeDSM((HashJoinState *) planstate,
-											pcxt);
+											rcxt->pcxt);
 			break;
 		case T_BitmapIndexScanState:
 		case T_HashState:
@@ -1102,7 +1120,7 @@ ExecParallelReInitializeDSM(PlanState *planstate,
 			break;
 	}
 
-	return planstate_tree_walker(planstate, ExecParallelReInitializeDSM, pcxt);
+	return planstate_tree_walker(planstate, ExecParallelReInitializeDSM, rcxt);
 }
 
 /*
@@ -1111,8 +1129,9 @@ ExecParallelReInitializeDSM(PlanState *planstate,
  */
 static bool
 ExecParallelRetrieveInstrumentation(PlanState *planstate,
-									SharedExecutorInstrumentation *instrumentation)
+									ExecParallelInstrumentationContext *icxt)
 {
+	SharedExecutorInstrumentation *instrumentation = icxt->instrumentation;
 	NodeInstrumentation *instrument;
 	int			i;
 	int			n;
@@ -1196,7 +1215,7 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	}
 
 	return planstate_tree_walker(planstate, ExecParallelRetrieveInstrumentation,
-								 instrumentation);
+								 icxt);
 }
 
 /*
@@ -1300,8 +1319,10 @@ ExecParallelCleanup(ParallelExecutorInfo *pei)
 {
 	/* Accumulate instrumentation, if any. */
 	if (pei->instrumentation)
-		ExecParallelRetrieveInstrumentation(pei->planstate,
-											pei->instrumentation);
+	{
+		ExecParallelInstrumentationContext icxt = {NULL, pei->instrumentation};
+		ExecParallelRetrieveInstrumentation(pei->planstate, &icxt);
+	}
 
 	/* Accumulate JIT instrumentation, if any. */
 	if (pei->jit_instrumentation)
@@ -1381,8 +1402,9 @@ ExecParallelGetQueryDesc(shm_toc *toc, DestReceiver *receiver,
  */
 static bool
 ExecParallelReportInstrumentation(PlanState *planstate,
-								  SharedExecutorInstrumentation *instrumentation)
+								  ExecParallelInstrumentationContext *icxt)
 {
+	SharedExecutorInstrumentation *instrumentation = icxt->instrumentation;
 	int			i;
 	int			plan_node_id = planstate->plan->plan_node_id;
 	NodeInstrumentation *instrument;
@@ -1412,7 +1434,7 @@ ExecParallelReportInstrumentation(PlanState *planstate,
 	InstrAggNode(&instrument[ParallelWorkerNumber], planstate->instrument);
 
 	return planstate_tree_walker(planstate, ExecParallelReportInstrumentation,
-								 instrumentation);
+								 icxt);
 }
 
 /*
@@ -1421,8 +1443,11 @@ ExecParallelReportInstrumentation(PlanState *planstate,
  * is allocated and initialized by executor; that is, after ExecutorStart().
  */
 static bool
-ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
+ExecParallelInitializeWorker(PlanState *planstate,
+							 ExecParallelInitializeWorkerContext *wcxt)
 {
+	ParallelWorkerContext *pwcxt = wcxt->pwcxt;
+
 	if (planstate == NULL)
 		return false;
 
@@ -1525,7 +1550,7 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 	}
 
 	return planstate_tree_walker(planstate, ExecParallelInitializeWorker,
-								 pwcxt);
+								 wcxt);
 }
 
 /*
@@ -1558,6 +1583,7 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	void	   *area_space;
 	dsa_area   *area;
 	ParallelWorkerContext pwcxt;
+	ExecParallelInitializeWorkerContext wcxt = {0};
 
 	/* Get fixed-size state. */
 	fpes = shm_toc_lookup(toc, PARALLEL_KEY_EXECUTOR_FIXED, false);
@@ -1596,7 +1622,8 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	}
 	pwcxt.toc = toc;
 	pwcxt.seg = seg;
-	ExecParallelInitializeWorker(queryDesc->planstate, &pwcxt);
+	wcxt.pwcxt = &pwcxt;
+	ExecParallelInitializeWorker(queryDesc->planstate, &wcxt);
 
 	/* Pass down any tuple bound */
 	ExecSetTupleBound(fpes->tuples_needed, queryDesc->planstate);
@@ -1629,8 +1656,10 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 
 	/* Report instrumentation data if any instrumentation options are set. */
 	if (instrumentation != NULL)
-		ExecParallelReportInstrumentation(queryDesc->planstate,
-										  instrumentation);
+	{
+		ExecParallelInstrumentationContext icxt = {NULL, instrumentation};
+		ExecParallelReportInstrumentation(queryDesc->planstate, &icxt);
+	}
 
 	/* Report JIT instrumentation data if any */
 	if (queryDesc->estate->es_jit && jit_instrumentation != NULL)
