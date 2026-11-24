@@ -152,6 +152,7 @@
 <!ENTITY pgoverexplain   SYSTEM "pgoverexplain.sgml">
 <!ENTITY pgplanadvice    SYSTEM "pgplanadvice.sgml">
 <!ENTITY pgprewarm       SYSTEM "pgprewarm.sgml">
+<!ENTITY pgtrashcan      SYSTEM "pgtrashcan.sgml">
 <!ENTITY pgrowlocks      SYSTEM "pgrowlocks.sgml">
 <!ENTITY pgstatstatements SYSTEM "pgstatstatements.sgml">
 <!ENTITY pgstattuple     SYSTEM "pgstattuple.sgml">
