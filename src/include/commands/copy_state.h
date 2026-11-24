@@ -64,6 +64,7 @@ typedef struct CopyFromStateData
 	List	   *attnumlist;		/* integer list of attnums to copy */
 	CopyFormatOptions opts;
 	MemoryContext copycontext;	/* per-copy execution context */
+	void	   *format_private; /* custom format's own state */
 
 	/*
 	 * Internal fields
@@ -119,6 +120,23 @@ typedef struct CopyFromStateData
 								 * att */
 	bool	   *defaults;		/* if DEFAULT marker was found for
 								 * corresponding att */
+
+	/*
+	 * Arrays for the per-row callback of a custom format to fill, one element
+	 * for each column of attnumlist.  NULL if attnumlist is all the
+	 * attributes in order, in which case the callback fills the arrays of the
+	 * whole row directly, and for the built-in formats.
+	 */
+	Datum	   *row_values;
+	bool	   *row_nulls;
+
+	/*
+	 * Per-row state of a custom format, reset for each row; see
+	 * CopyFromConvertField().
+	 */
+	bool		cur_row_skip;	/* ON_ERROR IGNORE dropped the row */
+	bool		cur_row_has_default;	/* a column is set to its default */
+
 	bool		simd_enabled;	/* use SIMD to scan for special chars? */
 
 	/*

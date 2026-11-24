@@ -158,7 +158,9 @@ static const CopyFromRoutine CopyFromRoutineBinary = {
 static const CopyFromRoutine *
 CopyFromGetRoutine(const CopyFormatOptions *opts)
 {
-	if (opts->format == COPY_FORMAT_CSV)
+	if (opts->format == COPY_FORMAT_CUSTOM)
+		return opts->custom_format_entry->from_routine;
+	else if (opts->format == COPY_FORMAT_CSV)
 		return &CopyFromRoutineCSV;
 	else if (opts->format == COPY_FORMAT_BINARY)
 		return &CopyFromRoutineBinary;
@@ -1791,10 +1793,18 @@ BeginCopyFrom(ParseState *pstate,
 		if (att->attisdropped)
 			continue;
 
-		/* Fetch the input function and typioparam info */
-		cstate->routine->CopyFromInFunc(cstate, att->atttypid,
-										&in_functions[attnum - 1],
-										&typioparams[attnum - 1]);
+		/*
+		 * Fetch the input function and typioparam info.  Core converts the
+		 * fields of a custom format with the text input functions.
+		 */
+		if (cstate->opts.format == COPY_FORMAT_CUSTOM)
+			CopyFromTextLikeInFunc(cstate, att->atttypid,
+								   &in_functions[attnum - 1],
+								   &typioparams[attnum - 1]);
+		else
+			cstate->routine->CopyFromInFunc(cstate, att->atttypid,
+											&in_functions[attnum - 1],
+											&typioparams[attnum - 1]);
 
 		/* Get default info if available */
 		defexprs[attnum - 1] = NULL;
@@ -1848,6 +1858,25 @@ BeginCopyFrom(ParseState *pstate,
 	}
 
 	cstate->defaults = palloc0_array(bool, tupDesc->natts);
+
+	/*
+	 * Unless attnumlist is all the attributes in order, the per-row callback
+	 * of a custom format needs arrays of its own for the listed columns.
+	 */
+	if (cstate->opts.format == COPY_FORMAT_CUSTOM)
+	{
+		int			attr_count = list_length(cstate->attnumlist);
+		bool		all_in_order = (attr_count == num_phys_attrs);
+
+		for (int i = 0; all_in_order && i < attr_count; i++)
+			all_in_order = (list_nth_int(cstate->attnumlist, i) == i + 1);
+
+		if (!all_in_order)
+		{
+			cstate->row_values = palloc_array(Datum, attr_count);
+			cstate->row_nulls = palloc_array(bool, attr_count);
+		}
+	}
 
 	/* initialize progress */
 	pgstat_progress_start_command(PROGRESS_COMMAND_COPY,

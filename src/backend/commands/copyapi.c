@@ -5,7 +5,7 @@
  *
  * The built-in formats (text, csv, binary, json) are dispatched directly by
  * the COPY engine. Extensions can provide additional formats by registering
- * a CopyToRoutine under a name from their _PG_init();
+ * a CopyToRoutine and/or CopyFromRoutine under a name from their _PG_init();
  * ProcessCopyOptions() then resolves "COPY ... (FORMAT 'name')" against this
  * registry.
  *
@@ -38,7 +38,8 @@ is_builtin_copy_format(const char *name)
 
 /*
  * Register a custom COPY format. Intended to be called from an extension's
- * _PG_init().
+ * _PG_init(). Either routine in 'entry' may be NULL if the format does not
+ * support that direction (but not both).
  *
  * The entry is copied, but 'entry->name' is stored by reference, so it must
  * be a constant string or allocated in storage that will never be freed.
@@ -48,13 +49,21 @@ RegisterCopyCustomFormat(const CopyCustomFormatEntry *entry)
 {
 	const char *name = entry->name;
 	const CopyToRoutine *to = entry->to_routine;
+	const CopyFromRoutine *from = entry->from_routine;
 
 	Assert(name != NULL && name[0] != '\0');
 
-	Assert(to != NULL &&
-		   to->CopyToOutFunc == NULL &&
-		   to->CopyToStart != NULL && to->CopyToOneRow != NULL &&
-		   to->CopyToEnd != NULL);
+	/* Must support at least one direction */
+	Assert(to != NULL || from != NULL);
+
+	Assert(to == NULL ||
+		   (to->CopyToOutFunc == NULL &&
+			to->CopyToStart != NULL && to->CopyToOneRow != NULL &&
+			to->CopyToEnd != NULL));
+	Assert(from == NULL ||
+		   (from->CopyFromInFunc == NULL &&
+			from->CopyFromStart != NULL && from->CopyFromEnd != NULL &&
+			from->CopyFromOneRow != NULL));
 
 	/* Check if it's already used by built-in format names */
 	if (is_builtin_copy_format(name))

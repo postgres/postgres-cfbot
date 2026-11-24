@@ -7,6 +7,7 @@ OBJS = \
 PGFILEDESC = "test_copy_custom_format - test custom COPY FORMAT"
 
 REGRESS = test_copy_custom_format
+TAP_TESTS = 1
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config

@@ -1054,12 +1054,21 @@ ProcessCopyOptions(ParseState *pstate,
 				 errmsg("COPY %s requires %s to be set to %s",
 						"REJECT_LIMIT", "ON_ERROR", "IGNORE")));
 
-	/* Custom formats support only COPY TO for now */
-	if (opts_out->format == COPY_FORMAT_CUSTOM && is_from)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("COPY format \"%s\" cannot be used with COPY FROM",
-						opts_out->custom_format_entry->name)));
+	/* Check custom format routines */
+	if (opts_out->format == COPY_FORMAT_CUSTOM)
+	{
+		if (is_from && opts_out->custom_format_entry->from_routine == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("COPY format \"%s\" cannot be used with COPY FROM",
+							opts_out->custom_format_entry->name)));
+
+		if (!is_from && opts_out->custom_format_entry->to_routine == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("COPY format \"%s\" cannot be used with COPY TO",
+							opts_out->custom_format_entry->name)));
+	}
 }
 
 /*

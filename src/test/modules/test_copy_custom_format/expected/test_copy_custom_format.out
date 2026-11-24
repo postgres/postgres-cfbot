@@ -1,6 +1,7 @@
 LOAD 'test_copy_custom_format';
 CREATE TABLE copy_data (a smallint, b integer, c bigint);
 INSERT INTO copy_data VALUES (1,2,3),(12,34,56),(123,456,789),(NULL,NULL,NULL);
+CREATE TABLE copy_data_in (LIKE copy_data);
 COPY copy_data TO stdout WITH (format 'test_format');          -- Start, OneRow x3, End
 NOTICE:  CopyToStart: the number of attributes of table: 3, the number of attributes to output: 3
 NOTICE:  CopyToOneRow: the number of valid values: 3
@@ -12,6 +13,16 @@ NOTICE:  CopyToOneRow: the number of valid values: 3
 NOTICE:  CopyToOneRow: the number of valid values: 3
 null,null,null
 NOTICE:  CopyToEnd
+COPY copy_data_in FROM stdin WITH (format 'test_format');      -- Start, End
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 3
+NOTICE:  CopyFromEnd
+SELECT * FROM copy_data_in;
+ a | b | c 
+---+---+---
+ 1 | 2 | 3
+ 4 | 5 | 6
+(2 rows)
+
 COPY copy_data (a, b) TO stdout WITH (format 'test_format');   -- Start: natts 2
 NOTICE:  CopyToStart: the number of attributes of table: 3, the number of attributes to output: 2
 NOTICE:  CopyToOneRow: the number of valid values: 3
@@ -34,7 +45,7 @@ NOTICE:  CopyToOneRow: the number of valid values: 1
 NOTICE:  CopyToOneRow: the number of valid values: 1
 null
 NOTICE:  CopyToEnd
--- Write to a file.
+-- Write to and read from a file.
 \getenv abs_builddir PG_ABS_BUILDDIR
 \set filename :abs_builddir '/results/test_copy_custom_format.data'
 COPY copy_data TO :'filename' WITH (format 'test_format');
@@ -44,6 +55,20 @@ NOTICE:  CopyToOneRow: the number of valid values: 3
 NOTICE:  CopyToOneRow: the number of valid values: 3
 NOTICE:  CopyToOneRow: the number of valid values: 3
 NOTICE:  CopyToEnd
+COPY copy_data_in FROM :'filename' WITH (format 'test_format');
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 3
+NOTICE:  CopyFromEnd
+SELECT * FROM copy_data_in;
+  a  |  b  |  c  
+-----+-----+-----
+   1 |   2 |   3
+   4 |   5 |   6
+   1 |   2 |   3
+  12 |  34 |  56
+ 123 | 456 | 789
+     |     |    
+(6 rows)
+
 COPY copy_data TO stdout WITH (format 'nonexistent');          -- ERROR: not recognized
 ERROR:  COPY format "nonexistent" not recognized
 LINE 1: COPY copy_data TO stdout WITH (format 'nonexistent');
@@ -54,5 +79,85 @@ LINE 1: COPY copy_data TO stdout WITH (format 'text', format 'csv');
                                                       ^
 COPY copy_data TO stdout WITH (format 'test_format', freeze true);     -- ERROR: FREEZE with COPY TO
 ERROR:  COPY FREEZE cannot be used with COPY TO
-COPY copy_data FROM stdin WITH (format 'test_format');         -- ERROR: no COPY FROM
-ERROR:  COPY format "test_format" cannot be used with COPY FROM
+-- The format has core convert the fields, so ON_ERROR, LOG_VERBOSITY and
+-- REJECT_LIMIT work as for the built-in formats.  Column c is filled with its
+-- default value, which is not evaluated for the rows that are dropped.
+CREATE TABLE copy_onerr (a int, b int, c serial);
+COPY copy_onerr (a, b) FROM stdin WITH (format 'test_format', on_error ignore, log_verbosity verbose);
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 2
+NOTICE:  skipping row due to data type incompatibility at line 2 for column "a": "x"
+NOTICE:  skipping row due to data type incompatibility at line 3 for column "b": "y"
+NOTICE:  2 rows were skipped due to data type incompatibility
+NOTICE:  CopyFromEnd
+COPY copy_onerr (b, a) FROM stdin WITH (format 'test_format', on_error set_null, log_verbosity verbose);
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 2
+NOTICE:  setting to null due to data type incompatibility at line 1 for column "a": "x"
+NOTICE:  setting to null due to data type incompatibility at line 2 for column "b": "y"
+NOTICE:  setting to null due to data type incompatibility at line 2 for column "a": "z"
+NOTICE:  in 2 rows, columns were set to null due to data type incompatibility
+NOTICE:  CopyFromEnd
+SELECT * FROM copy_onerr ORDER BY c;
+ a | b | c 
+---+---+---
+ 1 | 1 | 1
+ 4 | 4 | 2
+   | 5 | 3
+   |   | 4
+(4 rows)
+
+COPY copy_onerr (a, b) FROM stdin WITH (format 'test_format', on_error ignore, reject_limit 1); -- ERROR
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 2
+ERROR:  skipped more than REJECT_LIMIT (1) rows due to data type incompatibility
+CONTEXT:  COPY copy_onerr, line 2: "y,2"
+COPY copy_onerr (a, b) FROM stdin WITH (format 'test_format', on_error ignore); -- ERROR: too few fields
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 2
+ERROR:  test_format: too few fields
+CONTEXT:  COPY copy_onerr, line 1: "1"
+-- The DEFAULT marker.  The dropped column makes the format fill arrays of its
+-- own, which core moves into the row.
+CREATE TABLE copy_dflt (a int DEFAULT 42, x int, b text);
+ALTER TABLE copy_dflt DROP COLUMN x;
+COPY copy_dflt (b, a) FROM stdin WITH (format 'test_format', default '\D');
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 2
+NOTICE:  CopyFromEnd
+SELECT * FROM copy_dflt;
+ a  |  b  
+----+-----
+ 42 | foo
+  7 | bar
+    | 
+(3 rows)
+
+COPY copy_dflt (b) FROM stdin WITH (format 'test_format', default '\D'); -- ERROR: no default
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 1
+ERROR:  unexpected default marker in COPY data
+DETAIL:  Column "b" has no default value.
+CONTEXT:  COPY copy_dflt, line 1: "\D"
+-- A default value is not evaluated for a row that is dropped either.
+CREATE TABLE copy_dflt_seq (id serial, v int);
+COPY copy_dflt_seq FROM stdin WITH (format 'test_format', default '\D', on_error ignore);
+NOTICE:  CopyFromStart: the number of attributes of table: 2, the number of attributes to input: 2
+NOTICE:  1 row was skipped due to data type incompatibility
+NOTICE:  CopyFromEnd
+SELECT * FROM copy_dflt_seq;
+ id | v 
+----+---
+  1 | 1
+  2 | 3
+(2 rows)
+
+-- The format's data ends at a line "END".  Core complains about data that
+-- follows, beyond what the format has read ahead into its 64-byte buffer.
+COPY copy_data_in FROM stdin WITH (format 'test_format');
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 3
+NOTICE:  CopyFromEnd
+COPY copy_data_in FROM stdin WITH (format 'test_format'); -- ERROR
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 3
+ERROR:  received copy data after end of data
+CONTEXT:  COPY copy_data_in, line 2
+SELECT * FROM copy_data_in WHERE a IN (7, 10);
+ a | b | c 
+---+---+---
+ 7 | 8 | 9
+(1 row)
+

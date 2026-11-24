@@ -159,7 +159,10 @@ static pg_always_inline bool CopyFromOneAttribute(CopyFromState cstate,
 												  Form_pg_attribute att,
 												  FunctionCallInfo fcinfo,
 												  char *string,
-												  Datum *values, bool *nulls);
+												  Datum *values, bool *nulls,
+												  int pos);
+static bool CopyFromCustomOneRow(CopyFromState cstate, ExprContext *econtext,
+								 Datum *values, bool *nulls);
 static pg_always_inline bool CopyFromTextLikeOneRow(CopyFromState cstate,
 													ExprContext *econtext,
 													Datum *values,
@@ -184,8 +187,18 @@ ReceiveCopyBegin(CopyFromState cstate)
 {
 	StringInfoData buf;
 	int			natts = list_length(cstate->attnumlist);
-	int16		format = (cstate->opts.format == COPY_FORMAT_BINARY ? 1 : 0);
+	int16		format;
 	int			i;
+
+	/*
+	 * Tell the client whether the data is textual or binary.  A custom format
+	 * declares it in its registered entry.  Clients such as psql read textual
+	 * data line by line, which doesn't work for binary data.
+	 */
+	if (cstate->opts.format == COPY_FORMAT_CUSTOM)
+		format = cstate->opts.custom_format_entry->binary ? 1 : 0;
+	else
+		format = (cstate->opts.format == COPY_FORMAT_BINARY ? 1 : 0);
 
 	pq_beginmessage(&buf, PqMsg_CopyInResponse);
 	pq_sendbyte(&buf, format);	/* overall format */
@@ -376,11 +389,51 @@ CopyFromGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
 
 	nbytes = CopyGetData(cstate, databuf, minread, maxread);
 
+	/*
+	 * Remember that the format has seen the end of the input, so that we
+	 * don't read the source again in CopyFromCustomOneRow().  Not every kind
+	 * of source records it by itself.
+	 */
+	if (nbytes < minread)
+		cstate->raw_reached_eof = true;
+
 	cstate->bytes_processed += nbytes;
 	pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED,
 								 cstate->bytes_processed);
 
 	return nbytes;
+}
+
+/*
+ * Exported for custom formats; see copyapi.h.
+ *
+ * The data is quoted in the error context only if the input needs no encoding
+ * conversion and the data is valid in the server encoding.  Invalid bytes
+ * would be written to the server log as they are, and would make the message
+ * fail to be converted to the client encoding.  Converting every record just
+ * in case one of them fails would cost more than the quoted record is worth.
+ */
+void
+CopyFromSetErrorLine(CopyFromState cstate, const char *data, int len)
+{
+	if (cstate->need_transcoding ||
+		!pg_verify_mbstr(GetDatabaseEncoding(), data, len, true))
+	{
+		cstate->line_buf_valid = false;
+		return;
+	}
+
+	if (cstate->line_buf.data == NULL)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(cstate->copycontext);
+
+		initStringInfo(&cstate->line_buf);
+		MemoryContextSwitchTo(oldcxt);
+	}
+
+	resetStringInfo(&cstate->line_buf);
+	appendBinaryStringInfo(&cstate->line_buf, data, len);
+	cstate->line_buf_valid = true;
 }
 
 /*
@@ -810,11 +863,17 @@ CopyReadBinaryData(CopyFromState cstate, char *dest, int nbytes)
 
 /*
  * This function is exposed for use by extensions that read raw fields in the
- * next line. See NextCopyFromRawFieldsInternal() for details.
+ * next line.  It supports the text and CSV formats only: the fields are split
+ * apart using the delimiter, quote and escape characters, none of which a
+ * custom format has.  See NextCopyFromRawFieldsInternal() for details.
  */
 bool
 NextCopyFromRawFields(CopyFromState cstate, char ***fields, int *nfields)
 {
+	if (cstate->opts.format != COPY_FORMAT_TEXT &&
+		cstate->opts.format != COPY_FORMAT_CSV)
+		elog(ERROR, "reading raw fields requires text or CSV mode");
+
 	return NextCopyFromRawFieldsInternal(cstate, fields, nfields,
 										 cstate->opts.format == COPY_FORMAT_CSV);
 }
@@ -956,6 +1015,7 @@ NextCopyFrom(CopyFromState cstate, ExprContext *econtext,
 	int			i;
 	int		   *defmap = cstate->defmap;
 	ExprState **defexprs = cstate->defexprs;
+	bool		got_row;
 
 	tupDesc = RelationGetDescr(cstate->rel);
 	num_phys_attrs = tupDesc->natts;
@@ -966,8 +1026,27 @@ NextCopyFrom(CopyFromState cstate, ExprContext *econtext,
 	MemSet(cstate->defaults, false, num_phys_attrs * sizeof(bool));
 
 	/* Get one row from source */
-	if (!cstate->routine->CopyFromOneRow(cstate, econtext, values, nulls))
+	if (cstate->opts.format != COPY_FORMAT_CUSTOM)
+		got_row = cstate->routine->CopyFromOneRow(cstate, econtext, values,
+												  nulls);
+	else
+	{
+		got_row = CopyFromCustomOneRow(cstate, econtext, values, nulls);
+
+		/*
+		 * Return a row dropped by ON_ERROR IGNORE as it is, for the caller to
+		 * skip, without evaluating the default values of the other columns.
+		 */
+		if (got_row && cstate->cur_row_skip)
+			return true;
+	}
+
+	if (!got_row)
+	{
+		/* A row to be skipped must not be reported as the end of input */
+		Assert(cstate->escontext == NULL || !cstate->escontext->error_occurred);
 		return false;
+	}
 
 	/*
 	 * Now compute and insert any defaults available for the columns not
@@ -1057,7 +1136,7 @@ CopyFromCallInputFunction(FunctionCallInfo fcinfo, char *str, Datum *result)
  * and the caller sets the column to null.
  *
  * This runs only on errors, so we keep it out of line rather than let it
- * bloat the per-field loop that inlines CopyFromOneAttribute().
+ * bloat the per-field loops that inline CopyFromOneAttribute().
  */
 static pg_noinline bool
 CopyFromApplyOnError(CopyFromState cstate, Form_pg_attribute att)
@@ -1151,14 +1230,16 @@ CopyFromApplyOnError(CopyFromState cstate, Form_pg_attribute att)
 
 /*
  * Convert one input field to a Datum for the given attribute, for the text
- * and CSV formats.
+ * and CSV formats, and for custom formats through CopyFromConvertField().
  *
  * 'string' is the field value in the server encoding, or NULL for a null
  * value.  If the field was the DEFAULT marker, the caller has set
  * cstate->defaults for the attribute, and the default value is used.
  *
- * The result is stored in values[m] and nulls[m], which the caller has
- * initialized to null.
+ * The result is stored in values[pos] and nulls[pos], which the caller has
+ * initialized to null.  'pos' is the attribute index 'm' for the built-in
+ * formats, which fill the arrays of the whole row, and the position of the
+ * column in attnumlist for a custom format.
  *
  * This honors ON_ERROR, LOG_VERBOSITY and domain constraints, and maintains
  * the error context.  Returns false if the field could not be converted and
@@ -1172,13 +1253,13 @@ CopyFromApplyOnError(CopyFromState cstate, Form_pg_attribute att)
 static pg_always_inline bool
 CopyFromOneAttribute(CopyFromState cstate, ExprContext *econtext, int m,
 					 Form_pg_attribute att, FunctionCallInfo fcinfo,
-					 char *string, Datum *values, bool *nulls)
+					 char *string, Datum *values, bool *nulls, int pos)
 {
 	cstate->cur_attname = NameStr(att->attname);
 	cstate->cur_attval = string;
 
 	if (string != NULL)
-		nulls[m] = false;
+		nulls[pos] = false;
 
 	if (cstate->defaults[m])
 	{
@@ -1186,13 +1267,13 @@ CopyFromOneAttribute(CopyFromState cstate, ExprContext *econtext, int m,
 		Assert(econtext != NULL);
 		Assert(CurrentMemoryContext == econtext->ecxt_per_tuple_memory);
 
-		values[m] = ExecEvalExpr(cstate->defexprs[m], econtext, &nulls[m]);
+		values[pos] = ExecEvalExpr(cstate->defexprs[m], econtext, &nulls[pos]);
 	}
 
 	/*
 	 * If ON_ERROR is specified, handle the different options
 	 */
-	else if (!CopyFromCallInputFunction(fcinfo, string, &values[m]))
+	else if (!CopyFromCallInputFunction(fcinfo, string, &values[pos]))
 	{
 		if (!CopyFromApplyOnError(cstate, att))
 		{
@@ -1204,12 +1285,228 @@ CopyFromOneAttribute(CopyFromState cstate, ExprContext *econtext, int m,
 		}
 
 		/* SET_NULL falls through to the clear at the bottom */
-		nulls[m] = true;
-		values[m] = (Datum) 0;
+		nulls[pos] = true;
+		values[pos] = (Datum) 0;
 	}
 
 	cstate->cur_attname = NULL;
 	cstate->cur_attval = NULL;
+
+	return true;
+}
+
+/*
+ * Exported for custom formats; see copyapi.h.
+ *
+ * This shares CopyFromOneAttribute() with the text and CSV formats, but looks
+ * up the column in each call, and keeps the per-row flags in the COPY state,
+ * since it's called from a format.
+ */
+bool
+CopyFromConvertField(CopyFromState cstate, int i, char *str,
+					 Datum *values, bool *nulls)
+{
+	int			m;
+
+	Assert(cstate->opts.format == COPY_FORMAT_CUSTOM);
+	Assert(i >= 0 && i < list_length(cstate->attnumlist));
+
+	/* Don't bother if the row is going to be dropped anyway */
+	if (cstate->cur_row_skip)
+		return false;
+
+	m = list_nth_int(cstate->attnumlist, i) - 1;
+
+	/* A conversion overrides an earlier CopyFromSetDefault() call */
+	cstate->defaults[m] = false;
+
+	if (cstate->convert_select_flags && !cstate->convert_select_flags[m])
+	{
+		/* ignore input field, leaving column as NULL */
+		return true;
+	}
+
+	if (!CopyFromOneAttribute(cstate, NULL, m,
+							  TupleDescAttr(RelationGetDescr(cstate->rel), m),
+							  cstate->in_fcinfos[m], str,
+							  values, nulls, i))
+	{
+		cstate->cur_row_skip = true;
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * Exported for custom formats; see copyapi.h.
+ */
+void
+CopyFromSetDefault(CopyFromState cstate, int i)
+{
+	int			m;
+
+	Assert(cstate->opts.format == COPY_FORMAT_CUSTOM);
+	Assert(i >= 0 && i < list_length(cstate->attnumlist));
+
+	/*
+	 * The default expressions of the listed columns are set up only when the
+	 * DEFAULT option is given.
+	 */
+	if (cstate->opts.default_print == NULL)
+		elog(ERROR, "DEFAULT marker is used without the DEFAULT option");
+
+	m = list_nth_int(cstate->attnumlist, i) - 1;
+
+	if (cstate->defexprs[m] == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+				 errmsg("unexpected default marker in COPY data"),
+				 errdetail("Column \"%s\" has no default value.",
+						   NameStr(TupleDescAttr(RelationGetDescr(cstate->rel), m)->attname))));
+
+	if (cstate->convert_select_flags && !cstate->convert_select_flags[m])
+		return;
+
+	cstate->defaults[m] = true;
+	cstate->cur_row_has_default = true;
+}
+
+/*
+ * Exported for custom formats; see copyapi.h.
+ *
+ * The checks for missing and extra fields are the same as for the text and
+ * CSV formats, including that a missing field is reported only once the
+ * fields before it have been converted.
+ */
+bool
+CopyFromConvertFields(CopyFromState cstate, char **fields, bool *isdefault,
+					  int nfields, Datum *values, bool *nulls)
+{
+	int			attr_count = list_length(cstate->attnumlist);
+
+	if (nfields > attr_count)
+		ereport(ERROR,
+				(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+				 errmsg("extra data after last expected column")));
+
+	for (int i = 0; i < attr_count; i++)
+	{
+		if (i >= nfields)
+		{
+			int			m = list_nth_int(cstate->attnumlist, i) - 1;
+
+			ereport(ERROR,
+					(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+					 errmsg("missing data for column \"%s\"",
+							NameStr(TupleDescAttr(RelationGetDescr(cstate->rel), m)->attname))));
+		}
+
+		if (isdefault != NULL && isdefault[i])
+			CopyFromSetDefault(cstate, i);
+		else if (!CopyFromConvertField(cstate, i, fields[i], values, nulls))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * Read one row for a custom format.
+ *
+ * The format fills one element of the arrays for each column of attnumlist.
+ * Unless that is the whole row, it fills arrays of its own, and we move the
+ * values into the row afterwards.  If ON_ERROR IGNORE dropped the row,
+ * cstate->cur_row_skip tells the caller so, and the row is returned as it is.
+ */
+static bool
+CopyFromCustomOneRow(CopyFromState cstate, ExprContext *econtext,
+					 Datum *values, bool *nulls)
+{
+	Datum	   *row_values = values;
+	bool	   *row_nulls = nulls;
+	bool		got_row;
+
+	if (cstate->row_values != NULL)
+	{
+		int			attr_count = list_length(cstate->attnumlist);
+
+		row_values = cstate->row_values;
+		row_nulls = cstate->row_nulls;
+		MemSet(row_values, 0, attr_count * sizeof(Datum));
+		MemSet(row_nulls, true, attr_count * sizeof(bool));
+	}
+
+	/*
+	 * Count the records here, and forget the previous record so that an error
+	 * while reading this one doesn't quote it.  The built-in formats do this
+	 * while reading the input.
+	 */
+	cstate->cur_lineno++;
+	cstate->line_buf_valid = false;
+
+	cstate->cur_row_skip = false;
+	cstate->cur_row_erroneous = false;
+	cstate->cur_row_has_default = false;
+
+	got_row = cstate->routine->CopyFromOneRow(cstate, econtext,
+											  row_values, row_nulls);
+
+	/*
+	 * If the format found the end of its data before the end of the input,
+	 * for example at an end marker, complain about any data that follows, as
+	 * the binary format does.  In COPY FROM STDIN, this ensures that we
+	 * handle CopyFail correctly, if the client sends it after the data.
+	 */
+	if (!got_row)
+	{
+		char		dummy;
+
+		if (!cstate->raw_reached_eof && CopyGetData(cstate, &dummy, 1, 1) > 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+					 errmsg("received copy data after end of data")));
+		return false;
+	}
+
+	if (cstate->cur_row_skip)
+	{
+		Assert(cstate->escontext->error_occurred);
+		return true;
+	}
+
+	if (row_values != values)
+	{
+		int			fieldno = 0;
+
+		foreach_int(attnum, cstate->attnumlist)
+		{
+			values[attnum - 1] = row_values[fieldno];
+			nulls[attnum - 1] = row_nulls[fieldno];
+			fieldno++;
+		}
+	}
+
+	/*
+	 * Evaluate the default values only now that the row is kept, so that a
+	 * volatile default expression such as nextval() isn't evaluated for a row
+	 * that is dropped.  The text and CSV formats evaluate them while
+	 * converting the fields.
+	 */
+	if (cstate->cur_row_has_default)
+	{
+		Assert(econtext != NULL);
+		Assert(CurrentMemoryContext == econtext->ecxt_per_tuple_memory);
+
+		foreach_int(attnum, cstate->attnumlist)
+		{
+			int			m = attnum - 1;
+
+			if (cstate->defaults[m])
+				values[m] = ExecEvalExpr(cstate->defexprs[m], econtext,
+										 &nulls[m]);
+		}
+	}
 
 	return true;
 }
@@ -1296,7 +1593,7 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 		}
 
 		if (!CopyFromOneAttribute(cstate, econtext, m, att, in_fcinfos[m],
-								  string, values, nulls))
+								  string, values, nulls, m))
 			return true;		/* ON_ERROR IGNORE: skip the whole row */
 	}
 
