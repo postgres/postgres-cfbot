@@ -284,6 +284,52 @@ s1: NOTICE:  length(r) = 9002
 s1: NOTICE:  length(r) = 12002
 step assign6: <... completed>
 
+starting permutation: lock assign7 vacuum unlock
+pg_advisory_unlock_all
+----------------------
+                      
+(1 row)
+
+pg_advisory_unlock_all
+----------------------
+                      
+(1 row)
+
+step lock: 
+    SELECT pg_advisory_lock(1);
+
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step assign7: 
+do $$
+  declare
+    r test1;
+  begin
+    r := get_test1();
+    delete from test1;
+    commit;
+    perform pg_advisory_lock(1);
+    raise notice 'length(r) = %', length(r::text);
+  end;
+$$;
+ <waiting ...>
+step vacuum: 
+    VACUUM test1;
+
+step unlock: 
+    SELECT pg_advisory_unlock(1);
+
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+s1: NOTICE:  length(r) = 6004
+step assign7: <... completed>
+
 starting permutation: fetch-after-commit
 pg_advisory_unlock_all
 ----------------------
