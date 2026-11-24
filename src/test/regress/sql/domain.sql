@@ -916,3 +916,23 @@ SELECT * FROM information_schema.check_constraints
             FROM information_schema.domain_constraints
             WHERE domain_name IN ('con', 'dom', 'pos_int', 'things'))
   ORDER BY constraint_name;
+
+--
+-- Subtransaction DDL after ALTER DOMAIN ... DROP CONSTRAINT
+--
+CREATE DOMAIN dom_inval AS int CONSTRAINT c CHECK (value > 0);
+SELECT 1::dom_inval;  -- warm typcache
+BEGIN;
+ALTER DOMAIN dom_inval DROP CONSTRAINT c;
+SELECT (-1)::dom_inval;  -- verify local typcache was invalidated
+SAVEPOINT s;
+ALTER DOMAIN dom_inval ADD CONSTRAINT c2 CHECK (value < 5);
+ROLLBACK TO SAVEPOINT s;
+COMMIT;
+
+-- Also verify DROP CONSTRAINT IF EXISTS in a fresh transaction (no XID)
+BEGIN;
+ALTER DOMAIN dom_inval DROP CONSTRAINT IF EXISTS nonexistent;
+SAVEPOINT s;
+DROP DOMAIN dom_inval;
+COMMIT;
