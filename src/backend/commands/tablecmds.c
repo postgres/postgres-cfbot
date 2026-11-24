@@ -201,6 +201,8 @@ typedef struct AlteredTableInfo
 	bool		chgPersistence; /* T if SET LOGGED/UNLOGGED is used */
 	char		newrelpersistence;	/* if above is true */
 	Expr	   *partition_constraint;	/* for attach partition validation */
+	/* OIDs of re-added domain CHECK constraints to validate in Phase 3 */
+	List	   *domain_constraints;
 	/* true, if validating default due to some other attach/detach */
 	bool		validate_default;
 	/* Objects to rebuild after ALTER TYPE or SET EXPRESSION operations */
@@ -688,7 +690,7 @@ static void ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid owne
 								 const char *cmdstring, List **wqueue,
 								 LOCKMODE lockmode, bool rewrite);
 static void RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass,
-									 Oid objid, Relation rel, List *domname,
+									 Oid objid, Relation rel,
 									 const char *conname);
 static void TryReuseIndex(Oid oldId, IndexStmt *stmt);
 static void TryReuseForeignKey(Oid oldId, Constraint *con);
@@ -5560,13 +5562,63 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 			break;
 		case AT_ReAddDomainConstraint:	/* Re-add pre-existing domain check
 										 * constraint */
-			address =
-				AlterDomainAddConstraint(((AlterDomainStmt *) cmd->def)->typeName,
-										 ((AlterDomainStmt *) cmd->def)->def,
-										 NULL, true);
-			break;
+			{
+				ATReAddDomainConstraint *readd =
+					castNode(ATReAddDomainConstraint, cmd->def);
+				Constraint *con = readd->constr;
+				ObjectAddress constrAddr = InvalidObjectAddress;
+
+				/* only CHECK constraints can depend on a column */
+				Assert(con->contype == CONSTR_CHECK);
+
+				address = AlterDomainReAddConstraint(readd->domainoid, con,
+													 &constrAddr);
+
+				/*
+				 * Restore any comment on the constraint. Don't use
+				 * CommentObject(), since that requires ownership of the
+				 * domain, which the user altering a column the constraint
+				 * depends on need not have, and since it would look up the
+				 * domain by name again.
+				 */
+				if (readd->comment)
+					CreateComments(constrAddr.objectId, ConstraintRelationId,
+								   0, readd->comment);
+
+				/*
+				 * AlterDomainReAddConstraint doesn't validate the constraint,
+				 * since tables using the domain may not have been rewritten
+				 * yet. Tell Phase 3 to do it.
+				 */
+				if (!con->skip_validation)
+					tab->domain_constraints =
+						lappend_oid(tab->domain_constraints,
+									constrAddr.objectId);
+				break;
+			}
 		case AT_ReAddComment:	/* Re-add existing comment */
-			address = CommentObject((CommentStmt *) cmd->def);
+			{
+				CommentStmt *stmt = (CommentStmt *) cmd->def;
+				Relation	comrel;
+
+				/*
+				 * Don't use CommentObject(), since that requires ownership of
+				 * the constraint's table, which the user altering a column
+				 * the constraint depends on need not have. We're just
+				 * restoring a comment that already existed.  (Comments on
+				 * domain constraints are restored by AT_ReAddDomainConstraint
+				 * instead.)
+				 */
+				Assert(stmt->objtype == OBJECT_TABCONSTRAINT);
+				address = get_object_address(stmt->objtype, stmt->object,
+											 &comrel,
+											 ShareUpdateExclusiveLock,
+											 false);
+				CreateComments(address.objectId, address.classId,
+							   address.objectSubId, stmt->comment);
+				if (comrel != NULL)
+					relation_close(comrel, NoLock);
+			}
 			break;
 		case AT_AddIndexConstraint: /* ADD CONSTRAINT USING INDEX */
 			address = ATExecAddIndexConstraint(tab, rel, (IndexStmt *) cmd->def,
@@ -6185,6 +6237,36 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 
 		if (rel)
 			table_close(rel, NoLock);
+	}
+
+	/*
+	 * Validate re-added domain CHECK constraints.  This must wait until all
+	 * tables have been rewritten, since any of them might contain columns of
+	 * the domain. Don't skip relations without storage since the work queue
+	 * entry might be for a standalone composite type.
+	 */
+	foreach(ltab, *wqueue)
+	{
+		AlteredTableInfo *tab = (AlteredTableInfo *) lfirst(ltab);
+
+		foreach_oid(conoid, tab->domain_constraints)
+		{
+			HeapTuple	tup;
+			Form_pg_constraint con;
+			Datum		conbin;
+
+			tup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid));
+			if (!HeapTupleIsValid(tup))
+				elog(ERROR, "cache lookup failed for constraint %u", conoid);
+			con = (Form_pg_constraint) GETSTRUCT(tup);
+
+			conbin = SysCacheGetAttrNotNull(CONSTROID, tup,
+											Anum_pg_constraint_conbin);
+			validateDomainCheckConstraint(con->contypid,
+										  TextDatumGetCString(conbin));
+
+			ReleaseSysCache(tup);
+		}
 	}
 
 	/* Finally, run any afterStmts that were queued up */
@@ -16833,10 +16915,14 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 			relid = con->conrelid;
 		else
 		{
-			/* must be a domain constraint */
-			relid = get_typ_typrelid(getBaseType(con->contypid));
-			if (!OidIsValid(relid))
-				elog(ERROR, "could not identify relation associated with constraint %u", oldId);
+			/*
+			 * Must be a domain constraint.  The domain's base type need not
+			 * be composite, so there may be no relation associated with it.
+			 * Since the relid is only used to determine which work queue
+			 * entry the command is attached to, we can use the relation which
+			 * is being altered and which we already hold a lock on.
+			 */
+			relid = tab->relid;
 		}
 		confrelid = con->confrelid;
 		conislocal = con->conislocal;
@@ -17100,7 +17186,6 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 											 AT_PASS_OLD_INDEX,
 											 oldId,
 											 rel,
-											 NIL,
 											 indstmt->idxname);
 				}
 				else if (cmd->subtype == AT_AddConstraint)
@@ -17128,7 +17213,6 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 												 AT_PASS_OLD_CONSTR,
 												 oldId,
 												 rel,
-												 NIL,
 												 con->conname);
 					else
 						Assert(con->contype == CONSTR_NOTNULL);
@@ -17144,21 +17228,35 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 
 			if (stmt->subtype == AD_AddConstraint)
 			{
-				Constraint *con = castNode(Constraint, stmt->def);
+				ATReAddDomainConstraint *readd = makeNode(ATReAddDomainConstraint);
 				AlterTableCmd *cmd = makeNode(AlterTableCmd);
+				HeapTuple	tup;
+
+				/*
+				 * Don't trust the domain name in the deparsed command, since
+				 * the domain might have been renamed, and another type
+				 * created with its old name, concurrently. Instead, take the
+				 * domain's OID from the old constraint, which still exists.
+				 * Lock the domain to make sure it doesn't go away before we
+				 * re-add the constraint.
+				 */
+				tup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(oldId));
+				if (!HeapTupleIsValid(tup)) /* should not happen */
+					elog(ERROR, "cache lookup failed for constraint %u", oldId);
+				readd->domainoid = ((Form_pg_constraint) GETSTRUCT(tup))->contypid;
+				ReleaseSysCache(tup);
+				Assert(OidIsValid(readd->domainoid));
+				LockDatabaseObject(TypeRelationId, readd->domainoid, 0,
+								   AccessShareLock);
+
+				readd->constr = castNode(Constraint, stmt->def);
+				/* keep any comment on the constraint */
+				readd->comment = GetComment(oldId, ConstraintRelationId, 0);
 
 				cmd->subtype = AT_ReAddDomainConstraint;
-				cmd->def = (Node *) stmt;
+				cmd->def = (Node *) readd;
 				tab->subcmds[AT_PASS_OLD_CONSTR] =
 					lappend(tab->subcmds[AT_PASS_OLD_CONSTR], cmd);
-
-				/* recreate any comment on the constraint */
-				RebuildConstraintComment(tab,
-										 AT_PASS_OLD_CONSTR,
-										 oldId,
-										 NULL,
-										 stmt->typeName,
-										 con->conname);
 			}
 			else
 				elog(ERROR, "unexpected statement subtype: %d",
@@ -17188,18 +17286,16 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 
 /*
  * Subroutine for ATPostAlterTypeParse() to recreate any existing comment
- * for a table or domain constraint that is being rebuilt.
+ * for a table constraint that is being rebuilt.  (Comments on domain
+ * constraints are handled by AT_ReAddDomainConstraint.)
  *
- * objid is the OID of the constraint.
- * Pass "rel" for a table constraint, or "domname" (domain's qualified name
- * as a string list) for a domain constraint.
+ * objid is the OID of the constraint, and rel is its table.
  * (We could dig that info, as well as the conname, out of the pg_constraint
  * entry; but callers already have them so might as well pass them.)
  */
 static void
 RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass, Oid objid,
-						 Relation rel, List *domname,
-						 const char *conname)
+						 Relation rel, const char *conname)
 {
 	CommentStmt *cmd;
 	char	   *comment_str;
@@ -17212,21 +17308,11 @@ RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass, Oid objid,
 
 	/* Build CommentStmt node, copying all input data for safety */
 	cmd = makeNode(CommentStmt);
-	if (rel)
-	{
-		cmd->objtype = OBJECT_TABCONSTRAINT;
-		cmd->object = (Node *)
-			list_make3(makeString(get_namespace_name(RelationGetNamespace(rel))),
-					   makeString(pstrdup(RelationGetRelationName(rel))),
-					   makeString(pstrdup(conname)));
-	}
-	else
-	{
-		cmd->objtype = OBJECT_DOMCONSTRAINT;
-		cmd->object = (Node *)
-			list_make2(makeTypeNameFromNameList(copyObject(domname)),
-					   makeString(pstrdup(conname)));
-	}
+	cmd->objtype = OBJECT_TABCONSTRAINT;
+	cmd->object = (Node *)
+		list_make3(makeString(get_namespace_name(RelationGetNamespace(rel))),
+				   makeString(pstrdup(RelationGetRelationName(rel))),
+				   makeString(pstrdup(conname)));
 	cmd->comment = comment_str;
 
 	/* Append it to list of commands */

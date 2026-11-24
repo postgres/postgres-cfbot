@@ -2559,6 +2559,21 @@ typedef struct ATAlterConstraint
 	bool		noinherit;
 } ATAlterConstraint;
 
+/*
+ * Ad-hoc node for AT_ReAddDomainConstraint
+ *
+ * The domain is identified by OID, not by name: the constraint is re-added
+ * after the old one is dropped, and by then the name might refer to a
+ * different type.
+ */
+typedef struct ATReAddDomainConstraint
+{
+	NodeTag		type;
+	Oid			domainoid;		/* domain the constraint belongs to */
+	struct Constraint *constr;	/* CHECK constraint to re-add */
+	char	   *comment;		/* comment on the constraint, or NULL */
+} ATReAddDomainConstraint;
+
 /* Ad-hoc node for AT_ReplicaIdentity */
 typedef struct ReplicaIdentityStmt
 {

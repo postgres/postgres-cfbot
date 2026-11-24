@@ -37,7 +37,11 @@ extern ObjectAddress AlterDomainNotNull(List *names, bool notNull);
 extern ObjectAddress AlterDomainAddConstraint(List *names, Node *newConstraint,
 											  ObjectAddress *constrAddr,
 											  bool is_readd);
+extern ObjectAddress AlterDomainReAddConstraint(Oid domainoid,
+												Constraint *constr,
+												ObjectAddress *constrAddr);
 extern ObjectAddress AlterDomainValidateConstraint(List *names, const char *constrName);
+extern void validateDomainCheckConstraint(Oid domainoid, const char *ccbin);
 extern ObjectAddress AlterDomainDropConstraint(List *names, const char *constrName,
 											   DropBehavior behavior, bool missing_ok);
 
