@@ -1,0 +1,121 @@
+Parsed test spec with 2 sessions
+
+starting permutation: pause_delete delete2 delete1 commit1 wake_delete done1 commit2
+step pause_delete: 
+	SELECT FROM injection_points_attach('heap-delete-before-write', 'wait');
+
+step delete2: 
+	DELETE FROM ios_b
+	WHERE id = (SELECT min(id) FROM ios_a)
+	RETURNING id;
+ <waiting ...>
+step delete1: 
+	DELETE FROM ios_a
+	WHERE id = (SELECT min(id) FROM ios_b WHERE present)
+	RETURNING id;
+
+id
+--
+ 1
+(1 row)
+
+step commit1: COMMIT;
+step wake_delete: 
+	SELECT FROM injection_points_detach('heap-delete-before-write');
+	SELECT FROM injection_points_wakeup('heap-delete-before-write');
+ <waiting ...>
+step delete2: <... completed>
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step wake_delete: <... completed>
+step done1: 
+step commit2: COMMIT;
+
+starting permutation: pause_update update2 delete1 commit1 wake_update done1 commit2
+step pause_update: 
+	SELECT FROM injection_points_attach('heap-update-before-write', 'wait');
+
+step update2: 
+	UPDATE ios_b SET present = false
+	WHERE id = (SELECT min(id) FROM ios_a)
+	RETURNING id;
+ <waiting ...>
+step delete1: 
+	DELETE FROM ios_a
+	WHERE id = (SELECT min(id) FROM ios_b WHERE present)
+	RETURNING id;
+
+id
+--
+ 1
+(1 row)
+
+step commit1: COMMIT;
+step wake_update: 
+	SELECT FROM injection_points_detach('heap-update-before-write');
+	SELECT FROM injection_points_wakeup('heap-update-before-write');
+ <waiting ...>
+step update2: <... completed>
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step wake_update: <... completed>
+step done1: 
+step commit2: COMMIT;
+
+starting permutation: pause_reader delete1 delete2 commit2 wake_reader done2 commit1
+step pause_reader: 
+	SELECT FROM injection_points_attach('index-only-scan-before-predicate-lock', 'wait');
+
+step delete1: 
+	DELETE FROM ios_a
+	WHERE id = (SELECT min(id) FROM ios_b WHERE present)
+	RETURNING id;
+ <waiting ...>
+step delete2: 
+	DELETE FROM ios_b
+	WHERE id = (SELECT min(id) FROM ios_a)
+	RETURNING id;
+
+id
+--
+ 1
+(1 row)
+
+step commit2: COMMIT;
+step wake_reader: 
+	SELECT FROM injection_points_detach('index-only-scan-before-predicate-lock');
+	SELECT FROM injection_points_wakeup('index-only-scan-before-predicate-lock');
+ <waiting ...>
+step delete1: <... completed>
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step wake_reader: <... completed>
+step done2: 
+step commit1: COMMIT;
+
+starting permutation: pause_reader delete1 update2 commit2 wake_reader done2 commit1
+step pause_reader: 
+	SELECT FROM injection_points_attach('index-only-scan-before-predicate-lock', 'wait');
+
+step delete1: 
+	DELETE FROM ios_a
+	WHERE id = (SELECT min(id) FROM ios_b WHERE present)
+	RETURNING id;
+ <waiting ...>
+step update2: 
+	UPDATE ios_b SET present = false
+	WHERE id = (SELECT min(id) FROM ios_a)
+	RETURNING id;
+
+id
+--
+ 1
+(1 row)
+
+step commit2: COMMIT;
+step wake_reader: 
+	SELECT FROM injection_points_detach('index-only-scan-before-predicate-lock');
+	SELECT FROM injection_points_wakeup('index-only-scan-before-predicate-lock');
+ <waiting ...>
+step delete1: <... completed>
+ERROR:  could not serialize access due to read/write dependencies among transactions
+step wake_reader: <... completed>
+step done2: 
+step commit1: COMMIT;
