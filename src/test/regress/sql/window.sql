@@ -330,6 +330,33 @@ CREATE TEMP VIEW v_window AS
 
 SELECT pg_get_viewdef('v_window');
 
+-- PARTITION, RANGE, ROWS and GROUPS are not accepted bare as an existing
+-- window name, so deparse has to quote them there.  The window's own name is
+-- a ColId and stays unquoted, hence the asymmetry below.
+CREATE VIEW v_window_kw_partition AS
+  SELECT count(*) OVER w2 FROM generate_series(1, 1) s(v)
+  WINDOW "partition" AS (PARTITION BY v), w2 AS ("partition" ORDER BY v);
+
+SELECT pg_get_viewdef('v_window_kw_partition');
+
+CREATE VIEW v_window_kw_range AS
+  SELECT count(*) OVER w2 FROM generate_series(1, 1) s(v)
+  WINDOW "range" AS (PARTITION BY v), w2 AS ("range" ORDER BY v);
+
+SELECT pg_get_viewdef('v_window_kw_range');
+
+CREATE VIEW v_window_kw_rows AS
+  SELECT count(*) OVER w2 FROM generate_series(1, 1) s(v)
+  WINDOW "rows" AS (PARTITION BY v), w2 AS ("rows" ORDER BY v);
+
+SELECT pg_get_viewdef('v_window_kw_rows');
+
+CREATE VIEW v_window_kw_groups AS
+  SELECT count(*) OVER w2 FROM generate_series(1, 1) s(v)
+  WINDOW "groups" AS (PARTITION BY v), w2 AS ("groups" ORDER BY v);
+
+SELECT pg_get_viewdef('v_window_kw_groups');
+
 -- test overflow frame specifications
 SELECT sum(unique1) over (rows between current row and 9223372036854775807 following exclude current row),
 	unique1, four
