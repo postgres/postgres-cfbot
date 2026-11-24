@@ -127,6 +127,7 @@
 <!ENTITY btree-gin       SYSTEM "btree-gin.sgml">
 <!ENTITY btree-gist      SYSTEM "btree-gist.sgml">
 <!ENTITY citext          SYSTEM "citext.sgml">
+<!ENTITY copy-fixed      SYSTEM "copy-fixed.sgml">
 <!ENTITY cube            SYSTEM "cube.sgml">
 <!ENTITY dblink          SYSTEM "dblink.sgml">
 <!ENTITY dict-int        SYSTEM "dict-int.sgml">

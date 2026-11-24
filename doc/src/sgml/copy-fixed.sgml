@@ -1,0 +1,485 @@
+<!-- doc/src/sgml/copy-fixed.sgml -->
+
+<sect1 id="copy-fixed" xreflabel="copy_fixed">
+ <title>copy_fixed &mdash; fixed-width <command>COPY</command> format</title>
+
+ <indexterm zone="copy-fixed">
+  <primary>copy_fixed</primary>
+ </indexterm>
+
+ <para>
+  The <filename>copy_fixed</filename> module adds a format called
+  <literal>fixed</literal> to the <literal>FORMAT</literal> option of
+  <xref linkend="sql-copy"/>.  In a fixed-width file every column occupies a
+  predetermined number of bytes and is padded out to that width with a fill
+  character; there is no delimiter between the columns, and no quoting or
+  escaping of any kind.  Files of this shape are still the lingua franca of
+  older systems, and this module lets
+  <productname>PostgreSQL</productname> read and write them without an
+  external conversion step:
+
+<programlisting>
+COPY employee TO '/tmp/employee.dat'
+    WITH (format 'fixed', widths '5,10,10');
+</programlisting>
+ </para>
+
+ <para>
+  The module provides no SQL-accessible functions, so it is not installed with
+  <command>CREATE EXTENSION</command>; nothing would cause the library to be
+  loaded, and the <literal>fixed</literal> format would go on being
+  unrecognized.  It has to be loaded into the server instead.  You can load it
+  into an individual session:
+
+<programlisting>
+LOAD 'copy_fixed';
+</programlisting>
+
+  (You must be superuser to do that.)  More typical usage is to preload it
+  into some or all sessions by including <literal>copy_fixed</literal> in
+  <xref linkend="guc-session-preload-libraries"/> or
+  <xref linkend="guc-shared-preload-libraries"/> in
+  <filename>postgresql.conf</filename>, so that the format is available to
+  every session and to background processes.  In a session that has not loaded
+  the library, <command>COPY</command> fails with
+  <literal>COPY format "fixed" not recognized</literal>.
+ </para>
+
+ <important>
+  <para>
+   Field widths are counted in <emphasis>bytes</emphasis>, not in characters,
+   and the bytes are those of the <emphasis>file</emphasis> encoding &mdash;
+   the encoding named by the <literal>ENCODING</literal> option, which
+   defaults to the client encoding, and which is not necessarily the server
+   encoding.  A width of 10 means ten bytes in the file, whatever number of
+   characters that turns out to be.  See <xref linkend="copy-fixed-widths"/>.
+  </para>
+ </important>
+
+ <sect2 id="copy-fixed-options">
+  <title>Options</title>
+
+  <para>
+   The <literal>fixed</literal> format accepts the following options in the
+   <literal>WITH</literal> clause of <command>COPY</command>, alongside the
+   standard options discussed in
+   <xref linkend="copy-fixed-standard-options"/>.  All of them apply to
+   <command>COPY TO</command> and <command>COPY FROM</command> alike, and all
+   of them describe the file, so reading a file back requires the same
+   settings that were used to write it.  As with the standard
+   <command>COPY</command> options, writing one of them twice in the same
+   command is an error rather than a case of the last one winning.
+  </para>
+
+  <variablelist>
+   <varlistentry id="copy-fixed-widths">
+    <term><literal>widths</literal></term>
+    <listitem>
+     <para>
+      A comma-separated list of positive integers, such as
+      <literal>'5,10,10'</literal>, giving the width of each field in the
+      order the columns appear in the command.  This option is required;
+      there is no sensible default for it, and a <command>COPY</command> that
+      omits it fails.  The list must have exactly one entry per copied
+      column, counting the columns of an explicit column list or of the query
+      in a <literal>COPY (<replaceable>query</replaceable>) TO</literal>,
+      not the columns of the table; a mismatch is reported when the
+      <command>COPY</command> starts and says how many of each there were.
+     </para>
+
+     <para>
+      Widths are measured in bytes of the file encoding.  This is the point
+      about the format that most often surprises, so it is worth spelling out.
+      If the file encoding is <literal>UTF8</literal>, the four-character
+      string <literal>café</literal> occupies five bytes and needs a width of
+      at least five.  If the same value is written to a
+      <literal>LATIN1</literal> file, by giving
+      <literal>ENCODING 'LATIN1'</literal>, it occupies four bytes and fits in
+      a width of four.  Nothing about the server encoding enters into it: the
+      value is converted to the file encoding first, and only then measured
+      against the width.  Reading works the same way round, slicing the record
+      into fields on file-encoding byte boundaries before converting anything.
+      That is what makes the format able to read a file produced by a program
+      that has never heard of the server's encoding, but it does mean that a
+      width has to be chosen with the file's encoding in mind.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="copy-fixed-pad">
+    <term><literal>pad</literal></term>
+    <listitem>
+     <para>
+      The character used to pad a value out to its field width.  It must be a
+      single one-byte ASCII character, and it may not be a
+      newline or a carriage return.  The default is a space.
+     </para>
+
+     <para>
+      On output, enough copies of this character are added to bring each field
+      up to its width; on input, the same character is stripped from the
+      padded end of each field before the value is handed to the column's
+      input function.
+     </para>
+
+     <para>
+      Stripping cannot tell padding from data, so a value whose own text ends
+      with the padding character loses those characters when the file is read
+      back under <literal>align 'left'</literal>, and one whose text begins
+      with it loses them under <literal>align 'right'</literal>.  This holds
+      at the default padding too: a <type>text</type> value of
+      <literal>'ab&nbsp;&nbsp;'</literal> written into a field eight bytes
+      wide comes back as <literal>'ab'</literal>, with no error and nothing to
+      say that anything was dropped.  It is a property of the format rather
+      than a defect in this implementation &mdash; a fixed-width layout
+      records no boundary between a value and its padding &mdash; so a value
+      that has to survive a round trip exactly cannot rely on its leading or
+      trailing padding characters surviving with it.
+     </para>
+
+     <para>
+      <command>COPY FROM</command> accepts only a space here, and rejects any
+      other padding character before it reads anything.  Stripping padding
+      that could also be part of a value cannot be done unambiguously, and the
+      result would be silently wrong data rather than an error; see
+      <xref linkend="copy-fixed-limitations"/>.  <command>COPY TO</command>
+      accepts any padding character, which is what a setting such as
+      <literal>pad '0'</literal> is for: producing a file in the layout some
+      other system expects.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="copy-fixed-align">
+    <term><literal>align</literal></term>
+    <listitem>
+     <para>
+      Which end of the field the value is placed at, either
+      <literal>left</literal> (the default) or <literal>right</literal>.  With
+      <literal>left</literal> the value starts at the beginning of the field
+      and the padding follows it; with <literal>right</literal> the padding
+      comes first and the value ends at the end of the field, which is the
+      conventional layout for numeric columns.  On input the setting says
+      which end the padding is stripped from.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="copy-fixed-record-delimiter">
+    <term><literal>record_delimiter</literal></term>
+    <listitem>
+     <para>
+      What separates one record from the next: <literal>lf</literal> (the
+      default) for a single newline, <literal>crlf</literal> for a carriage
+      return followed by a newline, or <literal>none</literal> for records
+      written end to end with nothing between them, which is possible here
+      precisely because every record is the same length.
+     </para>
+
+     <para>
+      Note that this is deliberately explicit rather than platform-dependent.
+      The text and <literal>CSV</literal> formats terminate lines in a file
+      with whatever the platform uses, which means a <command>COPY TO</command>
+      file written on Windows gets <literal>CRLF</literal> and the same
+      command on any other platform gets <literal>LF</literal>.  A
+      fixed-width file is usually being exchanged with some other system, and
+      what that system expects has nothing to do with what the server happens
+      to be running on, so the choice is left to the user and defaults to
+      <literal>lf</literal> everywhere.
+     </para>
+
+     <para>
+      On input, the delimiter is checked rather than searched for: a record is
+      read as exactly the number of bytes the widths add up to, and the
+      delimiter must follow.  If it does not, the <command>COPY</command>
+      fails instead of quietly reading the rest of the file out of step.  A
+      final record with no delimiter after it is accepted, as it is in the
+      text format.
+     </para>
+
+     <para>
+      Do not feed a <literal>record_delimiter 'none'</literal> file through
+      <command>COPY ... FROM STDIN</command> in
+      <application>psql</application>.  The <command>COPY</command> can report
+      success and load nothing but corrupted rows.  Two typed lines of a
+      five-byte-per-record layout, for instance, load as three rows in which
+      every value is misaligned, and no error is raised at any point.
+     </para>
+
+     <para>
+      The cause is that <application>psql</application> has to read the data a
+      line at a time to find the <literal>\.</literal> that ends it, and it
+      sends each line with the newline that terminated it.  Where the format
+      expects no delimiter those newlines are data, so every record after the
+      first is shifted by one byte for each line that preceded it.  When the
+      total number of bytes is not a multiple of the record width the
+      <command>COPY</command> does end with a complaint that the data stopped
+      in the middle of a record, but that is luck rather than detection: as
+      soon as the count happens to divide evenly, the misaligned records are
+      accepted in silence.  Such a file has to be read with
+      <command>COPY ... FROM</command> naming the file, or through a client
+      that sends the data unaltered.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="copy-fixed-standard-options">
+  <title>Interaction with the Standard <command>COPY</command> Options</title>
+
+  <para>
+   The <literal>fixed</literal> format honors those standard
+   <command>COPY</command> options that are meaningful for it:
+   <literal>NULL</literal>, <literal>DEFAULT</literal>,
+   <literal>ENCODING</literal>, <literal>ON_ERROR</literal>,
+   <literal>LOG_VERBOSITY</literal>, <literal>REJECT_LIMIT</literal> and
+   <literal>FREEZE</literal>.  They behave exactly as
+   <xref linkend="sql-copy"/> describes them; in particular a row whose field
+   cannot be converted is skipped or nulled under
+   <literal>ON_ERROR</literal> just as it would be in the text format, and the
+   error context names the record and the column.
+  </para>
+
+  <para>
+   The <literal>NULL</literal> marker deserves a closer look, because its
+   default here is not the one the built-in formats use.  For the
+   <literal>fixed</literal> format the default marker is the
+   <emphasis>empty string</emphasis>: a NULL is written as a field containing
+   nothing but padding, and on input a field that is nothing but padding is
+   read back as NULL.  That is the natural spelling of a missing value in a
+   fixed-width layout, and it makes a file round-trip through
+   <command>COPY TO</command> and <command>COPY FROM</command> unchanged.
+   The server does not supply this default: it deliberately leaves
+   <literal>NULL</literal> unset for a format it does not know, and
+   <filename>copy_fixed</filename> chooses the empty string for itself.  A
+   different marker can of course be given, as in
+   <literal>NULL '\N'</literal>, in which case that text is what is written
+   and matched, still padded out to the field width; a marker that is longer
+   than a field it has to be written into is an error.
+  </para>
+
+  <para>
+   Because the default <literal>NULL</literal> marker is the empty string, an
+   empty string and a NULL are the same thing in a
+   <literal>fixed</literal> file unless a different marker is chosen.  It also
+   means <literal>DEFAULT ''</literal> collides with the NULL marker and is
+   rejected, as an explicit <literal>NULL '<replaceable>x</replaceable>'
+   DEFAULT '<replaceable>x</replaceable>'</literal> would be.
+  </para>
+
+  <para>
+   The remaining standard options describe things a fixed-width file does not
+   have, and specifying any of them is an error rather than being silently
+   ignored: <literal>DELIMITER</literal> (fields are found by counting bytes,
+   not by looking for a separator), <literal>QUOTE</literal>,
+   <literal>ESCAPE</literal>, <literal>FORCE_QUOTE</literal>,
+   <literal>FORCE_NOT_NULL</literal>, <literal>FORCE_NULL</literal> and
+   <literal>FORCE_ARRAY</literal> (there is no quoting and no array
+   structure), and <literal>HEADER</literal> (see
+   <xref linkend="copy-fixed-limitations"/>).
+  </para>
+ </sect2>
+
+ <sect2 id="copy-fixed-limitations">
+  <title>Limitations</title>
+
+  <para>
+   Field widths are counted in bytes of the file encoding, never in
+   characters.  There is no character-based width unit, and adding one would
+   be a different format rather than an option: the whole point of a
+   fixed-width file is that a given column always begins at a given byte
+   offset, which a character count does not pin down for any encoding whose
+   characters differ in length.
+  </para>
+
+  <para>
+   A value that does not fit in its field is an error; it is never truncated.
+   Truncating would produce a file that looks well-formed and silently
+   contains wrong data, which is a considerably worse outcome than a
+   <command>COPY</command> that stops and reports the column, the number of
+   bytes the value needed, and the width it was given.  The same applies to a
+   <literal>NULL</literal> marker that is too long for a field it has to be
+   written into, which is reported as its own error so that it is not confused
+   with an oversized value.
+  </para>
+
+  <para>
+   With any <literal>record_delimiter</literal> other than
+   <literal>none</literal>, a value that contains a newline or a carriage
+   return is rejected on output.  A fixed-width file has no escaping
+   mechanism, so such a value would be written literally, split the record
+   across physical lines, and produce a file that this same format could not
+   read back.  Refusing to write it is the only way to keep the file readable.
+   Under <literal>record_delimiter 'none'</literal> there is no line framing
+   to break, and the value is written as it stands.  For the same reason, a
+   <literal>NULL</literal> marker containing a newline or a carriage return is
+   rejected outright.
+  </para>
+
+  <para>
+   On input, a null byte (that is, a byte of zero) anywhere in a field is
+   rejected, with an error naming the column it turned up in.  In a
+   fixed-width file a null byte is a byte like any other, and files written by
+   older systems do sometimes use it as filler, but a field reaches the
+   column's input function as a C string, so everything from the null byte to
+   the end of the field would be quietly dropped.  Reading in a value that has
+   been silently truncated is worse than refusing to read the file, so such a
+   file has to be filtered before it can be loaded.
+  </para>
+
+  <para>
+   <command>COPY FROM</command> requires <literal>pad</literal> to be a space.
+   The padding of a field is not marked in the file in any way, so reading a
+   field means stripping the padding character from one end of it for as long
+   as it is found, and that can only be right when the character cannot be
+   part of a value.  Under <literal>pad '0'</literal>, for instance, the value
+   <literal>100</literal> in a field five bytes wide is written
+   <literal>10000</literal> and read back as <literal>1</literal>, and a
+   right-aligned <literal>0</literal> in the same field is written
+   <literal>00000</literal>, strips to nothing, and matches the default
+   <literal>NULL</literal> marker.  No rule for where to stop stripping helps,
+   because <literal>00100</literal>, <literal>100</literal> and
+   <literal>0000100</literal> are the same bytes in such a file; the original
+   value simply is not recoverable.  <command>COPY FROM</command> therefore
+   refuses the setting rather than quietly returning wrong values.  A file
+   padded with something else can still be produced with
+   <command>COPY TO</command>, and can be read back after being converted to
+   space padding by other means.
+  </para>
+
+  <para>
+   <literal>pad</literal> and <literal>align</literal> apply to every column
+   of the <command>COPY</command>.  There is no per-column form of either, so
+   a file that pads its text columns on the right and its numeric columns on
+   the left &mdash; a common enough convention &mdash; cannot be produced or
+   read in one command.
+  </para>
+
+  <para>
+   <literal>HEADER</literal> is not supported in either direction.  A header
+   line does not fit the layout in any obvious way: column names would have to
+   be truncated to their field widths or spill past them, and on input a
+   header would have to be told apart from a data record that happens to
+   contain the same bytes.
+  </para>
+ </sect2>
+
+ <sect2 id="copy-fixed-examples">
+  <title>Examples</title>
+
+  <para>
+   Set up a table to work with:
+
+<programlisting>
+LOAD 'copy_fixed';
+
+CREATE TABLE employee (id int, name text, salary numeric);
+INSERT INTO employee VALUES (1, 'Alice', 4500.00),
+                            (22, 'Bob', 300.5),
+                            (333, NULL, 12345.67);
+</programlisting>
+  </para>
+
+  <para>
+   Writing it out in fields of 5, 10 and 10 bytes.  A visible padding
+   character is used here to make the layout easy to see; the default is a
+   space:
+
+<programlisting>
+COPY employee TO STDOUT WITH (format 'fixed', widths '5,10,10', pad '.');
+</programlisting>
+
+<screen>
+1....Alice.....4500.00...
+22...Bob.......300.5.....
+333............12345.67..
+</screen>
+
+   Every line is 25 bytes plus a newline, and the third row's NULL name has
+   become a field of nothing but padding, which is what the default
+   <literal>NULL</literal> marker &mdash; the empty string &mdash; amounts to.
+  </para>
+
+  <para>
+   The same rows right-aligned, with an explicit <literal>NULL</literal>
+   marker:
+
+<programlisting>
+COPY employee TO STDOUT WITH (format 'fixed', widths '5,10,10',
+                              align 'right', null '(none)');
+</programlisting>
+
+<screen>
+    1     Alice   4500.00
+   22       Bob     300.5
+  333    (none)  12345.67
+</screen>
+  </para>
+
+  <para>
+   Reading a file back needs the same settings that produced it, and, since
+   <command>COPY FROM</command> takes only space padding, a file meant to be
+   read back has to be written with the default padding.  Below are the same
+   rows right-aligned and padded with spaces, and with the default
+   <literal>NULL</literal> marker, so the third row's name is an empty field.
+   That NULL comes back as a NULL, so <application>psql</application> is asked
+   to display one distinguishably:
+
+<programlisting>
+CREATE TABLE employee_in (id int, name text, salary numeric);
+
+\pset null (null)
+
+COPY employee_in FROM STDIN WITH (format 'fixed', widths '5,10,10',
+                                  align 'right');
+    1     Alice   4500.00
+   22       Bob     300.5
+  333            12345.67
+\.
+
+SELECT * FROM employee_in ORDER BY id;
+</programlisting>
+
+<screen>
+ id  |  name  |  salary
+-----+--------+----------
+   1 | Alice  |  4500.00
+  22 | Bob    |    300.5
+ 333 | (null) | 12345.67
+(3 rows)
+</screen>
+  </para>
+
+  <para>
+   Widths are byte counts, which shows up as soon as a value is not pure
+   ASCII.  In a <literal>UTF8</literal> database, and
+   writing a <literal>UTF8</literal> file, the four-character string
+   <literal>café</literal> takes five of the six bytes of its field and leaves
+   room for exactly one padding byte:
+
+<programlisting>
+COPY (SELECT 'café' AS word, 1 AS n) TO STDOUT
+    WITH (format 'fixed', widths '6,3', pad '.');
+</programlisting>
+
+<screen>
+café.1..
+</screen>
+  </para>
+
+  <para>
+   A value that does not fit is refused rather than truncated:
+
+<programlisting>
+COPY employee TO STDOUT WITH (format 'fixed', widths '5,4,10', pad '.');
+</programlisting>
+
+<screen>
+ERROR:  value too long for fixed-width field
+DETAIL:  Column "name" needs 5 bytes, but its field width is 4.
+</screen>
+  </para>
+ </sect2>
+
+</sect1>

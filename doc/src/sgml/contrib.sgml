@@ -136,6 +136,7 @@ CREATE EXTENSION <replaceable>extension_name</replaceable>;
  &btree-gin;
  &btree-gist;
  &citext;
+ &copy-fixed;
  &cube;
  &dblink;
  &dict-int;

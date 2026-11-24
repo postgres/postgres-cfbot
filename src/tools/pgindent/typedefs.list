@@ -867,10 +867,14 @@ FindColsContext
 FindSplitData
 FindSplitStrat
 First
+FixedAlign
+FixedCopyState
+FixedFormatOptions
 FixedParallelExecutorState
 FixedParallelState
 FixedParamState
 Fitness
+FixedRecordDelim
 FlagMode
 Float
 FlushPosition
