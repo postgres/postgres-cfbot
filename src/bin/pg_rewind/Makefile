@@ -30,6 +30,11 @@ OBJS = \
 	timeline.o \
 	xlogreader.o
 
+EXTRA_INSTALL = contrib/pageinspect contrib/pg_buffercache \
+	src/test/modules/injection_points
+
+export enable_injection_points
+
 EXTRA_CLEAN = xlogreader.c
 
 all: pg_rewind
