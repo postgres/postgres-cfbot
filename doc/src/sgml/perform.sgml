@@ -960,7 +960,7 @@ EXPLAIN ANALYZE SELECT * FROM tenk1 WHERE ten &lt; 7;
 -------------------------------------------------------------------&zwsp;--------------------------------------
  Seq Scan on tenk1  (cost=0.00..470.00 rows=7000 width=244) (actual time=0.030..1.995 rows=7000.00 loops=1)
    Filter: (ten &lt; 7)
-   Rows Removed by Filter: 3000
+   Rows Removed by Filter: 3000.00
    Buffers: shared hit=345
  Planning Time: 0.102 ms
  Execution Time: 2.145 ms
@@ -969,7 +969,9 @@ EXPLAIN ANALYZE SELECT * FROM tenk1 WHERE ten &lt; 7;
     These counts can be particularly valuable for filter conditions applied at
     join nodes.  The <quote>Rows Removed</quote> line only appears when at least
     one scanned row, or potential join pair in the case of a join node,
-    is rejected by the filter condition.
+    is rejected by the filter condition.  Like the actual
+    <literal>rows</literal> value, these counts are averages per execution of
+    the node.
    </para>
 
    <para>
@@ -984,7 +986,7 @@ EXPLAIN ANALYZE SELECT * FROM polygon_tbl WHERE f1 @&gt; polygon '(0.5,2.0)';
 -------------------------------------------------------------------&zwsp;-----------------------------------
  Seq Scan on polygon_tbl  (cost=0.00..1.09 rows=1 width=85) (actual time=0.023..0.023 rows=0.00 loops=1)
    Filter: (f1 @&gt; '((0.5,2))'::polygon)
-   Rows Removed by Filter: 7
+   Rows Removed by Filter: 7.00
    Buffers: shared hit=1
  Planning Time: 0.039 ms
  Execution Time: 0.033 ms
@@ -1004,7 +1006,7 @@ EXPLAIN ANALYZE SELECT * FROM polygon_tbl WHERE f1 @&gt; polygon '(0.5,2.0)';
 -------------------------------------------------------------------&zwsp;-------------------------------------------------------
  Index Scan using gpolygonind on polygon_tbl  (cost=0.13..8.15 rows=1 width=85) (actual time=0.074..0.074 rows=0.00 loops=1)
    Index Cond: (f1 @&gt; '((0.5,2))'::polygon)
-   Rows Removed by Index Recheck: 1
+   Rows Removed by Index Recheck: 1.00
    Index Searches: 1
    Buffers: shared hit=1
  Planning Time: 0.039 ms
@@ -1208,7 +1210,7 @@ EXPLAIN ANALYZE SELECT * FROM tenk1 WHERE unique1 &lt; 100 AND unique2 &gt; 9000
    -&gt;  Index Scan using tenk1_unique2 on tenk1  (cost=0.29..70.50 rows=10 width=244) (actual time=0.051..0.070 rows=2.00 loops=1)
          Index Cond: (unique2 &gt; 9000)
          Filter: (unique1 &lt; 100)
-         Rows Removed by Filter: 287
+         Rows Removed by Filter: 287.00
          Index Searches: 1
          Buffers: shared hit=16
  Planning Time: 0.077 ms

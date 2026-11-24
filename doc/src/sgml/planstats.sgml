@@ -494,7 +494,7 @@ EXPLAIN (ANALYZE, TIMING OFF, BUFFERS OFF) SELECT * FROM t WHERE a = 1;
 -------------------------------------------------------------------&zwsp;------------
  Seq Scan on t  (cost=0.00..170.00 rows=100 width=8) (actual rows=100.00 loops=1)
    Filter: (a = 1)
-   Rows Removed by Filter: 9900
+   Rows Removed by Filter: 9900.00
 </programlisting>
 
     The planner examines the condition and determines the selectivity
@@ -511,7 +511,7 @@ EXPLAIN (ANALYZE, TIMING OFF, BUFFERS OFF) SELECT * FROM t WHERE a = 1 AND b = 1
 -------------------------------------------------------------------&zwsp;----------
  Seq Scan on t  (cost=0.00..195.00 rows=1 width=8) (actual rows=100.00 loops=1)
    Filter: ((a = 1) AND (b = 1))
-   Rows Removed by Filter: 9900
+   Rows Removed by Filter: 9900.00
 </programlisting>
 
     The planner estimates the selectivity for each condition individually,
@@ -535,7 +535,7 @@ EXPLAIN (ANALYZE, TIMING OFF, BUFFERS OFF) SELECT * FROM t WHERE a = 1 AND b = 1
 -------------------------------------------------------------------&zwsp;------------
  Seq Scan on t  (cost=0.00..195.00 rows=100 width=8) (actual rows=100.00 loops=1)
    Filter: ((a = 1) AND (b = 1))
-   Rows Removed by Filter: 9900
+   Rows Removed by Filter: 9900.00
 </programlisting>
    </para>
   </sect2>
@@ -620,7 +620,7 @@ EXPLAIN (ANALYZE, TIMING OFF, BUFFERS OFF) SELECT * FROM t WHERE a = 1 AND b = 1
 -------------------------------------------------------------------&zwsp;------------
  Seq Scan on t  (cost=0.00..195.00 rows=100 width=8) (actual rows=100.00 loops=1)
    Filter: ((a = 1) AND (b = 1))
-   Rows Removed by Filter: 9900
+   Rows Removed by Filter: 9900.00
 </programlisting>
 
     The estimate is as accurate as with the functional dependencies, mostly
@@ -677,7 +677,7 @@ EXPLAIN (ANALYZE, TIMING OFF, BUFFERS OFF) SELECT * FROM t WHERE a = 1 AND b = 1
 -------------------------------------------------------------------&zwsp;--------
  Seq Scan on t  (cost=0.00..195.00 rows=1 width=8) (actual rows=0.00 loops=1)
    Filter: ((a = 1) AND (b = 10))
-   Rows Removed by Filter: 10000
+   Rows Removed by Filter: 10000.00
 </programlisting>
 
     Secondly, <acronym>MCV</acronym> lists handle a wider range of clause types,
@@ -690,7 +690,7 @@ EXPLAIN (ANALYZE, TIMING OFF, BUFFERS OFF) SELECT * FROM t WHERE a &lt;= 49 AND 
 -------------------------------------------------------------------&zwsp;--------
  Seq Scan on t  (cost=0.00..195.00 rows=1 width=8) (actual rows=0.00 loops=1)
    Filter: ((a &lt;= 49) AND (b &gt; 49))
-   Rows Removed by Filter: 10000
+   Rows Removed by Filter: 10000.00
 </programlisting>
 
    </para>

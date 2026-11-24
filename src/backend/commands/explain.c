@@ -4299,7 +4299,7 @@ show_instrumentation_count(const char *qlabel, int which,
 	if (nfiltered > 0 || es->format != EXPLAIN_FORMAT_TEXT)
 	{
 		if (nloops > 0)
-			ExplainPropertyFloat(qlabel, NULL, nfiltered / nloops, 0, es);
+			ExplainPropertyFloat(qlabel, NULL, nfiltered / nloops, 2, es);
 		else
 			ExplainPropertyFloat(qlabel, NULL, 0.0, 0, es);
 	}

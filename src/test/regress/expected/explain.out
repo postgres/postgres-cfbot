@@ -869,3 +869,43 @@ select explain_filter('explain (analyze,buffers off,costs off) select count(*) f
 (5 rows)
 
 reset work_mem;
+-- Rows Removed by Filter is averaged over loops, like actual rows,
+-- and must be shown with fractional digits as well
+explain (analyze, costs off, timing off, summary off, buffers off)
+select count(*) from (values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)) v(g)
+  join tenk1 b on b.unique1 = g
+where b.ten <> 0;
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Nested Loop (actual rows=9.00 loops=1)
+         ->  Values Scan on "*VALUES*" (actual rows=10.00 loops=1)
+         ->  Index Scan using tenk1_unique1 on tenk1 b (actual rows=0.90 loops=10)
+               Index Cond: (unique1 = "*VALUES*".column1)
+               Filter: (ten <> 0)
+               Rows Removed by Filter: 0.10
+               Index Searches: 10
+(8 rows)
+
+-- Join Filter of a join that is itself rescanned
+explain (analyze, costs off, timing off, summary off, buffers off)
+select count(*) from (values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)) v(g),
+  lateral (select 1 from tenk1 b join tenk1 c
+             on c.unique2 = b.unique1 and b.ten <> c.ten
+           where b.unique1 = g offset 0) s;
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Nested Loop (actual rows=7.00 loops=1)
+         ->  Values Scan on "*VALUES*" (actual rows=10.00 loops=1)
+         ->  Nested Loop (actual rows=0.70 loops=10)
+               Join Filter: (b.ten <> c.ten)
+               Rows Removed by Join Filter: 0.30
+               ->  Index Scan using tenk1_unique1 on tenk1 b (actual rows=1.00 loops=10)
+                     Index Cond: (unique1 = "*VALUES*".column1)
+                     Index Searches: 10
+               ->  Index Scan using tenk1_unique2 on tenk1 c (actual rows=1.00 loops=10)
+                     Index Cond: (unique2 = "*VALUES*".column1)
+                     Index Searches: 10
+(12 rows)
+
