@@ -1020,6 +1020,24 @@ select id, text_value, ts_value from copy_default;
 (3 rows)
 
 truncate copy_default;
+-- DEFAULT with HEADER MATCH where header field matches DEFAULT marker
+copy copy_default from stdin with (format csv, header match, default 'id');
+select id, text_value, ts_value from copy_default;
+ id | text_value |         ts_value         
+----+------------+--------------------------
+  1 | hello      | Mon Jul 04 00:00:00 2022
+(1 row)
+
+truncate copy_default;
+copy copy_default from stdin with (format csv, header match, default 'text_value');
+select id, text_value, ts_value from copy_default;
+ id | text_value |         ts_value         
+----+------------+--------------------------
+  1 | hello      | Mon Jul 04 00:00:00 2022
+  2 | test       | Sun Jul 03 00:00:00 2022
+(2 rows)
+
+truncate copy_default;
 -- DEFAULT cannot be used in COPY TO
 copy (select 1 as test) TO stdout with (default '\D');
 ERROR:  COPY DEFAULT cannot be used with COPY TO
