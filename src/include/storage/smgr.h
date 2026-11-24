@@ -46,6 +46,13 @@ typedef struct SMgrRelationData
 	BlockNumber smgr_targblock; /* current insertion target block */
 	BlockNumber smgr_cached_nblocks[MAX_FORKNUM + 1];	/* last known size */
 
+	/*
+	 * Slot of the relation's tablespace in this process's pending tablespace
+	 * stats, see pgstat_count_smgr_io_op_time().  Zero until the first timed
+	 * block I/O on the relation assigns it.
+	 */
+	uint16		smgr_pgstat_tsslot;
+
 	/* additional public fields may someday exist here */
 
 	/*

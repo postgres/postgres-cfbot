@@ -274,6 +274,7 @@ smgropen(RelFileLocator rlocator, ProcNumber backend)
 		for (int i = 0; i <= MAX_FORKNUM; ++i)
 			reln->smgr_cached_nblocks[i] = InvalidBlockNumber;
 		reln->smgr_which = 0;	/* we only have md.c at present */
+		reln->smgr_pgstat_tsslot = 0;
 
 		/* it is not pinned yet */
 		reln->pincount = 0;
