@@ -379,7 +379,8 @@ PostgreSQL documentation
       <listitem>
        <para>
         Specify the number of parallel workers for <firstterm>parallel vacuum</firstterm>.
-        This allows the vacuum to leverage multiple CPUs to process indexes.
+        This allows the vacuum to leverage multiple CPUs to scan the table
+        and process indexes.
         See <xref linkend="sql-vacuum"/>.
        </para>
       </listitem>
