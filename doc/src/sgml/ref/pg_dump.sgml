@@ -1666,6 +1666,21 @@ CREATE DATABASE foo WITH TEMPLATE template0;
   </para>
 
   <para>
+   <application>pg_dump</application> takes its snapshot before it locks
+   the tables it dumps.  If a command that is not MVCC-safe (see
+   <xref linkend="mvcc-caveats"/>) commits on a table in between, that
+   table is dumped without its rows, and
+   <application>pg_dump</application> reports no error.  The commands
+   concerned are <command>TRUNCATE</command>, the table-rewriting forms of
+   <command>ALTER TABLE</command>, and <command>REPACK</command> with
+   the <literal>CONCURRENTLY</literal> option.
+   <command>REPACK</command> with <literal>CONCURRENTLY</literal> does not
+   lock out other sessions while it copies the table, so a dump that
+   starts at any time while it runs is affected; do not start a dump
+   while one is running.
+  </para>
+
+  <para>
    When a dump without schema is chosen and the option <option>--disable-triggers</option>
    is used, <application>pg_dump</application> emits commands
    to disable triggers on user tables before inserting the data,
