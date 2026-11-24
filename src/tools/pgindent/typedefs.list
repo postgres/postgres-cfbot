@@ -541,9 +541,11 @@ ConvProcInfo
 ConversionLocation
 ConvertRowtypeExpr
 CookedConstraint
+CopyCustomFormatEntry
 CopyDest
 CopyFormat
 CopyFormatOptions
+CopyFromCoerceColumn
 CopyFromRoutine
 CopyFromState
 CopyFromStateData
@@ -865,10 +867,14 @@ FindColsContext
 FindSplitData
 FindSplitStrat
 First
+FixedAlign
+FixedCopyState
+FixedFormatOptions
 FixedParallelExecutorState
 FixedParallelState
 FixedParamState
 Fitness
+FixedRecordDelim
 FlagMode
 Float
 FlushPosition
@@ -3166,6 +3172,8 @@ Tcl_Obj
 Tcl_Size
 Tcl_Time
 TempNamespaceStatus
+TestCopyFromState
+TestCopyOptions
 TestCustomScanState
 TestDSMRegistryHashEntry
 TestDSMRegistryStruct

@@ -30,6 +30,7 @@
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "commands/copyapi.h"
+#include "commands/copy_state.h"
 #include "commands/copyfrom_internal.h"
 #include "commands/progress.h"
 #include "commands/trigger.h"
@@ -42,6 +43,7 @@
 #include "miscadmin.h"
 #include "nodes/miscnodes.h"
 #include "optimizer/optimizer.h"
+#include "parser/parse_coerce.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/fd.h"
@@ -107,6 +109,8 @@ typedef struct CopyMultiInsertInfo
 
 /* non-export function prototypes */
 static void ClosePipeFromProgram(CopyFromState cstate);
+static void CopyFromSetupCoerceColumns(CopyFromState cstate,
+									   TupleDesc tupDesc);
 
 /*
  * Built-in format-specific routines. One-row callbacks are defined in
@@ -157,7 +161,9 @@ static const CopyFromRoutine CopyFromRoutineBinary = {
 static const CopyFromRoutine *
 CopyFromGetRoutine(const CopyFormatOptions *opts)
 {
-	if (opts->format == COPY_FORMAT_CSV)
+	if (opts->format == COPY_FORMAT_CUSTOM)
+		return opts->custom_format_entry->from_routine;
+	else if (opts->format == COPY_FORMAT_CSV)
 		return &CopyFromRoutineCSV;
 	else if (opts->format == COPY_FORMAT_BINARY)
 		return &CopyFromRoutineBinary;
@@ -290,6 +296,14 @@ CopyFromErrorCallback(void *arg)
 					   cstate->cur_attname,
 					   attval);
 			pfree(attval);
+		}
+		else if (cstate->cur_attname && cstate->cur_attval_built)
+		{
+			/* error is relevant to a value that a custom format built */
+			errcontext("COPY %s, line %" PRIu64 ", column %s",
+					   cstate->cur_relname,
+					   cstate->cur_lineno,
+					   cstate->cur_attname);
 		}
 		else if (cstate->cur_attname)
 		{
@@ -1523,6 +1537,82 @@ CopyFrom(CopyFromState cstate)
 }
 
 /*
+ * Find the columns of a custom format that need their typmod or domain
+ * constraints applied to a value that the format builds by itself, since the
+ * format builds it as a value of the base type, as an input function would
+ * be given one to parse.
+ */
+static void
+CopyFromSetupCoerceColumns(CopyFromState cstate, TupleDesc tupDesc)
+{
+	int			attr_count = list_length(cstate->attnumlist);
+	int			fieldno = -1;
+
+	cstate->coerce_columns = palloc0_array(CopyFromCoerceColumn, attr_count);
+
+	foreach_int(attnum, cstate->attnumlist)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupDesc, attnum - 1);
+		CopyFromCoerceColumn *col;
+		int32		basetypmod = att->atttypmod;
+		Oid			basetype;
+		Oid			funcid = InvalidOid;
+		CoercionPathType path = COERCION_PATH_NONE;
+
+		fieldno++;
+
+		/* Nothing to do for a column the caller doesn't need (file_fdw) */
+		if (cstate->convert_select_flags &&
+			!cstate->convert_select_flags[attnum - 1])
+			continue;
+
+		basetype = getBaseTypeAndTypmod(att->atttypid, &basetypmod);
+		if (basetypmod >= 0)
+			path = find_typmod_coercion_function(basetype, &funcid);
+
+		if (path == COERCION_PATH_NONE && basetype == att->atttypid)
+			continue;
+
+		col = &cstate->coerce_columns[cstate->num_coerce_columns++];
+		col->fieldno = fieldno;
+		col->attnum = attnum;
+
+		if (path == COERCION_PATH_FUNC)
+		{
+			FmgrInfo   *flinfo = palloc_object(FmgrInfo);
+			int			nargs = get_func_nargs(funcid);
+
+			/*
+			 * The function takes the typmod, and possibly whether the cast is
+			 * explicit, which it isn't here, so that a value that is too long
+			 * is an error as for the input functions.
+			 */
+			fmgr_info(funcid, flinfo);
+			col->typmod_fcinfo = palloc(SizeForFunctionCallInfo(nargs));
+			InitFunctionCallInfoData(*col->typmod_fcinfo, flinfo, nargs,
+									 InvalidOid, (Node *) cstate->escontext,
+									 NULL);
+			col->typmod_fcinfo->args[0].isnull = false;
+			col->typmod_fcinfo->args[1].value = Int32GetDatum(basetypmod);
+			col->typmod_fcinfo->args[1].isnull = false;
+			if (nargs == 3)
+			{
+				col->typmod_fcinfo->args[2].value = BoolGetDatum(false);
+				col->typmod_fcinfo->args[2].isnull = false;
+			}
+		}
+		else if (path == COERCION_PATH_ARRAYCOERCE)
+			col->typmod_unsupported = true;
+
+		if (basetype != att->atttypid)
+			col->domain_type = att->atttypid;
+	}
+
+	if (cstate->num_coerce_columns > 0)
+		cstate->row_set_by_core = palloc0_array(bool, attr_count);
+}
+
+/*
  * Setup to read tuples from a file for COPY FROM.
  *
  * 'rel': Used as a template for the tuples
@@ -1736,7 +1826,7 @@ BeginCopyFrom(ParseState *pstate,
 							pg_encoding_to_char(GetDatabaseEncoding()))));
 	}
 
-	cstate->copy_src = COPY_FILE;	/* default */
+	cstate->copy_src = COPY_SOURCE_FILE;	/* default */
 
 	cstate->whereClause = whereClause;
 
@@ -1790,10 +1880,18 @@ BeginCopyFrom(ParseState *pstate,
 		if (att->attisdropped)
 			continue;
 
-		/* Fetch the input function and typioparam info */
-		cstate->routine->CopyFromInFunc(cstate, att->atttypid,
-										&in_functions[attnum - 1],
-										&typioparams[attnum - 1]);
+		/*
+		 * Fetch the input function and typioparam info.  Core converts the
+		 * fields of a custom format with the text input functions.
+		 */
+		if (cstate->opts.format == COPY_FORMAT_CUSTOM)
+			CopyFromTextLikeInFunc(cstate, att->atttypid,
+								   &in_functions[attnum - 1],
+								   &typioparams[attnum - 1]);
+		else
+			cstate->routine->CopyFromInFunc(cstate, att->atttypid,
+											&in_functions[attnum - 1],
+											&typioparams[attnum - 1]);
 
 		/* Get default info if available */
 		defexprs[attnum - 1] = NULL;
@@ -1848,6 +1946,25 @@ BeginCopyFrom(ParseState *pstate,
 
 	cstate->defaults = palloc0_array(bool, tupDesc->natts);
 
+	/*
+	 * Unless attnumlist is all the attributes in order, the per-row callback
+	 * of a custom format needs arrays of its own for the listed columns.
+	 */
+	if (cstate->opts.format == COPY_FORMAT_CUSTOM)
+	{
+		int			attr_count = list_length(cstate->attnumlist);
+		bool		all_in_order = (attr_count == num_phys_attrs);
+
+		for (int i = 0; all_in_order && i < attr_count; i++)
+			all_in_order = (list_nth_int(cstate->attnumlist, i) == i + 1);
+
+		if (!all_in_order)
+		{
+			cstate->row_values = palloc_array(Datum, attr_count);
+			cstate->row_nulls = palloc_array(bool, attr_count);
+		}
+	}
+
 	/* initialize progress */
 	pgstat_progress_start_command(PROGRESS_COMMAND_COPY,
 								  cstate->rel ? RelationGetRelid(cstate->rel) : InvalidOid);
@@ -1856,6 +1973,42 @@ BeginCopyFrom(ParseState *pstate,
 	/* We keep those variables in cstate. */
 	cstate->in_functions = in_functions;
 	cstate->typioparams = typioparams;
+
+	/*
+	 * Set up the call information for the input functions once, so that only
+	 * the input string needs to be set when converting each field.  The
+	 * binary format calls receive functions instead.
+	 */
+	if (cstate->opts.format != COPY_FORMAT_BINARY)
+	{
+		Size		fcinfo_size = SizeForFunctionCallInfo(3);
+		char	   *fcinfo_buf = palloc(fcinfo_size * num_phys_attrs);
+
+		cstate->in_fcinfos = palloc0_array(FunctionCallInfo, num_phys_attrs);
+		for (int attnum = 1; attnum <= num_phys_attrs; attnum++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupDesc, attnum - 1);
+			FunctionCallInfo fcinfo;
+
+			if (att->attisdropped)
+				continue;
+
+			fcinfo = (FunctionCallInfo) (fcinfo_buf +
+										 fcinfo_size * (attnum - 1));
+			InitFunctionCallInfoData(*fcinfo, &in_functions[attnum - 1], 3,
+									 InvalidOid, (Node *) cstate->escontext,
+									 NULL);
+			fcinfo->args[0].isnull = false;
+			fcinfo->args[1].value = ObjectIdGetDatum(typioparams[attnum - 1]);
+			fcinfo->args[1].isnull = false;
+			fcinfo->args[2].value = Int32GetDatum(att->atttypmod);
+			fcinfo->args[2].isnull = false;
+			cstate->in_fcinfos[attnum - 1] = fcinfo;
+		}
+	}
+	if (cstate->opts.format == COPY_FORMAT_CUSTOM)
+		CopyFromSetupCoerceColumns(cstate, tupDesc);
+
 	cstate->defmap = defmap;
 	cstate->defexprs = defexprs;
 	cstate->volatile_defexprs = volatile_defexprs;
@@ -1865,7 +2018,7 @@ BeginCopyFrom(ParseState *pstate,
 	if (data_source_cb)
 	{
 		progress_vals[1] = PROGRESS_COPY_TYPE_CALLBACK;
-		cstate->copy_src = COPY_CALLBACK;
+		cstate->copy_src = COPY_SOURCE_CALLBACK;
 		cstate->data_source_cb = data_source_cb;
 	}
 	else if (pipe)

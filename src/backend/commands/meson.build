@@ -11,6 +11,7 @@ backend_sources += files(
   'constraint.c',
   'conversioncmds.c',
   'copy.c',
+  'copyapi.c',
   'copyfrom.c',
   'copyfromparse.c',
   'copyto.c',

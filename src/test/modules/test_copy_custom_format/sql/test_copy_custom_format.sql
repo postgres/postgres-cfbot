@@ -1,0 +1,141 @@
+LOAD 'test_copy_custom_format';
+
+CREATE TABLE copy_data (a smallint, b integer, c bigint);
+INSERT INTO copy_data VALUES (1,2,3),(12,34,56),(123,456,789),(NULL,NULL,NULL);
+CREATE TABLE copy_data_in (LIKE copy_data);
+
+COPY copy_data TO stdout WITH (format 'test_format');          -- Start, OneRow x3, End
+COPY copy_data_in FROM stdin WITH (format 'test_format');      -- Start, End
+1,2,3
+4,5,6
+\.
+SELECT * FROM copy_data_in;
+
+COPY copy_data (a, b) TO stdout WITH (format 'test_format');   -- Start: natts 2
+COPY (SELECT a FROM copy_data) TO stdout WITH (format 'test_format'); -- Start: natts 1
+
+-- Write to and read from a file.
+\getenv abs_builddir PG_ABS_BUILDDIR
+\set filename :abs_builddir '/results/test_copy_custom_format.data'
+COPY copy_data TO :'filename' WITH (format 'test_format');
+COPY copy_data_in FROM :'filename' WITH (format 'test_format');
+SELECT * FROM copy_data_in;
+
+COPY copy_data TO stdout WITH (format 'nonexistent');          -- ERROR: not recognized
+COPY copy_data TO stdout WITH (format 'text', format 'csv');   -- ERROR: conflicting
+
+COPY copy_data TO stdout WITH (format 'test_format', bogus 1); -- ERROR
+
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 5); -- OK
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 3); -- OK
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 2); -- ERROR: 3 columns exceeds 2
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 0);   -- ERROR: positive
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes -1);  -- ERROR
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 'x'); -- ERROR: integer required
+
+COPY copy_data FROM stdin WITH (format 'test_format', freeze true, disallow_freeze true); -- ERROR (validate)
+\.
+COPY copy_data FROM stdin WITH (format 'test_format', disallow_freeze true); -- OK
+\.
+
+-- Core leaves it to the format to check the DEFAULT marker.
+COPY copy_data FROM stdin WITH (format 'test_format', default E'\n'); -- OK
+\.
+
+-- The format rejects the core options it doesn't implement.
+COPY copy_data TO stdout WITH (format 'test_format', delimiter ',');     -- ERROR
+COPY copy_data TO stdout WITH (format 'test_format', quote '"');         -- ERROR
+COPY copy_data TO stdout WITH (format 'test_format', encoding 'latin1'); -- ERROR
+COPY copy_data TO stdout WITH (format 'test_format', freeze true);     -- ERROR: FREEZE with COPY TO
+COPY copy_data TO stdout WITH (format 'test_datum_format');           -- ERROR: no COPY TO
+
+-- The format has core convert the fields, so ON_ERROR, LOG_VERBOSITY and
+-- REJECT_LIMIT work as for the built-in formats.  Column c is filled with its
+-- default value, which is not evaluated for the rows that are dropped.
+CREATE TABLE copy_onerr (a int, b int, c serial);
+COPY copy_onerr (a, b) FROM stdin WITH (format 'test_format', on_error ignore, log_verbosity verbose);
+1,1
+x,2
+3,y
+4,4
+\.
+COPY copy_onerr (b, a) FROM stdin WITH (format 'test_format', on_error set_null, log_verbosity verbose);
+5,x
+y,z
+\.
+SELECT * FROM copy_onerr ORDER BY c;
+COPY copy_onerr (a, b) FROM stdin WITH (format 'test_format', on_error ignore, reject_limit 1); -- ERROR
+x,1
+y,2
+\.
+COPY copy_onerr (a, b) FROM stdin WITH (format 'test_format', on_error ignore); -- ERROR: too few fields
+1
+\.
+
+-- The DEFAULT marker.  The dropped column makes the format fill arrays of its
+-- own, which core moves into the row.
+CREATE TABLE copy_dflt (a int DEFAULT 42, x int, b text);
+ALTER TABLE copy_dflt DROP COLUMN x;
+COPY copy_dflt (b, a) FROM stdin WITH (format 'test_format', default '\D');
+foo,\D
+bar,7
+null,null
+\.
+SELECT * FROM copy_dflt;
+COPY copy_dflt (b) FROM stdin WITH (format 'test_format', default '\D'); -- ERROR: no default
+\D
+\.
+
+-- A default value is not evaluated for a row that is dropped either.
+CREATE TABLE copy_dflt_seq (id serial, v int);
+COPY copy_dflt_seq FROM stdin WITH (format 'test_format', default '\D', on_error ignore);
+\D,1
+\D,x
+\D,3
+\.
+SELECT * FROM copy_dflt_seq;
+
+-- test_datum_format builds the Datums of the text-like columns by itself, and
+-- core applies their typmod and domain constraints, which ON_ERROR covers too.
+CREATE DOMAIN short_text AS text CHECK (length(VALUE) < 4);
+CREATE DOMAIN nn_text AS text NOT NULL CHECK (length(VALUE) < 4);
+CREATE TABLE copy_datum (a varchar(3), b char(3), c short_text, d nn_text, n int);
+COPY copy_datum FROM stdin WITH (format 'test_datum_format');
+abc,ab,abc,x,1
+\.
+SELECT a, b, octet_length(b) AS b_len, c, d, n FROM copy_datum;
+COPY copy_datum FROM stdin WITH (format 'test_datum_format'); -- ERROR: too long
+abcd,a,a,a,2
+\.
+COPY copy_datum FROM stdin WITH (format 'test_datum_format'); -- ERROR: domain check
+a,a,abcd,a,3
+\.
+COPY copy_datum FROM stdin WITH (format 'test_datum_format'); -- ERROR: domain not null
+a,a,a,null,4
+\.
+COPY copy_datum FROM stdin WITH (format 'test_datum_format', on_error ignore, log_verbosity verbose);
+abcd,a,a,a,5
+a,a,abcd,a,6
+a,a,a,null,7
+ok,ok,ok,ok,8
+\.
+COPY copy_datum FROM stdin WITH (format 'test_datum_format', on_error set_null, log_verbosity verbose);
+abcd,a,abcd,a,9
+\.
+COPY copy_datum FROM stdin WITH (format 'test_datum_format', on_error set_null); -- ERROR: d can't be null
+abcd,a,a,abcd,10
+\.
+SELECT a, b, c, d, n FROM copy_datum ORDER BY n;
+
+-- The format's data ends at a line "END".  Core complains about data that
+-- follows, beyond what the format has read ahead into its 64-byte buffer.
+COPY copy_data_in FROM stdin WITH (format 'test_format');
+7,8,9
+END
+\.
+COPY copy_data_in FROM stdin WITH (format 'test_format'); -- ERROR
+10,11,12
+END
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+\.
+SELECT * FROM copy_data_in WHERE a IN (7, 10);
