@@ -1478,7 +1478,20 @@ ecpg_build_params(struct statement *stmt)
 		}
 		else if (stmt->statement_type == ECPGst_exec_with_exprlist)
 		{
-			if (binary_format)
+			int			ph_len;
+			int			inserted_len;
+
+			if (tobeinserted == NULL)
+			{
+				/* A NULL value; insert the keyword NULL. */
+				tobeinserted = ecpg_strdup("NULL", stmt->lineno, NULL);
+				if (tobeinserted == NULL)
+				{
+					ecpg_free_params(stmt, false);
+					return false;
+				}
+			}
+			else if (binary_format)
 			{
 				char	   *p = convert_bytea_to_string(tobeinserted,
 														binary_length,
@@ -1492,13 +1505,68 @@ ecpg_build_params(struct statement *stmt)
 				}
 				tobeinserted = p;
 			}
+			else
+			{
+				/*
+				 * Write the value as a quoted literal, so that quotes or
+				 * other SQL in it are read as part of the value.
+				 * PQescapeLiteral() takes the connection's client encoding
+				 * and standard_conforming_strings into account.  Its result
+				 * is allocated by libpq, so copy it into memory that
+				 * insert_tobeinserted() can free.
+				 */
+				char	   *escaped;
 
-			if (!insert_tobeinserted(position, 2, stmt, tobeinserted))
+				escaped = PQescapeLiteral(stmt->connection->connection,
+										  tobeinserted, strlen(tobeinserted));
+				ecpg_free(tobeinserted);
+				if (escaped == NULL)
+				{
+					/*
+					 * This fails, for example, on a string that is not valid
+					 * in the client encoding.  Report libpq's message.
+					 */
+					ecpg_raise_backend(stmt->lineno, NULL,
+									   stmt->connection->connection,
+									   stmt->compat);
+					ecpg_free_params(stmt, false);
+					return false;
+				}
+				tobeinserted = ecpg_strdup(escaped, stmt->lineno, NULL);
+				PQfreemem(escaped);
+				if (tobeinserted == NULL)
+				{
+					ecpg_free_params(stmt, false);
+					return false;
+				}
+			}
+
+			/*
+			 * Replace the whole placeholder: "?", or "$" followed by all of
+			 * its digits ($10 and up have more than one).
+			 */
+			ph_len = 1;
+			if (stmt->command[position - 1] == '$')
+			{
+				while (isdigit((unsigned char) stmt->command[position - 1 + ph_len]))
+					ph_len++;
+			}
+
+			inserted_len = (int) strlen(tobeinserted);
+			if (!insert_tobeinserted(position, ph_len, stmt, tobeinserted))
 			{
 				ecpg_free_params(stmt, false);
 				return false;
 			}
 			tobeinserted = NULL;
+
+			/*
+			 * Continue the search for the next placeholder after the inserted
+			 * value.  The value can contain quotes, for example a bytea
+			 * literal, and scanning those again would make next_insert() miss
+			 * the next placeholder.
+			 */
+			position += inserted_len - 1;
 		}
 		else
 		{
