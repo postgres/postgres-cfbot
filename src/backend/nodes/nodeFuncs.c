@@ -4733,6 +4733,32 @@ raw_expression_tree_walker_impl(Node *node,
 }
 
 /*
+ * planstate_walk_child --- invoke walker callback on a child planstate node
+ *
+ * The plan state tree is not necessarily a tree: a shared subplan can make
+ * the same node reachable through multiple paths.  To ensure that each node
+ * is visited only once, we track visited nodes by their plan_node_id in a
+ * Bitmapset, which by convention must be the first member of the context
+ * passed to the walker callback.
+ */
+pg_attribute_no_sanitize_function()
+static bool
+planstate_walk_child(PlanState *planstate,
+					 planstate_tree_walker_callback walker,
+					 void *context)
+{
+	Bitmapset **visited = (Bitmapset **) context;
+
+	if (planstate == NULL)
+		return false;
+	if (bms_is_member(planstate->plan->plan_node_id, *visited))
+		return false;
+
+	*visited = bms_add_member(*visited, planstate->plan->plan_node_id);
+	return walker(planstate, context);
+}
+
+/*
  * planstate_tree_walker --- walk plan state trees
  *
  * The walker has already visited the current node, and so we need only
@@ -4748,7 +4774,7 @@ planstate_tree_walker_impl(PlanState *planstate,
 	ListCell   *lc;
 
 	/* We don't need implicit coercions to Node here */
-#define PSWALK(n) walker(n, context)
+#define PSWALK(n) planstate_walk_child(n, walker, context)
 
 	/* Guard against stack overflow due to overly complex plan trees */
 	check_stack_depth();

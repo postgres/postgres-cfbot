@@ -121,7 +121,7 @@
 #include "nodes/nodeFuncs.h"
 
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
-static bool ExecShutdownNode_walker(PlanState *node, void *context);
+static bool ExecShutdownNode_walker(PlanState *node, Bitmapset **visited);
 
 
 /* ------------------------------------------------------------------------
@@ -752,11 +752,13 @@ ExecEndNode(PlanState *node)
 void
 ExecShutdownNode(PlanState *node)
 {
-	(void) ExecShutdownNode_walker(node, NULL);
+	Bitmapset *visited = NULL;
+
+	(void) ExecShutdownNode_walker(node, &visited);
 }
 
 static bool
-ExecShutdownNode_walker(PlanState *node, void *context)
+ExecShutdownNode_walker(PlanState *node, Bitmapset **visited)
 {
 	if (node == NULL)
 		return false;
@@ -776,7 +778,7 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	if (node->instrument && node->instrument->running)
 		InstrStartNode(node->instrument);
 
-	planstate_tree_walker(node, ExecShutdownNode_walker, context);
+	planstate_tree_walker(node, ExecShutdownNode_walker, visited);
 
 	switch (nodeTag(node))
 	{

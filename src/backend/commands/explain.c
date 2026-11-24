@@ -74,7 +74,15 @@ static void ExplainPrintSerialize(ExplainState *es,
 static void report_triggers(ResultRelInfo *rInfo, bool show_relname,
 							ExplainState *es);
 static double elapsed_time(instr_time *starttime);
-static bool ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used);
+
+typedef struct ExplainPreScanContext
+{
+	Bitmapset  *visited;
+	Bitmapset  *rels_used;
+} ExplainPreScanContext;
+
+static bool ExplainPreScanNode(PlanState *planstate,
+							   ExplainPreScanContext *context);
 static void ExplainNode(PlanState *planstate, List *ancestors,
 						const char *relationship, const char *plan_name,
 						ExplainState *es);
@@ -768,7 +776,7 @@ ExplainPrintSettings(ExplainState *es)
 void
 ExplainPrintPlan(ExplainState *es, QueryDesc *queryDesc)
 {
-	Bitmapset  *rels_used = NULL;
+	ExplainPreScanContext context = {NULL, NULL};
 	PlanState  *ps;
 	ListCell   *lc;
 
@@ -776,8 +784,8 @@ ExplainPrintPlan(ExplainState *es, QueryDesc *queryDesc)
 	Assert(queryDesc->plannedstmt != NULL);
 	es->pstmt = queryDesc->plannedstmt;
 	es->rtable = queryDesc->plannedstmt->rtable;
-	ExplainPreScanNode(queryDesc->planstate, &rels_used);
-	es->rtable_names = select_rtable_names_for_explain(es->rtable, rels_used);
+	ExplainPreScanNode(queryDesc->planstate, &context);
+	es->rtable_names = select_rtable_names_for_explain(es->rtable, context.rels_used);
 	es->deparse_cxt = deparse_context_for_plan_tree(queryDesc->plannedstmt,
 													es->rtable_names);
 	es->printed_subplans = NULL;
@@ -1189,9 +1197,10 @@ elapsed_time(instr_time *starttime)
  * that never appear in the EXPLAIN output (such as inheritance parents).
  */
 static bool
-ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used)
+ExplainPreScanNode(PlanState *planstate, ExplainPreScanContext *context)
 {
 	Plan	   *plan = planstate->plan;
+	Bitmapset **rels_used = &context->rels_used;
 
 	switch (nodeTag(plan))
 	{
@@ -1247,7 +1256,7 @@ ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used)
 			break;
 	}
 
-	return planstate_tree_walker(planstate, ExplainPreScanNode, rels_used);
+	return planstate_tree_walker(planstate, ExplainPreScanNode, context);
 }
 
 /*
