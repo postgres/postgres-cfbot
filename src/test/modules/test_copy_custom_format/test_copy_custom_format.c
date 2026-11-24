@@ -16,10 +16,17 @@
 #include "commands/copy.h"
 #include "commands/copyapi.h"
 #include "commands/copy_state.h"
+#include "commands/defrem.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 
 PG_MODULE_MAGIC;
+
+typedef struct TestCopyOptions
+{
+	int			max_attributes;
+	bool		disallow_freeze;
+} TestCopyOptions;
 
 /* State of COPY FROM in test_format, which reads lines of the input */
 typedef struct TestCopyFromState
@@ -32,12 +39,85 @@ typedef struct TestCopyFromState
 	bool	   *build_datum;	/* build the Datum of each column by itself? */
 } TestCopyFromState;
 
+static bool
+TestCopyProcessOneOption(CopyFormatOptions *opts, bool is_from, DefElem *option)
+{
+	TestCopyOptions *t = (TestCopyOptions *) opts->format_private_opts;
+
+	if (t == NULL)
+	{
+		t = palloc0_object(TestCopyOptions);
+		opts->format_private_opts = (void *) t;
+	}
+
+	if (strcmp(option->defname, "max_attributes") == 0)
+	{
+		int			val = defGetInt32(option);
+
+		if (val < 1)
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("\"max_attributes\" must be a positive integer"));
+
+		t->max_attributes = val;
+		return true;
+	}
+	else if (strcmp(option->defname, "disallow_freeze") == 0)
+	{
+		t->disallow_freeze = defGetBoolean(option);
+		return true;
+	}
+
+	return false;
+}
+
+static void
+TestCopyValidateOptions(CopyFormatOptions *opts, bool is_from)
+{
+	TestCopyOptions *t = (TestCopyOptions *) opts->format_private_opts;
+	const char *unsupported = NULL;
+
+	/* Reject the core options this format doesn't implement */
+	if (opts->delim)
+		unsupported = "DELIMITER";
+	else if (opts->quote)
+		unsupported = "QUOTE";
+	else if (opts->file_encoding >= 0)
+		unsupported = "ENCODING";
+	if (unsupported)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("cannot specify %s in the \"%s\" format",
+					   unsupported, opts->custom_format_entry->name));
+
+	if (!t)
+		return;
+
+	if (t->disallow_freeze && opts->freeze)
+		ereport(ERROR,
+				errmsg("FREEZE cannot be used with \"disallow_freeze\" option"));
+}
+
+static void
+check_max_attributes(CopyFormatOptions *opts, TupleDesc tupDesc)
+{
+	TestCopyOptions *t = (TestCopyOptions *) opts->format_private_opts;
+
+	if (t != NULL && t->max_attributes > 0 && tupDesc->natts > t->max_attributes)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("relation has %d columns, exceeds max_attributes %d",
+					   tupDesc->natts, t->max_attributes));
+}
+
 static void
 TestCopyFromStartCommon(CopyFromState cstate, TupleDesc tupDesc,
 						bool build_datums)
 {
 	TestCopyFromState *tstate;
 	MemoryContext oldcxt;
+
+	check_max_attributes(&cstate->opts, tupDesc);
 
 	ereport(NOTICE,
 			errmsg("CopyFromStart: the number of attributes of table: %d, the number of attributes to input: %d",
@@ -209,6 +289,8 @@ TestCopyFromEnd(CopyFromState cstate)
 static void
 TestCopyToStart(CopyToState cstate, TupleDesc tupDesc)
 {
+	check_max_attributes(&cstate->opts, tupDesc);
+
 	ereport(NOTICE,
 			errmsg("CopyToStart: the number of attributes of table: %d, the number of attributes to output: %d",
 				   tupDesc->natts, list_length(cstate->attnumlist)));
@@ -284,6 +366,8 @@ static const CopyCustomFormatEntry TestCopyFormat = {
 	.name = "test_format",
 	.to_routine = &TestCopyToRoutine,
 	.from_routine = &TestCopyFromRoutine,
+	.option_fn = TestCopyProcessOneOption,
+	.validate_fn = TestCopyValidateOptions,
 };
 
 /*
@@ -293,6 +377,8 @@ static const CopyCustomFormatEntry TestCopyFormat = {
 static const CopyCustomFormatEntry TestCopyDatumFormat = {
 	.name = "test_datum_format",
 	.from_routine = &TestCopyDatumFromRoutine,
+	.option_fn = TestCopyProcessOneOption,
+	.validate_fn = TestCopyValidateOptions,
 };
 
 /*
@@ -304,6 +390,8 @@ static const CopyCustomFormatEntry TestCopyBinaryFormat = {
 	.binary = true,
 	.to_routine = &TestCopyToRoutine,
 	.from_routine = &TestCopyBinaryFromRoutine,
+	.option_fn = TestCopyProcessOneOption,
+	.validate_fn = TestCopyValidateOptions,
 };
 
 void

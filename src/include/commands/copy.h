@@ -60,6 +60,7 @@ typedef enum CopyFormat
 	COPY_FORMAT_JSON,
 	COPY_FORMAT_CUSTOM,			/* format provided by an extension */
 } CopyFormat;
+#define CopyFormatIsBuiltin(format) ((format) != COPY_FORMAT_CUSTOM)
 
 /*
  * Full definitions live in commands/copyapi.h, which includes this header;
@@ -107,6 +108,9 @@ typedef struct CopyFormatOptions
 
 	/* Registered entry of the custom format; NULL for built-in formats */
 	const struct CopyCustomFormatEntry *custom_format_entry;
+
+	/* Custom format private option data */
+	void	   *format_private_opts;
 } CopyFormatOptions;
 
 /* These are defined in copy_state.h */

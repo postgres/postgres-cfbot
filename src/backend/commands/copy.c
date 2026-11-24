@@ -595,6 +595,12 @@ ProcessCopyOptions(ParseState *pstate,
 	bool		force_array_specified = false;
 	ListCell   *option;
 
+	/*
+	 * Options not recognized by core are collected here and, once the format
+	 * is known, either handed to a custom format's option parser or rejected.
+	 */
+	List	   *deferred_options = NIL;
+
 	/* Support external use for option sanity checking */
 	if (opts_out == NULL)
 		opts_out = palloc0_object(CopyFormatOptions);
@@ -780,11 +786,54 @@ ProcessCopyOptions(ParseState *pstate,
 			opts_out->reject_limit = defGetCopyRejectLimitOption(defel);
 		}
 		else
+		{
+			/*
+			 * Not a core option.  Defer the check to after the loop as it may
+			 * belong to a custom format whose "format" option has not been
+			 * seen yet.
+			 */
+			deferred_options = lappend(deferred_options, defel);
+		}
+	}
+
+	/*
+	 * Now that the format and every option have been seen, resolve the
+	 * deferred options.
+	 */
+	if (deferred_options != NIL)
+	{
+		/*
+		 * For a custom format, they belong to the handler; for any built-in
+		 * (including the default) an unrecognized option is an error,
+		 * preserving the historical behavior relied on by external callers
+		 * such as file_fdw.
+		 */
+		if (opts_out->format != COPY_FORMAT_CUSTOM || opts_out->custom_format_entry->option_fn == NULL)
+		{
+			DefElem    *defel = linitial_node(DefElem, deferred_options);
+
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("option \"%s\" not recognized",
 							defel->defname),
 					 parser_errposition(pstate, defel->location)));
+		}
+
+		/*
+		 * Hand each option core did not recognize to the format's per-option
+		 * callback. Anything the format does not claim (or any option at all
+		 * if it has no callback) is an error, so an unrecognized option
+		 * always fails here.
+		 */
+		foreach_node(DefElem, opt, deferred_options)
+		{
+			if (!opts_out->custom_format_entry->option_fn(opts_out, is_from, opt))
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("COPY format \"%s\" does not accept option \"%s\"",
+								opts_out->custom_format_entry->name, opt->defname),
+						 parser_errposition(pstate, opt->location)));
+		}
 	}
 
 	/*
@@ -818,47 +867,68 @@ ProcessCopyOptions(ParseState *pstate,
 				? errmsg("cannot specify %s in BINARY mode", "DEFAULT")
 				: errmsg("cannot specify %s in JSON mode", "DEFAULT"));
 
-	/* Set defaults for omitted options */
-	if (!opts_out->delim)
-		opts_out->delim = (opts_out->format == COPY_FORMAT_CSV) ? "," : "\t";
-
-	if (!opts_out->null_print)
-		opts_out->null_print = (opts_out->format == COPY_FORMAT_CSV) ? "" : "\\N";
-	opts_out->null_print_len = strlen(opts_out->null_print);
-
-	if (opts_out->format == COPY_FORMAT_CSV)
+	/*
+	 * Set defaults for omitted options, and run the checks that depend on
+	 * them.
+	 *
+	 * This is done only for the built-in formats.  A custom format that
+	 * implements DELIMITER or NULL gives them its own meaning, so inventing
+	 * text-format defaults for it would both be meaningless and prevent its
+	 * ValidateCopyOptionsFn callback from telling an explicitly given option
+	 * apart from a default one.  A custom format that wants a NULL marker
+	 * supplies its own default from that callback.
+	 */
+	if (CopyFormatIsBuiltin(opts_out->format))
 	{
-		if (!opts_out->quote)
-			opts_out->quote = "\"";
-		if (!opts_out->escape)
-			opts_out->escape = opts_out->quote;
+		if (!opts_out->delim)
+			opts_out->delim = (opts_out->format == COPY_FORMAT_CSV) ? "," : "\t";
+
+		if (!opts_out->null_print)
+			opts_out->null_print = (opts_out->format == COPY_FORMAT_CSV) ? "" : "\\N";
+
+		if (opts_out->format == COPY_FORMAT_CSV)
+		{
+			if (!opts_out->quote)
+				opts_out->quote = "\"";
+			if (!opts_out->escape)
+				opts_out->escape = opts_out->quote;
+		}
+
+		/* Only single-byte delimiter strings are supported. */
+		if (strlen(opts_out->delim) != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("COPY delimiter must be a single one-byte character")));
+
+		/* Disallow end-of-line characters */
+		if (strchr(opts_out->delim, '\r') != NULL ||
+			strchr(opts_out->delim, '\n') != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("COPY delimiter cannot be newline or carriage return")));
+
+		if (strchr(opts_out->null_print, '\r') != NULL ||
+			strchr(opts_out->null_print, '\n') != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("COPY null representation cannot use newline or carriage return")));
 	}
 
-	/* Only single-byte delimiter strings are supported. */
-	if (strlen(opts_out->delim) != 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("COPY delimiter must be a single one-byte character")));
-
-	/* Disallow end-of-line characters */
-	if (strchr(opts_out->delim, '\r') != NULL ||
-		strchr(opts_out->delim, '\n') != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("COPY delimiter cannot be newline or carriage return")));
-
-	if (strchr(opts_out->null_print, '\r') != NULL ||
-		strchr(opts_out->null_print, '\n') != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("COPY null representation cannot use newline or carriage return")));
+	/*
+	 * The length goes with the marker itself, not with the defaulting above:
+	 * a custom format that was given NULL must find null_print_len set too,
+	 * or a comparison against it silently fails to match.
+	 */
+	if (opts_out->null_print)
+		opts_out->null_print_len = strlen(opts_out->null_print);
 
 	if (opts_out->default_print)
 	{
 		opts_out->default_print_len = strlen(opts_out->default_print);
 
-		if (strchr(opts_out->default_print, '\r') != NULL ||
-			strchr(opts_out->default_print, '\n') != NULL)
+		if (CopyFormatIsBuiltin(opts_out->format) &&
+			(strchr(opts_out->default_print, '\r') != NULL ||
+			 strchr(opts_out->default_print, '\n') != NULL))
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("COPY default representation cannot use newline or carriage return")));
@@ -874,7 +944,7 @@ ProcessCopyOptions(ParseState *pstate,
 	 * future-proofing.  Likewise we disallow all digits though only octal
 	 * digits are actually dangerous.
 	 */
-	if (opts_out->format != COPY_FORMAT_CSV &&
+	if (CopyFormatIsBuiltin(opts_out->format) && opts_out->format != COPY_FORMAT_CSV &&
 		strchr("\\.abcdefghijklmnopqrstuvwxyz0123456789",
 			   opts_out->delim[0]) != NULL)
 		ereport(ERROR,
@@ -893,7 +963,8 @@ ProcessCopyOptions(ParseState *pstate,
 				: errmsg("cannot specify %s in JSON mode", "HEADER"));
 
 	/* Check quote */
-	if (opts_out->format != COPY_FORMAT_CSV && opts_out->quote != NULL)
+	if (CopyFormatIsBuiltin(opts_out->format) && opts_out->format != COPY_FORMAT_CSV &&
+		opts_out->quote != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
@@ -910,7 +981,8 @@ ProcessCopyOptions(ParseState *pstate,
 				 errmsg("COPY delimiter and quote must be different")));
 
 	/* Check escape */
-	if (opts_out->format != COPY_FORMAT_CSV && opts_out->escape != NULL)
+	if (CopyFormatIsBuiltin(opts_out->format) && opts_out->format != COPY_FORMAT_CSV &&
+		opts_out->escape != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
@@ -922,7 +994,8 @@ ProcessCopyOptions(ParseState *pstate,
 				 errmsg("COPY escape must be a single one-byte character")));
 
 	/* Check force_quote */
-	if (opts_out->format != COPY_FORMAT_CSV && (opts_out->force_quote || opts_out->force_quote_all))
+	if (CopyFormatIsBuiltin(opts_out->format) && opts_out->format != COPY_FORMAT_CSV &&
+		(opts_out->force_quote || opts_out->force_quote_all))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
@@ -936,8 +1009,8 @@ ProcessCopyOptions(ParseState *pstate,
 						"COPY FROM")));
 
 	/* Check force_notnull */
-	if (opts_out->format != COPY_FORMAT_CSV && (opts_out->force_notnull != NIL ||
-												opts_out->force_notnull_all))
+	if (CopyFormatIsBuiltin(opts_out->format) && opts_out->format != COPY_FORMAT_CSV &&
+		(opts_out->force_notnull != NIL || opts_out->force_notnull_all))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
@@ -952,8 +1025,8 @@ ProcessCopyOptions(ParseState *pstate,
 						"COPY TO")));
 
 	/* Check force_null */
-	if (opts_out->format != COPY_FORMAT_CSV && (opts_out->force_null != NIL ||
-												opts_out->force_null_all))
+	if (CopyFormatIsBuiltin(opts_out->format) && opts_out->format != COPY_FORMAT_CSV &&
+		(opts_out->force_null != NIL || opts_out->force_null_all))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
@@ -969,7 +1042,8 @@ ProcessCopyOptions(ParseState *pstate,
 						"COPY TO")));
 
 	/* Don't allow the delimiter to appear in the null string. */
-	if (strchr(opts_out->null_print, opts_out->delim[0]) != NULL)
+	if (CopyFormatIsBuiltin(opts_out->format) &&
+		strchr(opts_out->null_print, opts_out->delim[0]) != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 		/*- translator: %s is the name of a COPY option, e.g. NULL */
@@ -1000,7 +1074,8 @@ ProcessCopyOptions(ParseState *pstate,
 				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				errmsg("COPY %s is not supported for %s", "FORMAT JSON", "COPY FROM"));
 
-	if (opts_out->format != COPY_FORMAT_JSON && opts_out->force_array)
+	if (CopyFormatIsBuiltin(opts_out->format) && opts_out->format != COPY_FORMAT_JSON &&
+		opts_out->force_array)
 		ereport(ERROR,
 				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				errmsg("COPY %s can only be used with JSON mode", "FORCE_ARRAY"));
@@ -1016,7 +1091,8 @@ ProcessCopyOptions(ParseState *pstate,
 							"COPY TO")));
 
 		/* Don't allow the delimiter to appear in the default string. */
-		if (strchr(opts_out->default_print, opts_out->delim[0]) != NULL)
+		if (CopyFormatIsBuiltin(opts_out->format) &&
+			strchr(opts_out->default_print, opts_out->delim[0]) != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			/*- translator: %s is the name of a COPY option, e.g. NULL */
@@ -1033,7 +1109,8 @@ ProcessCopyOptions(ParseState *pstate,
 							"DEFAULT")));
 
 		/* Don't allow the NULL and DEFAULT string to be the same */
-		if (opts_out->null_print_len == opts_out->default_print_len &&
+		if (CopyFormatIsBuiltin(opts_out->format) &&
+			opts_out->null_print_len == opts_out->default_print_len &&
 			strncmp(opts_out->null_print, opts_out->default_print,
 					opts_out->null_print_len) == 0)
 			ereport(ERROR,
@@ -1068,6 +1145,15 @@ ProcessCopyOptions(ParseState *pstate,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("COPY format \"%s\" cannot be used with COPY TO",
 							opts_out->custom_format_entry->name)));
+
+		/*
+		 * Let the format validate its fully-parsed options as a whole.  This
+		 * runs even when no format-specific options were given, so a format
+		 * can reject incompatible core options or enforce cross-option
+		 * constraints.
+		 */
+		if (opts_out->custom_format_entry->validate_fn != NULL)
+			opts_out->custom_format_entry->validate_fn(opts_out, is_from);
 	}
 }
 

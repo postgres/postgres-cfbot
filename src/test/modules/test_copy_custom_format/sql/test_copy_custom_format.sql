@@ -24,6 +24,28 @@ SELECT * FROM copy_data_in;
 COPY copy_data TO stdout WITH (format 'nonexistent');          -- ERROR: not recognized
 COPY copy_data TO stdout WITH (format 'text', format 'csv');   -- ERROR: conflicting
 
+COPY copy_data TO stdout WITH (format 'test_format', bogus 1); -- ERROR
+
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 5); -- OK
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 3); -- OK
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 2); -- ERROR: 3 columns exceeds 2
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 0);   -- ERROR: positive
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes -1);  -- ERROR
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 'x'); -- ERROR: integer required
+
+COPY copy_data FROM stdin WITH (format 'test_format', freeze true, disallow_freeze true); -- ERROR (validate)
+\.
+COPY copy_data FROM stdin WITH (format 'test_format', disallow_freeze true); -- OK
+\.
+
+-- Core leaves it to the format to check the DEFAULT marker.
+COPY copy_data FROM stdin WITH (format 'test_format', default E'\n'); -- OK
+\.
+
+-- The format rejects the core options it doesn't implement.
+COPY copy_data TO stdout WITH (format 'test_format', delimiter ',');     -- ERROR
+COPY copy_data TO stdout WITH (format 'test_format', quote '"');         -- ERROR
+COPY copy_data TO stdout WITH (format 'test_format', encoding 'latin1'); -- ERROR
 COPY copy_data TO stdout WITH (format 'test_format', freeze true);     -- ERROR: FREEZE with COPY TO
 COPY copy_data TO stdout WITH (format 'test_datum_format');           -- ERROR: no COPY TO
 

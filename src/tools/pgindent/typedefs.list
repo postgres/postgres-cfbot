@@ -3169,6 +3169,7 @@ Tcl_Size
 Tcl_Time
 TempNamespaceStatus
 TestCopyFromState
+TestCopyOptions
 TestCustomScanState
 TestDSMRegistryHashEntry
 TestDSMRegistryStruct

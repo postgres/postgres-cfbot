@@ -77,6 +77,56 @@ COPY copy_data TO stdout WITH (format 'text', format 'csv');   -- ERROR: conflic
 ERROR:  conflicting or redundant options
 LINE 1: COPY copy_data TO stdout WITH (format 'text', format 'csv');
                                                       ^
+COPY copy_data TO stdout WITH (format 'test_format', bogus 1); -- ERROR
+ERROR:  COPY format "test_format" does not accept option "bogus"
+LINE 1: ...PY copy_data TO stdout WITH (format 'test_format', bogus 1);
+                                                              ^
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 5); -- OK
+NOTICE:  CopyToStart: the number of attributes of table: 3, the number of attributes to output: 3
+NOTICE:  CopyToOneRow: the number of valid values: 3
+1,2,3
+NOTICE:  CopyToOneRow: the number of valid values: 3
+12,34,56
+NOTICE:  CopyToOneRow: the number of valid values: 3
+123,456,789
+NOTICE:  CopyToOneRow: the number of valid values: 3
+null,null,null
+NOTICE:  CopyToEnd
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 3); -- OK
+NOTICE:  CopyToStart: the number of attributes of table: 3, the number of attributes to output: 3
+NOTICE:  CopyToOneRow: the number of valid values: 3
+1,2,3
+NOTICE:  CopyToOneRow: the number of valid values: 3
+12,34,56
+NOTICE:  CopyToOneRow: the number of valid values: 3
+123,456,789
+NOTICE:  CopyToOneRow: the number of valid values: 3
+null,null,null
+NOTICE:  CopyToEnd
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 2); -- ERROR: 3 columns exceeds 2
+ERROR:  relation has 3 columns, exceeds max_attributes 2
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 0);   -- ERROR: positive
+ERROR:  "max_attributes" must be a positive integer
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes -1);  -- ERROR
+ERROR:  "max_attributes" must be a positive integer
+COPY copy_data TO stdout WITH (format 'test_format', max_attributes 'x'); -- ERROR: integer required
+ERROR:  max_attributes requires an integer value
+COPY copy_data FROM stdin WITH (format 'test_format', freeze true, disallow_freeze true); -- ERROR (validate)
+ERROR:  FREEZE cannot be used with "disallow_freeze" option
+COPY copy_data FROM stdin WITH (format 'test_format', disallow_freeze true); -- OK
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 3
+NOTICE:  CopyFromEnd
+-- Core leaves it to the format to check the DEFAULT marker.
+COPY copy_data FROM stdin WITH (format 'test_format', default E'\n'); -- OK
+NOTICE:  CopyFromStart: the number of attributes of table: 3, the number of attributes to input: 3
+NOTICE:  CopyFromEnd
+-- The format rejects the core options it doesn't implement.
+COPY copy_data TO stdout WITH (format 'test_format', delimiter ',');     -- ERROR
+ERROR:  cannot specify DELIMITER in the "test_format" format
+COPY copy_data TO stdout WITH (format 'test_format', quote '"');         -- ERROR
+ERROR:  cannot specify QUOTE in the "test_format" format
+COPY copy_data TO stdout WITH (format 'test_format', encoding 'latin1'); -- ERROR
+ERROR:  cannot specify ENCODING in the "test_format" format
 COPY copy_data TO stdout WITH (format 'test_format', freeze true);     -- ERROR: FREEZE with COPY TO
 ERROR:  COPY FREEZE cannot be used with COPY TO
 COPY copy_data TO stdout WITH (format 'test_datum_format');           -- ERROR: no COPY TO

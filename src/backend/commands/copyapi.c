@@ -39,7 +39,8 @@ is_builtin_copy_format(const char *name)
 /*
  * Register a custom COPY format. Intended to be called from an extension's
  * _PG_init(). Either routine in 'entry' may be NULL if the format does not
- * support that direction (but not both).
+ * support that direction (but not both).  The callbacks 'option_fn' and
+ * 'validate_fn' may also be NULL.
  *
  * The entry is copied, but 'entry->name' is stored by reference, so it must
  * be a constant string or allocated in storage that will never be freed.

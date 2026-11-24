@@ -137,6 +137,42 @@ typedef struct CopyFromRoutine
 } CopyFromRoutine;
 
 /*
+ * Optional callback to process one format-specific COPY option. Invoked
+ * from ProcessCopyOptions() once per option that core did not recognize, after
+ * every core option has been parsed (so 'opts' is fully populated).
+ *
+ * Returns true if the option belongs to the format and is valid. Returns false
+ * if the option is not one the format recognizes, in which case core raises the
+ * "not accepted" error; thus an unrecognized option always errors, whether or
+ * not the format supplies this callback. For a recognized option with an invalid
+ * value, the callback should ereport() itself.
+ */
+typedef bool (*ProcessOneCopyOptionFn) (CopyFormatOptions *opts, bool is_from,
+										DefElem *option);
+
+/*
+ * Optional callback to validate a custom format's fully-parsed options as a
+ * whole. Invoked once from ProcessCopyOptions() after all options have been
+ * processed, so it can enforce cross-option constraints and reject
+ * incompatible core options. It runs even when no format-specific options were
+ * supplied. Reports problems with ereport().
+ *
+ * Core parses its own options for a custom format too, but doesn't apply the
+ * defaults and checks specific to the built-in formats, so an option that the
+ * user didn't specify is left unset (e.g., opts->delim is NULL and
+ * opts->file_encoding is -1).  A format must reject here the core options it
+ * doesn't implement, such as DELIMITER or ENCODING, since they would otherwise
+ * be silently ignored.
+ *
+ * ON_ERROR, together with LOG_VERBOSITY and REJECT_LIMIT, is implemented
+ * entirely by core, for the fields that core converts for the format.  As
+ * with the built-in formats, it doesn't apply to an error the format itself
+ * detects, such as a malformed record.  A format that builds every Datum by
+ * itself should reject ON_ERROR here, since it would have no effect.
+ */
+typedef void (*ValidateCopyOptionsFn) (CopyFormatOptions *opts, bool is_from);
+
+/*
  * Information about a custom format, passed to RegisterCopyCustomFormat().
  */
 typedef struct CopyCustomFormatEntry
@@ -146,6 +182,8 @@ typedef struct CopyCustomFormatEntry
 	const CopyToRoutine *to_routine;	/* NULL if COPY TO is not supported */
 	const CopyFromRoutine *from_routine;	/* NULL if COPY FROM is not
 											 * supported */
+	ProcessOneCopyOptionFn option_fn;	/* optional */
+	ValidateCopyOptionsFn validate_fn;	/* optional */
 } CopyCustomFormatEntry;
 
 extern void RegisterCopyCustomFormat(const CopyCustomFormatEntry *entry);
