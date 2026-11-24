@@ -1469,7 +1469,10 @@ FROM unnest(ARRAY['$ ? (@ like_regex "pattern" flag "smixq")'::text,
                   '$ ? (@ like_regex "pattern" flag "a")',
                   '@ + 1',
                   '00',
-                  '1a']) str,
+                  '1a',
+                  '1e1000000',
+                  '$ ? (@ > -1e1000000)',
+                  '$.**{2147483648}']) str,
      LATERAL pg_input_error_info(str, 'jsonpath') as errinfo;
                  jsonpath                  | ok | sql_error_code |                                message                                |                          detail                          | hint 
 -------------------------------------------+----+----------------+-----------------------------------------------------------------------+----------------------------------------------------------+------
@@ -1478,5 +1481,8 @@ FROM unnest(ARRAY['$ ? (@ like_regex "pattern" flag "smixq")'::text,
  @ + 1                                     | f  | 42601          | @ is not allowed in root expressions                                  |                                                          | 
  00                                        | f  | 42601          | trailing junk after numeric literal at or near "00" of jsonpath input |                                                          | 
  1a                                        | f  | 42601          | trailing junk after numeric literal at or near "1a" of jsonpath input |                                                          | 
-(5 rows)
+ 1e1000000                                 | f  | 22003          | value overflows numeric format                                        |                                                          | 
+ $ ? (@ > -1e1000000)                      | f  | 22003          | value overflows numeric format                                        |                                                          | 
+ $.**{2147483648}                          | f  | 22003          | value "2147483648" is out of range for type integer                   |                                                          | 
+(8 rows)
 

@@ -535,7 +535,7 @@ addchar(bool init, char c, yyscan_t yyscanner)
 JsonPathParseResult *
 parsejsonpath(const char *str, int len, struct Node *escontext)
 {
-	JsonPathParseResult *parseresult;
+	JsonPathParseResult *parseresult = NULL;
 	yyscan_t	scanner;
 	struct jsonpath_yy_extra_type yyext;
 
