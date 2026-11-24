@@ -695,6 +695,10 @@
 /* Define to 1 to build with injection points. (--enable-injection-points) */
 #undef USE_INJECTION_POINTS
 
+/* Define to 1 to check GSSAPI principals against the KDC during credential
+   validation. (MIT Kerberos only) */
+#undef USE_KRB5_KDC_CHECK
+
 /* Define to 1 to build with LDAP support. (--with-ldap) */
 #undef USE_LDAP
 

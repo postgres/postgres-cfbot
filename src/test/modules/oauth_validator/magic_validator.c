@@ -30,6 +30,7 @@ static const OAuthValidatorCallbacks validator_callbacks = {
 	0xdeadbeef,
 
 	.validate_cb = validate_token,
+	.expire_cb = NULL,
 };
 
 const OAuthValidatorCallbacks *

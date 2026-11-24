@@ -16,6 +16,7 @@ tests += {
       't/005_sspi.pl',
       't/006_login_trigger.pl',
       't/007_pre_auth.pl',
+      't/008_continuous_validation.pl',
     ],
   },
 }

@@ -35,7 +35,7 @@ SERVERS := server-cn-and-alt-names \
 	server-no-names \
 	server-revoked
 CLIENTS := client client-dn client-revoked client_ext client-long \
-	client-revoked-utf8
+	client-midsession client-revoked-utf8
 
 #
 # To add a new non-standard certificate, add it to SPECIAL_CERTS and then add
@@ -62,6 +62,7 @@ COMBINATIONS := \
 	ssl/root+server.crl \
 	ssl/root+client_ca.crt \
 	ssl/root+client.crl \
+	ssl/root+client-midsession.crl \
 	ssl/client+client_ca.crt \
 	ssl/server-cn-only+server_ca.crt
 
@@ -70,6 +71,7 @@ STANDARD_CERTS := $(CERTIFICATES:%=ssl/%.crt)
 STANDARD_KEYS := $(CERTIFICATES:%=ssl/%.key)
 CRLS := ssl/root.crl \
 	ssl/client.crl \
+	ssl/client-midsession.crl \
 	ssl/server.crl
 
 SSLFILES := \
@@ -159,6 +161,7 @@ ssl/server-cn-only+server_ca.crt: ssl/server-cn-only.crt ssl/server_ca.crt
 # chain, even if some of them are empty.
 ssl/root+server.crl: ssl/root.crl ssl/server.crl
 ssl/root+client.crl: ssl/root.crl ssl/client.crl
+ssl/root+client-midsession.crl: ssl/root.crl ssl/client-midsession.crl
 
 $(COMBINATIONS):
 	cat $^ > $@
@@ -242,6 +245,13 @@ ssl/server.crl: ssl/server-revoked.crt ssl/server_ca.crt | $(server_ca_state_fil
 ssl/client.crl: ssl/client-revoked.crt ssl/client-revoked-utf8.crt ssl/client_ca.crt | $(client_ca_state_files)
 	$(OPENSSL) ca -config conf/cas.config -name client_ca -revoke ssl/client-revoked.crt
 	$(OPENSSL) ca -config conf/cas.config -name client_ca -revoke ssl/client-revoked-utf8.crt
+	$(OPENSSL) ca -config conf/cas.config -name client_ca -gencrl -out $@
+
+# Revokes only client-midsession.crt (plus whatever else this run's client_ca
+# state already holds, which is harmless).  Used to revoke a certificate
+# while a session that authenticated with it is still open.
+ssl/client-midsession.crl: ssl/client-midsession.crt ssl/client_ca.crt | $(client_ca_state_files)
+	$(OPENSSL) ca -config conf/cas.config -name client_ca -revoke ssl/client-midsession.crt
 	$(OPENSSL) ca -config conf/cas.config -name client_ca -gencrl -out $@
 
 #

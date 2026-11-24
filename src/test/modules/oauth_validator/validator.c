@@ -34,7 +34,8 @@ static const OAuthValidatorCallbacks validator_callbacks = {
 
 	.startup_cb = validator_startup,
 	.shutdown_cb = validator_shutdown,
-	.validate_cb = validate_token
+	.validate_cb = validate_token,
+	.expire_cb = NULL,			/* Optional: not implemented */
 };
 
 /* GUCs */

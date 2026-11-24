@@ -35,6 +35,8 @@
 extern PGDLLIMPORT char *pg_krb_server_keyfile;
 extern PGDLLIMPORT bool pg_krb_caseins_users;
 extern PGDLLIMPORT bool pg_gss_accept_delegation;
+extern PGDLLIMPORT int credential_validation_ldap_timeout;
+extern PGDLLIMPORT int credential_validation_kdc_timeout;
 
 extern void ClientAuthentication(Port *port);
 extern void sendAuthRequest(Port *port, AuthRequest areq, const void *extradata,
@@ -50,5 +52,25 @@ typedef char *(*auth_password_hook_typ) (char *input);
 
 /* Default LDAP password mutator hook, can be overridden by a shared library */
 extern PGDLLIMPORT auth_password_hook_typ ldap_password_hook;
+
+#ifdef ENABLE_GSS
+/*
+ * Ask the KDC whether a GSSAPI session's Kerberos principal is still enabled,
+ * for continuous credential validation.  Returns false, with a description in
+ * reason, only if the KDC refuses the principal; any other outcome, including
+ * not reaching the KDC in time, counts as valid.  Always true unless built
+ * with USE_KRB5_KDC_CHECK.
+ */
+extern bool CheckKerberosPrincipalEnabled(Port *port, char *reason, size_t reasonlen);
+#endif
+
+#ifdef USE_LDAP
+/*
+ * Re-check that an LDAP-authenticated session's account is still valid in the
+ * directory.  Used by continuous credential validation.  Returns true if the
+ * session is still considered valid, false if the account is gone.
+ */
+extern bool CheckLDAPCredentialValidity(Port *port);
+#endif
 
 #endif							/* AUTH_H */

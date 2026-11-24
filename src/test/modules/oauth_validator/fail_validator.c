@@ -29,6 +29,7 @@ static const OAuthValidatorCallbacks validator_callbacks = {
 	PG_OAUTH_VALIDATOR_MAGIC,
 
 	.validate_cb = fail_token,
+	.expire_cb = NULL,
 };
 
 const OAuthValidatorCallbacks *

@@ -8,6 +8,7 @@ tests += {
     'test_kwargs': {'priority': 40}, # kerberos tests are slow, start early
     'tests': [
       't/001_auth.pl',
+      't/009_gss_continuous_validation.pl',
     ],
     'env': {
       'with_gssapi': gssapi.found() ? 'yes' : 'no',
