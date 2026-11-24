@@ -34,7 +34,7 @@ static void check_for_new_tablespace_dir(void);
 static void check_for_user_defined_encoding_conversions(ClusterInfo *cluster);
 static void check_for_unicode_update(ClusterInfo *cluster);
 static void check_new_cluster_replication_slots(void);
-static void check_new_cluster_subscription_configuration(void);
+static void check_new_cluster_replication_origins(void);
 static void check_old_cluster_for_valid_slots(void);
 static void check_old_cluster_subscription_state(void);
 static void check_old_cluster_global_names(ClusterInfo *cluster);
@@ -624,8 +624,17 @@ check_and_dump_old_cluster(void)
 		 * able to upgrade the logical replication clusters completely.
 		 */
 		get_subscription_info(&old_cluster);
-		check_old_cluster_subscription_state();
 	}
+
+	/*
+	 * Replication origins are migrated for all supported old cluster
+	 * versions, so check for subscriptions whose origin is missing or that
+	 * could leave a stale tablesync origin behind, regardless of version.
+	 */
+	check_old_cluster_subscription_state();
+
+	/* Get replication origin information */
+	get_replication_origin_info(&old_cluster);
 
 	check_for_data_types_usage(&old_cluster);
 
@@ -745,7 +754,7 @@ check_new_cluster(void)
 
 	check_new_cluster_replication_slots();
 
-	check_new_cluster_subscription_configuration();
+	check_new_cluster_replication_origins();
 }
 
 
@@ -2262,30 +2271,44 @@ check_new_cluster_replication_slots(void)
 }
 
 /*
- * check_new_cluster_subscription_configuration()
+ * check_new_cluster_replication_origins()
  *
- * Verify that the max_active_replication_origins configuration specified is
- * enough for creating the subscriptions. This is required to create the
- * replication origin for each subscription.
+ * Verify that the new cluster has no replication origins. During upgrade,
+ * pg_upgrade restores replication origins from the old cluster with their
+ * original OIDs. If the new cluster already contains origins, those OIDs
+ * may collide, causing the upgrade to fail mid-way.
+ *
+ * Also verify that the max_active_replication_origins configuration is
+ * enough for creating all the active replication origins.
  */
 static void
-check_new_cluster_subscription_configuration(void)
+check_new_cluster_replication_origins(void)
 {
-	PGresult   *res;
 	PGconn	   *conn;
+	PGresult   *res;
+	int			norigins;
 	int			max_active_replication_origins;
 
-	/* Subscriptions and their dependencies can be migrated since PG17. */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) < 1700)
+	/* Quick return if there are no replication origins to migrate. */
+	if (old_cluster.nrepl_origins == 0)
 		return;
 
-	/* Quick return if there are no subscriptions to be migrated. */
-	if (old_cluster.nsubs == 0)
-		return;
-
-	prep_status("Checking new cluster configuration for subscriptions");
+	prep_status("Checking replication origins in new cluster");
 
 	conn = connectToServer(&new_cluster, "template1");
+
+	res = executeQueryOrDie(conn,
+							"SELECT count(*) "
+							"FROM pg_catalog.pg_replication_origin");
+
+	if (PQntuples(res) != 1)
+		pg_fatal("could not count the number of replication origins");
+
+	norigins = atoi(PQgetvalue(res, 0, 0));
+	PQclear(res);
+
+	if (norigins > 0)
+		pg_fatal("expected 0 replication origins but found %d", norigins);
 
 	res = executeQueryOrDie(conn, "SELECT setting FROM pg_settings "
 							"WHERE name = 'max_active_replication_origins';");
@@ -2294,12 +2317,21 @@ check_new_cluster_subscription_configuration(void)
 		pg_fatal("could not determine parameter settings on new cluster");
 
 	max_active_replication_origins = atoi(PQgetvalue(res, 0, 0));
-	if (old_cluster.nsubs > max_active_replication_origins)
-		pg_fatal("\"max_active_replication_origins\" (%d) must be greater than or equal to the number of "
-				 "subscriptions (%d) in the old cluster",
-				 max_active_replication_origins, old_cluster.nsubs);
-
 	PQclear(res);
+
+	/*
+	 * Compare against the number of active replication origins in the old
+	 * cluster, rather than the total number of origins in
+	 * pg_replication_origin. An origin can exist without ever becoming
+	 * active, in which case it does not count against
+	 * max_active_replication_origins.
+	 */
+	if (old_cluster.nrepl_origins_active > max_active_replication_origins)
+		pg_fatal("\"max_active_replication_origins\" (%d) must be greater "
+				 "than or equal to the number of active replication origins "
+				 "(%d) in the old cluster",
+				 max_active_replication_origins, old_cluster.nrepl_origins_active);
+
 	PQfinish(conn);
 
 	check_ok();
@@ -2487,8 +2519,8 @@ check_old_cluster_subscription_state(void)
 	 *
 	 * a) SUBREL_STATE_DATASYNC: A relation upgraded while in this state would
 	 * retain a replication slot and origin. The sync worker spawned after the
-	 * upgrade cannot drop them because the subscription ID used for the slot
-	 * and origin name no longer matches.
+	 * upgrade cannot drop the slot because its name embeds the system
+	 * identifier, which differs in the new cluster.
 	 *
 	 * b) SUBREL_STATE_SYNCDONE: A relation upgraded while in this state would
 	 * retain the replication origin when there is a failure in tablesync
@@ -2496,9 +2528,14 @@ check_old_cluster_subscription_state(void)
 	 * publisher.
 	 *
 	 * c) SUBREL_STATE_FINISHEDCOPY: A tablesync worker spawned to work on a
-	 * relation upgraded while in this state would expect an origin ID with
-	 * the OID of the subscription used before the upgrade, causing it to
-	 * fail.
+	 * relation upgraded while in this state would continue using the slot
+	 * created before the upgrade, which it cannot find or drop by name for
+	 * the same reason as in a).
+	 *
+	 * Before PG17, pg_subscription_rel is not migrated at all. These states
+	 * are still rejected there because the tablesync origin would be
+	 * migrated, but nothing in the new cluster would record that it belongs
+	 * to the subscription, so it would never be dropped.
 	 *
 	 * d) SUBREL_STATE_SYNCWAIT, SUBREL_STATE_CATCHUP and
 	 * SUBREL_STATE_UNKNOWN: These states are not stored in the catalog, so we
