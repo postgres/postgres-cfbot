@@ -383,11 +383,32 @@ typedef enum IOOp
 	(((unsigned int) (io_op)) < IOOP_NUM_TYPES && \
 	 ((unsigned int) (io_op)) >= IOOP_EXTEND)
 
+/*
+ * Number of latency buckets per histogram.  This should represent a balance
+ * between being fast and providing value to the users:
+ * 1. Bucket 0 covers latencies below ~8us and following buckets double
+ *    the upper bound, so buckets 1..14 span ~8us to ~131ms, covering fast
+ *    local NVMe through slow network storage.
+ * 2. The last bucket collects everything above ~131ms, i.e. sporadic long
+ *    tail latencies (hardware issues, delayed fsyncs, stuck I/O).
+ * 3. We want to be as small as possible here in terms of size:
+ *    16 * sizeof(uint64) = 128 bytes, i.e. two cachelines per histogram.
+ */
+#define PGSTAT_IO_HIST_BUCKETS 16
+
 typedef struct PgStat_BktypeIO
 {
 	uint64		bytes[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+
+	/*
+	 * Indirect offset to PgStat_IO (parent
+	 * structure).hist_time_buckets_slots. This needs to be the last field due
+	 * to the use of memset(.., offsetof(hist_time_buckets_offsets)) in
+	 * pgstat_io_reset_all_cb().
+	 */
+	int			hist_time_buckets_offsets[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 } PgStat_BktypeIO;
 
 typedef struct PgStat_PendingIO
@@ -395,12 +416,38 @@ typedef struct PgStat_PendingIO
 	uint64		bytes[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	instr_time	pending_times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+
+	/*
+	 * Dynamically allocated array for pg_stat_io_histograms only when
+	 * track_io_timings is true. pending_hist_time_buckets_offsets is just an
+	 * offset within pending_hist_time_buckets to avoid using unnecessary
+	 * memory.
+	 */
+	uint64		(*pending_hist_time_buckets)[PGSTAT_IO_HIST_BUCKETS];
+	int			pending_hist_time_buckets_offsets[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+
+	/*
+	 * Number of histograms allocated in pending_hist_time_buckets, cached to
+	 * avoid repeatedly calling pgstat_bktype_count_potentially_used() from
+	 * pgstat_io_flush_cb().
+	 */
+	int			pending_hist_time_buckets_size;
 } PgStat_PendingIO;
 
 typedef struct PgStat_IO
 {
 	TimestampTz stat_reset_timestamp;
 	PgStat_BktypeIO stats[BACKEND_NUM_TYPES];
+
+	/*
+	 * The IO histogram memory is sized at postmaster start from the rules in
+	 * pgstat_tracks_io_*() and persisted by additional code to handle this
+	 * dynamic (shared) memory pointer in pgstat_write_statsfile() /
+	 * pgstat_read_statsfile(), so they are not part of the serialization to disk
+	 * by common code.
+	 */
+	int			hist_time_buckets_slot_count;
+	uint64		(*hist_time_buckets_slots)[PGSTAT_IO_HIST_BUCKETS];
 } PgStat_IO;
 
 typedef struct PgStat_LockEntry
@@ -598,15 +645,24 @@ typedef struct PgStat_Backend
 } PgStat_Backend;
 
 /* ---------
- * PgStat_BackendPending	Non-flushed backend stats.
+ * PgStat_BackendPending(IO)	Non-flushed backend stats.
  * ---------
  */
+typedef struct PgStat_BackendPendingIO
+{
+	uint64		bytes[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	instr_time	pending_times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+} PgStat_BackendPendingIO;
+
 typedef struct PgStat_BackendPending
 {
 	/*
-	 * Backend statistics store the same amount of IO data as PGSTAT_KIND_IO.
+	 * Backend statistics store almost the same amount of IO data as
+	 * PGSTAT_KIND_IO. The only difference between PgStat_BackendPendingIO and
+	 * PgStat_PendingIO is that the latter also track IO latency histograms.
 	 */
-	PgStat_PendingIO pending_io;
+	PgStat_BackendPendingIO pending_io;
 
 	/*
 	 * Backend statistics store the same amount of lock data as
@@ -697,6 +753,10 @@ extern PgStat_CheckpointerStats *pgstat_fetch_stat_checkpointer(void);
 
 extern bool pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
 										 BackendType bktype);
+extern int	pgstat_bktype_count_potentially_used(BackendType bktype);
+extern int	pgstat_io_get_sum_tracked(void);
+extern int	pgstat_io_init_hist_offsets(PgStat_IO *io);
+extern Size pgstat_io_histogram_shmem_size(void);
 extern void pgstat_count_io_op(IOObject io_object, IOContext io_context,
 							   IOOp io_op, uint32 cnt, uint64 bytes);
 extern instr_time pgstat_prepare_io_time(bool track_io_guc);
@@ -707,6 +767,7 @@ extern void pgstat_count_io_op_time(IOObject io_object, IOContext io_context,
 extern PgStat_IO *pgstat_fetch_stat_io(void);
 extern const char *pgstat_get_io_context_name(IOContext io_context);
 extern const char *pgstat_get_io_object_name(IOObject io_object);
+extern const char *pgstat_get_io_op_name(IOOp io_op);
 
 extern bool pgstat_tracks_io_bktype(BackendType bktype);
 extern bool pgstat_tracks_io_object(BackendType bktype,
