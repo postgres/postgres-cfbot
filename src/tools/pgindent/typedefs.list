@@ -1821,6 +1821,8 @@ NestLoopState
 NestPath
 NewColumnValue
 NewConstraint
+NewIndexDatums
+NewIndexDatumsState
 NextSampleBlock_function
 NextSampleTuple_function
 NextValueExpr
@@ -3028,6 +3030,10 @@ SubXactCallback
 SubXactCallbackItem
 SubXactEvent
 SubXactInfo
+SubattrPathElem
+SubattrPathElemKind
+SubattrRequestKind
+SubattrWalk
 SubqueryScan
 SubqueryScanPath
 SubqueryScanState
@@ -3051,6 +3057,7 @@ SupportRequestRows
 SupportRequestSelectivity
 SupportRequestSimplify
 SupportRequestSimplifyAggref
+SupportRequestSubattr
 SupportRequestWFuncMonotonic
 Syn
 SyncOps
@@ -3574,6 +3581,7 @@ ambuildempty_function
 ambuildphasename_function
 ambulkdelete_function
 amcanreturn_function
+amcomparedatums_function
 amcostestimate_function
 amendscan_function
 amestimateparallelscan_function
