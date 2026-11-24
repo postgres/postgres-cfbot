@@ -98,6 +98,8 @@ typedef struct CopyFromStateData
 								 * default value */
 	FmgrInfo   *in_functions;	/* array of input functions for each attrs */
 	Oid		   *typioparams;	/* array of element types for in_functions */
+	FunctionCallInfo *in_fcinfos;	/* call info for in_functions, set up
+									 * once; NULL in binary format */
 	ErrorSaveContext *escontext;	/* soft error trapped during in_functions
 									 * execution */
 	uint64		num_errors;		/* total number of rows which contained soft

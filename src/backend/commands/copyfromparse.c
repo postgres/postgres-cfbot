@@ -969,6 +969,46 @@ CopyFromCSVOneRow(CopyFromState cstate, ExprContext *econtext, Datum *values,
 }
 
 /*
+ * Call an input function with the call information set up in
+ * BeginCopyFrom(), in the same way as InputFunctionCallSafe() but without
+ * setting up the call information for each call.
+ */
+static pg_always_inline bool
+CopyFromCallInputFunction(FunctionCallInfo fcinfo, char *str, Datum *result)
+{
+	if (str == NULL && fcinfo->flinfo->fn_strict)
+	{
+		*result = (Datum) 0;	/* just return null result */
+		return true;
+	}
+
+	fcinfo->args[0].value = CStringGetDatum(str);
+	fcinfo->isnull = false;
+
+	*result = FunctionCallInvoke(fcinfo);
+
+	/* Result value is garbage, and could be null, if an error was reported */
+	if (SOFT_ERROR_OCCURRED(fcinfo->context))
+		return false;
+
+	/* Otherwise, should get null result if and only if str is NULL */
+	if (str == NULL)
+	{
+		if (!fcinfo->isnull)
+			elog(ERROR, "input function %u returned non-NULL",
+				 fcinfo->flinfo->fn_oid);
+	}
+	else
+	{
+		if (fcinfo->isnull)
+			elog(ERROR, "input function %u returned NULL",
+				 fcinfo->flinfo->fn_oid);
+	}
+
+	return true;
+}
+
+/*
  * Workhorse for CopyFromTextOneRow() and CopyFromCSVOneRow().
  *
  * We use pg_always_inline to reduce function call overhead
@@ -982,6 +1022,7 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 	AttrNumber	attr_count;
 	FmgrInfo   *in_functions = cstate->in_functions;
 	Oid		   *typioparams = cstate->typioparams;
+	FunctionCallInfo *in_fcinfos = cstate->in_fcinfos;
 	ExprState **defexprs = cstate->defexprs;
 	char	  **field_strings;
 	ListCell   *cur;
@@ -1068,12 +1109,8 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 		/*
 		 * If ON_ERROR is specified, handle the different options
 		 */
-		else if (!InputFunctionCallSafe(&in_functions[m],
-										string,
-										typioparams[m],
-										att->atttypmod,
-										(Node *) cstate->escontext,
-										&values[m]))
+		else if (!CopyFromCallInputFunction(in_fcinfos[m], string,
+											&values[m]))
 		{
 			Assert(cstate->opts.on_error != COPY_ON_ERROR_STOP);
 

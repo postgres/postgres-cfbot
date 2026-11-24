@@ -1856,6 +1856,39 @@ BeginCopyFrom(ParseState *pstate,
 	/* We keep those variables in cstate. */
 	cstate->in_functions = in_functions;
 	cstate->typioparams = typioparams;
+
+	/*
+	 * Set up the call information for the input functions once, so that only
+	 * the input string needs to be set when converting each field.  The
+	 * binary format calls receive functions instead.
+	 */
+	if (cstate->opts.format != COPY_FORMAT_BINARY)
+	{
+		Size		fcinfo_size = SizeForFunctionCallInfo(3);
+		char	   *fcinfo_buf = palloc(fcinfo_size * num_phys_attrs);
+
+		cstate->in_fcinfos = palloc0_array(FunctionCallInfo, num_phys_attrs);
+		for (int attnum = 1; attnum <= num_phys_attrs; attnum++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupDesc, attnum - 1);
+			FunctionCallInfo fcinfo;
+
+			if (att->attisdropped)
+				continue;
+
+			fcinfo = (FunctionCallInfo) (fcinfo_buf +
+										 fcinfo_size * (attnum - 1));
+			InitFunctionCallInfoData(*fcinfo, &in_functions[attnum - 1], 3,
+									 InvalidOid, (Node *) cstate->escontext,
+									 NULL);
+			fcinfo->args[0].isnull = false;
+			fcinfo->args[1].value = ObjectIdGetDatum(typioparams[attnum - 1]);
+			fcinfo->args[1].isnull = false;
+			fcinfo->args[2].value = Int32GetDatum(att->atttypmod);
+			fcinfo->args[2].isnull = false;
+			cstate->in_fcinfos[attnum - 1] = fcinfo;
+		}
+	}
 	cstate->defmap = defmap;
 	cstate->defexprs = defexprs;
 	cstate->volatile_defexprs = volatile_defexprs;
