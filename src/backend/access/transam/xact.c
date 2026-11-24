@@ -1513,7 +1513,7 @@ RecordTransactionCommit(void)
 
 		TransactionTreeSetCommitTsData(xid, nchildren, children,
 									   replorigin_xact_state.origin_timestamp,
-									   replorigin_xact_state.origin);
+									   replorigin_xact_state.origin, XactLastRecEnd);
 	}
 
 	/*
@@ -6256,7 +6256,7 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
 
 	/* Set the transaction commit timestamp and metadata */
 	TransactionTreeSetCommitTsData(xid, parsed->nsubxacts, parsed->subxacts,
-								   commit_time, origin_id);
+								   commit_time, origin_id, lsn);
 
 	if (standbyState == STANDBY_DISABLED)
 	{

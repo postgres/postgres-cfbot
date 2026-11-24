@@ -24,6 +24,7 @@ $primary->backup($bkplabel);
 
 my $standby = PostgreSQL::Test::Cluster->new('standby');
 $standby->init_from_backup($primary, $bkplabel, has_streaming => 1);
+$standby->append_conf('postgresql.conf', 'commit_timestamp_buffers = 16');
 $standby->start;
 
 for my $i (1 .. 10)
@@ -43,6 +44,29 @@ my $standby_ts = $standby->safe_psql('postgres',
 	qq{select ts.* from pg_class, pg_xact_commit_timestamp(xmin) ts where relname = 't10'}
 );
 is($primary_ts, $standby_ts, "standby gives same value as primary");
+
+my $before_commits = $primary->safe_psql('postgres',
+	"SELECT pg_create_restore_point('before_commits')");
+
+# Fill more than 16 pages of timestamps (10 bytes per XID) to force eviction.
+my $after_commits = $primary->safe_psql(
+	'postgres', q{
+	DO $$
+	BEGIN
+		FOR counter IN 1..17 * (current_setting('block_size')::int / 10) LOOP
+			PERFORM pg_current_xact_id();
+			COMMIT;
+		END LOOP;
+	END $$;
+	SELECT pg_create_restore_point('after_commits');
+});
+$primary->wait_for_catchup($standby, 'replay', $after_commits);
+is( $standby->safe_psql(
+		'postgres',
+		"SELECT min_recovery_end_lsn > '$before_commits' FROM pg_control_recovery()"
+	),
+	't',
+	'writing commit timestamps advances the minimum recovery point');
 
 $primary->append_conf('postgresql.conf', 'track_commit_timestamp = off');
 $primary->restart;

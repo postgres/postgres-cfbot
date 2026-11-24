@@ -21,7 +21,7 @@ extern PGDLLIMPORT bool track_commit_timestamp;
 
 extern void TransactionTreeSetCommitTsData(TransactionId xid, int nsubxids,
 										   TransactionId *subxids, TimestampTz timestamp,
-										   ReplOriginId nodeid);
+										   ReplOriginId nodeid, XLogRecPtr lsn);
 extern bool TransactionIdGetCommitTsData(TransactionId xid,
 										 TimestampTz *ts, ReplOriginId *nodeid);
 extern TransactionId GetLatestCommitTsData(TimestampTz *ts,
