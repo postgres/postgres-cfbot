@@ -1,0 +1,79 @@
+-- Tests for amnotifydelete: every path that deletes a row, or replaces it
+-- with a new version, must tell the index the old value.
+-- Load the library quietly first: its string reloption validator prints
+-- notices when it is loaded.
+SET client_min_messages TO 'warning';
+CREATE EXTENSION IF NOT EXISTS dummy_index_am;
+LOAD 'dummy_index_am';
+RESET client_min_messages;
+
+CREATE TABLE notify_tab (k int4 PRIMARY KEY, v int4, w int4);
+CREATE INDEX notify_idx ON notify_tab USING dummy_index_am (v);
+INSERT INTO notify_tab VALUES (1, 10, 0), (2, 20, 0), (3, 30, 0), (4, 40, 0);
+
+-- DELETE reports the old value
+DELETE FROM notify_tab WHERE k = 1;
+
+-- UPDATE of the indexed column reports the old value
+UPDATE notify_tab SET v = 21 WHERE k = 2;
+
+-- UPDATE of no indexed column is HOT: the index is not called
+UPDATE notify_tab SET w = 1 WHERE k = 3;
+
+-- UPDATE of another index's column gives the row a new TID, so the index
+-- hears of the old version, as it hears of the new one
+UPDATE notify_tab SET k = 33 WHERE k = 3;
+
+-- MERGE, both actions
+MERGE INTO notify_tab t USING (VALUES (2), (4)) s(k) ON t.k = s.k
+  WHEN MATCHED AND t.k = 2 THEN UPDATE SET v = 22
+  WHEN MATCHED THEN DELETE;
+
+-- INSERT ... ON CONFLICT DO UPDATE
+INSERT INTO notify_tab VALUES (2, 0, 0) ON CONFLICT (k) DO UPDATE SET v = 23;
+
+-- A partial index hears only of rows that were in it
+CREATE INDEX notify_partial ON notify_tab USING dummy_index_am (v)
+  WHERE v > 100;
+INSERT INTO notify_tab VALUES (5, 50, 0), (6, 150, 0);
+DELETE FROM notify_tab WHERE k IN (5, 6);
+
+-- INSERT ... ON CONFLICT that finds the conflict before inserting has no
+-- tuple to remove, and neither has one that finds no conflict
+INSERT INTO notify_tab VALUES (2, 0, 0) ON CONFLICT DO NOTHING;
+INSERT INTO notify_tab VALUES (7, 70, 0) ON CONFLICT DO NOTHING;
+
+-- The call is made in the deleting transaction, even if it later aborts;
+-- an aborted insert is not reported
+BEGIN;
+DELETE FROM notify_tab WHERE k = 7;
+ROLLBACK;
+BEGIN;
+INSERT INTO notify_tab VALUES (8, 80, 0);
+ROLLBACK;
+
+-- TRUNCATE rebuilds the index instead of reporting rows
+TRUNCATE notify_tab;
+
+-- An index with no column references still hears of deletes
+CREATE TABLE notify_const (k int4);
+CREATE INDEX notify_const_idx ON notify_const USING dummy_index_am ((7));
+INSERT INTO notify_const VALUES (1);
+DELETE FROM notify_const;
+DROP TABLE notify_const;
+
+-- A row moved between partitions is reported by the partition it left
+CREATE TABLE notify_part (k int4, v int4) PARTITION BY RANGE (k);
+CREATE TABLE notify_part1 PARTITION OF notify_part FOR VALUES FROM (0) TO (10);
+CREATE TABLE notify_part2 PARTITION OF notify_part FOR VALUES FROM (10) TO (20);
+CREATE INDEX notify_part_idx ON notify_part USING dummy_index_am (v);
+INSERT INTO notify_part VALUES (1, 100);
+UPDATE notify_part SET k = 11 WHERE k = 1;
+DELETE FROM notify_part;
+
+-- A table with only indexes that don't ask is not affected
+CREATE TABLE notify_none (k int4 PRIMARY KEY);
+INSERT INTO notify_none VALUES (1);
+DELETE FROM notify_none;
+
+DROP TABLE notify_tab, notify_part, notify_none;
