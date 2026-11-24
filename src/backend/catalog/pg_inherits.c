@@ -29,6 +29,7 @@
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
@@ -40,6 +41,19 @@ typedef struct SeenRelsEntry
 	Oid			rel_id;			/* relation oid */
 	int			list_index;		/* its position in output list(s) */
 } SeenRelsEntry;
+
+/*
+ * Entry of a hash table used in find_all_inheritors_ordered.
+ */
+typedef struct OrderedSeenRelsEntry
+{
+	Oid			rel_id;
+	List	   *children;
+	int			indegree;
+}			OrderedSeenRelsEntry;
+
+static List *find_all_inheritors_internal(Oid parentrelId, LOCKMODE lockmode,
+										  List **numparents, List **children);
 
 /*
  * find_inheritance_children
@@ -255,12 +269,31 @@ find_inheritance_children_extended(Oid parentrelId, bool omit_detached,
 List *
 find_all_inheritors(Oid parentrelId, LOCKMODE lockmode, List **numparents)
 {
+	return find_all_inheritors_internal(parentrelId, lockmode, numparents, NULL);
+}
+
+/*
+ * Common discovery and locking step for both inheritance traversals.  Keep
+ * lock acquisition here so that ordering the result cannot change the order
+ * in which relations are locked.
+ *
+ * If requested, children receives a list of direct-child OID lists, parallel
+ * to the returned relation list and numparents.  Retain these from the same
+ * scans that discover the relations and count their parents.
+ */
+static List *
+find_all_inheritors_internal(Oid parentrelId, LOCKMODE lockmode,
+							 List **numparents, List **children)
+{
 	/* hash table for O(1) rel_oid -> rel_numparents cell lookup */
 	HTAB	   *seen_rels;
 	HASHCTL		ctl;
 	List	   *rels_list,
 			   *rel_numparents;
 	ListCell   *l;
+
+	if (children)
+		*children = NIL;
 
 	ctl.keysize = sizeof(Oid);
 	ctl.entrysize = sizeof(SeenRelsEntry);
@@ -323,6 +356,9 @@ find_all_inheritors(Oid parentrelId, LOCKMODE lockmode, List **numparents)
 				rel_numparents = lappend_int(rel_numparents, 1);
 			}
 		}
+
+		if (children)
+			*children = lappend(*children, currentchildren);
 	}
 
 	if (numparents)
@@ -333,6 +369,128 @@ find_all_inheritors(Oid parentrelId, LOCKMODE lockmode, List **numparents)
 	hash_destroy(seen_rels);
 
 	return rels_list;
+}
+
+/*
+ * find_all_inheritors_ordered -
+ *		Same as find_all_inheritors(), except that an ancestor is always listed
+ *		before its descendants.
+ *
+ * The ordering is produced using Kahn's topological sorting algorithm.
+ * Unlike find_all_inheritors(), this function reports an error if the
+ * inheritance graph contains a cycle, since no such ordering is possible.
+ * Concurrent ALTER TABLE ... INHERIT commands can create cycles despite
+ * the circularity check in ATExecAddInherit().  Callers that need to tolerate
+ * cycles should use find_all_inheritors() instead.
+ */
+List *
+find_all_inheritors_ordered(Oid parentrelId, LOCKMODE lockmode)
+{
+	MemoryContext temp_context;
+	MemoryContext old_context;
+	HTAB	   *seen_rels;
+	HASHCTL		ctl;
+	List	   *agenda;
+	List	   *numparents;
+	List	   *children;
+	List	   *worklist = NIL;
+	List	   *ordered = NIL;
+	List	   *result = NIL;
+	ListCell   *lc;
+	ListCell   *lp;
+	ListCell   *ll;
+	OrderedSeenRelsEntry *node;
+	bool		found;
+
+	/* Use a temporary memory context to simplify cleanup */
+	temp_context = AllocSetContextCreate(CurrentMemoryContext,
+										 "find_all_inheritors_ordered",
+										 ALLOCSET_SMALL_SIZES);
+	old_context = MemoryContextSwitchTo(temp_context);
+
+	agenda = find_all_inheritors_internal(parentrelId, lockmode,
+										  &numparents, &children);
+
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(OrderedSeenRelsEntry);
+	ctl.hcxt = temp_context;
+
+	seen_rels = hash_create("find_all_inheritors_ordered temporary table",
+							32, /* start small and extend */
+							&ctl,
+							HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	/*
+	 * Index the collected graph for sorting.  No more catalog scans or lock
+	 * acquisitions are needed.  The indegree counts direct parents within
+	 * this inheritance graph.
+	 */
+	forthree(lc, agenda, lp, numparents, ll, children)
+	{
+		Oid			current_oid = lfirst_oid(lc);
+
+		node = hash_search(seen_rels, &current_oid, HASH_ENTER, &found);
+
+		/*
+		 * find_all_inheritors_internal() can return the root twice if it is
+		 * in a cycle.
+		 */
+		if (found)
+			goto cycle;
+		node->children = lfirst(ll);
+		node->indegree = lfirst_int(lp);
+	}
+
+	/*
+	 * Emit nodes in topological order.  A node enters the worklist only after
+	 * all of its direct parents have been emitted.
+	 */
+	foreach_oid(rel_oid, agenda)
+	{
+		node = hash_search(seen_rels, &rel_oid, HASH_FIND, NULL);
+		Assert(node != NULL);
+		if (node->indegree == 0)
+			worklist = lappend_oid(worklist, rel_oid);
+	}
+
+	/*
+	 * Move nodes from the worklist to the output list, and add their children
+	 * to the worklist when all of their parents have been emitted.
+	 */
+	foreach_oid(rel_oid, worklist)
+	{
+		node = hash_search(seen_rels, &rel_oid, HASH_FIND, NULL);
+		Assert(node != NULL);
+		ordered = lappend_oid(ordered, rel_oid);
+
+		foreach_oid(child_oid, node->children)
+		{
+			OrderedSeenRelsEntry *child;
+
+			child = hash_search(seen_rels, &child_oid, HASH_FIND, NULL);
+			Assert(child != NULL);
+			Assert(child->indegree > 0);
+			if (--child->indegree == 0)
+				worklist = lappend_oid(worklist, child_oid);
+		}
+	}
+
+	/* Any nodes not emitted are in a cycle or depend on one. */
+	if (list_length(ordered) != list_length(agenda))
+		goto cycle;
+
+	MemoryContextSwitchTo(old_context);
+	result = list_copy(ordered);
+	MemoryContextDelete(temp_context);
+
+	return result;
+
+cycle:
+	ereport(ERROR,
+			errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+			errmsg("cannot order relations with circular inheritance"),
+			errhint("Use ALTER TABLE ... NO INHERIT to break the cycle."));
+	return NIL;					/* keep compiler quiet */
 }
 
 
