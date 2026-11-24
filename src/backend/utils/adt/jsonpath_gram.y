@@ -20,6 +20,7 @@
 #include "fmgr.h"
 #include "jsonpath_internal.h"
 #include "miscadmin.h"
+#include "nodes/miscnodes.h"
 #include "nodes/pg_list.h"
 #include "regex/regex.h"
 #include "utils/builtins.h"
@@ -28,7 +29,8 @@ static JsonPathParseItem *makeItemType(JsonPathItemType type);
 static JsonPathParseItem *makeItemString(JsonPathString *s);
 static JsonPathParseItem *makeItemVariable(JsonPathString *s);
 static JsonPathParseItem *makeItemKey(JsonPathString *s);
-static JsonPathParseItem *makeItemNumeric(JsonPathString *s);
+static JsonPathParseItem *makeItemNumeric(JsonPathString *s,
+										  struct Node *escontext);
 static JsonPathParseItem *makeItemBool(bool val);
 static JsonPathParseItem *makeItemBinary(JsonPathItemType type,
 										 JsonPathParseItem *la,
@@ -146,8 +148,18 @@ scalar_value:
 	| NULL_P						{ $$ = makeItemString(NULL); }
 	| TRUE_P						{ $$ = makeItemBool(true); }
 	| FALSE_P						{ $$ = makeItemBool(false); }
-	| NUMERIC_P						{ $$ = makeItemNumeric(&$1); }
-	| INT_P							{ $$ = makeItemNumeric(&$1); }
+	| NUMERIC_P
+		{
+			$$ = makeItemNumeric(&$1, escontext);
+			if (!$$)
+				YYABORT;
+		}
+	| INT_P
+		{
+			$$ = makeItemNumeric(&$1, escontext);
+			if (!$$)
+				YYABORT;
+		}
 	| VARIABLE_P					{ $$ = makeItemVariable(&$1); }
 	;
 
@@ -238,7 +250,12 @@ array_accessor:
 	;
 
 any_level:
-	INT_P							{ $$ = pg_strtoint32($1.val); }
+	INT_P
+		{
+			$$ = pg_strtoint32_safe($1.val, escontext);
+			if (SOFT_ERROR_OCCURRED(escontext))
+				YYABORT;
+		}
 	| LAST_P						{ $$ = -1; }
 	;
 
@@ -294,11 +311,27 @@ accessor_op:
 
 int_elem:
 	INT_P
-		{ $$ = makeItemNumeric(&$1); }
+		{
+			$$ = makeItemNumeric(&$1, escontext);
+			if (!$$)
+				YYABORT;
+		}
 	| '+' INT_P %prec UMINUS
-		{ $$ = makeItemUnary(jpiPlus, makeItemNumeric(&$2)); }
+		{
+			JsonPathParseItem *num = makeItemNumeric(&$2, escontext);
+
+			if (!num)
+				YYABORT;
+			$$ = makeItemUnary(jpiPlus, num);
+		}
 	| '-' INT_P %prec UMINUS
-		{ $$ = makeItemUnary(jpiMinus, makeItemNumeric(&$2)); }
+		{
+			JsonPathParseItem *num = makeItemNumeric(&$2, escontext);
+
+			if (!num)
+				YYABORT;
+			$$ = makeItemUnary(jpiMinus, num);
+		}
 	;
 
 int_list:
@@ -312,7 +345,12 @@ opt_int_list:
 	;
 
 uint_elem:
-	INT_P							{ $$ = makeItemNumeric(&$1); }
+	INT_P
+		{
+			$$ = makeItemNumeric(&$1, escontext);
+			if (!$$)
+				YYABORT;
+		}
 	;
 
 opt_uint_arg:
@@ -467,17 +505,23 @@ makeItemKey(JsonPathString *s)
 	return v;
 }
 
+/*
+ * Returns NULL if the value can't be converted to numeric (e.g. it's out of
+ * range) and escontext is an ErrorSaveContext; the error is saved there.
+ */
 static JsonPathParseItem *
-makeItemNumeric(JsonPathString *s)
+makeItemNumeric(JsonPathString *s, struct Node *escontext)
 {
 	JsonPathParseItem *v;
+	Datum		num;
+
+	if (!DirectInputFunctionCallSafe(numeric_in, s->val,
+									 InvalidOid, -1,
+									 escontext, &num))
+		return NULL;
 
 	v = makeItemType(jpiNumeric);
-	v->value.numeric =
-		DatumGetNumeric(DirectFunctionCall3(numeric_in,
-											CStringGetDatum(s->val),
-											ObjectIdGetDatum(InvalidOid),
-											Int32GetDatum(-1)));
+	v->value.numeric = DatumGetNumeric(num);
 
 	return v;
 }
