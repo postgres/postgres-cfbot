@@ -642,6 +642,67 @@ reset enable_material;
 reset effective_io_concurrency;
 drop table bmscantest;
 drop function explain_parallel_sort_stats();
+-- test accumulation of hash aggregate stats for parallel workers
+-- across rescans of a Gather node: each rescan starts new workers
+-- that report into the same shared slots, so the worker's Batches
+-- must accumulate over all the scans, not just the last one.  Only
+-- the Batches count is stable enough to assert (Memory/Disk vary
+-- between environments), so extract just that from the stats line.
+create table hashagg_rescan (y int);
+insert into hashagg_rescan
+  select g % 2000 from generate_series(1, 100000) g;
+analyze hashagg_rescan;
+create function explain_hashagg_rescan_stats() returns setof text
+language plpgsql as
+$$
+declare ln text;
+begin
+    -- one launched worker, so Worker 0 runs every execution
+    set local parallel_leader_participation = off;
+    set local max_parallel_workers = 1;
+    -- small work_mem, so the hash table spills: two executions
+    -- of the rescanned subplan must add up in the shared slot
+    set local work_mem = '64kB';
+    for ln in
+        explain (analyze, timing off, summary off, costs off, buffers off)
+          select o.z,
+                 (select count(*) + o.z
+                    from (select y, count(*) from hashagg_rescan
+                          group by y) s)
+            from (values (1), (2)) o(z)
+    loop
+        if ln ~ 'Worker 0:.*Batches:' then
+            return next regexp_replace(ln, '.*(Batches: [0-9]+).*',
+                                       '\1');
+        end if;
+    end loop;
+    -- with no spilling, the in-memory batch must still be
+    -- counted only once, so two executions again show 1
+    set local work_mem = '64MB';
+    for ln in
+        explain (analyze, timing off, summary off, costs off, buffers off)
+          select o.z,
+                 (select count(*) + o.z
+                    from (select y, count(*) from hashagg_rescan
+                          group by y) s)
+            from (values (1), (2)) o(z)
+    loop
+        if ln ~ 'Worker 0:.*Batches:' then
+            return next regexp_replace(ln, '.*(Batches: [0-9]+).*',
+                                       '\1');
+        end if;
+    end loop;
+end;
+$$;
+select * from explain_hashagg_rescan_stats();
+ explain_hashagg_rescan_stats 
+------------------------------
+ Batches: 9
+ Batches: 1
+(2 rows)
+
+drop table hashagg_rescan;
+drop function explain_hashagg_rescan_stats();
 -- test parallel merge join path.
 set enable_hashjoin to off;
 set enable_nestloop to off;
