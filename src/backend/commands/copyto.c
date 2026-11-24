@@ -131,7 +131,9 @@ static const CopyToRoutine CopyToRoutineBinary = {
 static const CopyToRoutine *
 CopyToGetRoutine(const CopyFormatOptions *opts)
 {
-	if (opts->format == COPY_FORMAT_CSV)
+	if (opts->format == COPY_FORMAT_CUSTOM)
+		return opts->custom_format_entry->to_routine;
+	else if (opts->format == COPY_FORMAT_CSV)
 		return &CopyToRoutineCSV;
 	else if (opts->format == COPY_FORMAT_BINARY)
 		return &CopyToRoutineBinary;
@@ -483,8 +485,18 @@ SendCopyBegin(CopyToState cstate)
 {
 	StringInfoData buf;
 	int			natts = list_length(cstate->attnumlist);
-	int16		format = (cstate->opts.format == COPY_FORMAT_BINARY ? 1 : 0);
+	int16		format;
 	int			i;
+
+	/*
+	 * Tell the client whether the data is textual or binary.  A custom format
+	 * declares it in its registered entry.  Clients such as psql read textual
+	 * data line by line, which doesn't work for binary data.
+	 */
+	if (cstate->opts.format == COPY_FORMAT_CUSTOM)
+		format = cstate->opts.custom_format_entry->binary ? 1 : 0;
+	else
+		format = (cstate->opts.format == COPY_FORMAT_BINARY ? 1 : 0);
 
 	pq_beginmessage(&buf, PqMsg_CopyOutResponse);
 	pq_sendbyte(&buf, format);	/* overall format */
@@ -1286,8 +1298,13 @@ DoCopyTo(CopyToState cstate)
 		int			attnum = lfirst_int(cur);
 		Form_pg_attribute attr = TupleDescAttr(tupDesc, attnum - 1);
 
-		cstate->routine->CopyToOutFunc(cstate, attr->atttypid,
-									   &cstate->out_functions[attnum - 1]);
+		/* A custom format always gets the text output functions */
+		if (cstate->opts.format == COPY_FORMAT_CUSTOM)
+			CopyToTextLikeOutFunc(cstate, attr->atttypid,
+								  &cstate->out_functions[attnum - 1]);
+		else
+			cstate->routine->CopyToOutFunc(cstate, attr->atttypid,
+										   &cstate->out_functions[attnum - 1]);
 	}
 
 	/*

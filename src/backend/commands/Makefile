@@ -23,6 +23,7 @@ OBJS = \
 	constraint.o \
 	conversioncmds.o \
 	copy.o \
+	copyapi.o \
 	copyfrom.o \
 	copyfromparse.o \
 	copyto.o \

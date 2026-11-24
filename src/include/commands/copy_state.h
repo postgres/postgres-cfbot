@@ -235,13 +235,15 @@ typedef struct CopyToStateData
 {
 	/*
 	 * Fields available to extensions.  rel, attnumlist and opts are read
-	 * only; rel is NULL for COPY (query) TO.
+	 * only; rel is NULL for COPY (query) TO.  out_functions holds the text
+	 * output functions for a custom format.
 	 */
 	Relation	rel;			/* relation to copy to */
 	List	   *attnumlist;		/* integer list of attnums to copy */
 	CopyFormatOptions opts;
 	MemoryContext copycontext;	/* per-copy execution context */
 	FmgrInfo   *out_functions;	/* lookup info for output functions */
+	void	   *format_private; /* custom format's own state */
 
 	/*
 	 * Internal fields

@@ -1,0 +1,58 @@
+LOAD 'test_copy_custom_format';
+CREATE TABLE copy_data (a smallint, b integer, c bigint);
+INSERT INTO copy_data VALUES (1,2,3),(12,34,56),(123,456,789),(NULL,NULL,NULL);
+COPY copy_data TO stdout WITH (format 'test_format');          -- Start, OneRow x3, End
+NOTICE:  CopyToStart: the number of attributes of table: 3, the number of attributes to output: 3
+NOTICE:  CopyToOneRow: the number of valid values: 3
+1,2,3
+NOTICE:  CopyToOneRow: the number of valid values: 3
+12,34,56
+NOTICE:  CopyToOneRow: the number of valid values: 3
+123,456,789
+NOTICE:  CopyToOneRow: the number of valid values: 3
+null,null,null
+NOTICE:  CopyToEnd
+COPY copy_data (a, b) TO stdout WITH (format 'test_format');   -- Start: natts 2
+NOTICE:  CopyToStart: the number of attributes of table: 3, the number of attributes to output: 2
+NOTICE:  CopyToOneRow: the number of valid values: 3
+1,2
+NOTICE:  CopyToOneRow: the number of valid values: 3
+12,34
+NOTICE:  CopyToOneRow: the number of valid values: 3
+123,456
+NOTICE:  CopyToOneRow: the number of valid values: 3
+null,null
+NOTICE:  CopyToEnd
+COPY (SELECT a FROM copy_data) TO stdout WITH (format 'test_format'); -- Start: natts 1
+NOTICE:  CopyToStart: the number of attributes of table: 1, the number of attributes to output: 1
+NOTICE:  CopyToOneRow: the number of valid values: 1
+1
+NOTICE:  CopyToOneRow: the number of valid values: 1
+12
+NOTICE:  CopyToOneRow: the number of valid values: 1
+123
+NOTICE:  CopyToOneRow: the number of valid values: 1
+null
+NOTICE:  CopyToEnd
+-- Write to a file.
+\getenv abs_builddir PG_ABS_BUILDDIR
+\set filename :abs_builddir '/results/test_copy_custom_format.data'
+COPY copy_data TO :'filename' WITH (format 'test_format');
+NOTICE:  CopyToStart: the number of attributes of table: 3, the number of attributes to output: 3
+NOTICE:  CopyToOneRow: the number of valid values: 3
+NOTICE:  CopyToOneRow: the number of valid values: 3
+NOTICE:  CopyToOneRow: the number of valid values: 3
+NOTICE:  CopyToOneRow: the number of valid values: 3
+NOTICE:  CopyToEnd
+COPY copy_data TO stdout WITH (format 'nonexistent');          -- ERROR: not recognized
+ERROR:  COPY format "nonexistent" not recognized
+LINE 1: COPY copy_data TO stdout WITH (format 'nonexistent');
+                                       ^
+COPY copy_data TO stdout WITH (format 'text', format 'csv');   -- ERROR: conflicting
+ERROR:  conflicting or redundant options
+LINE 1: COPY copy_data TO stdout WITH (format 'text', format 'csv');
+                                                      ^
+COPY copy_data TO stdout WITH (format 'test_format', freeze true);     -- ERROR: FREEZE with COPY TO
+ERROR:  COPY FREEZE cannot be used with COPY TO
+COPY copy_data FROM stdin WITH (format 'test_format');         -- ERROR: no COPY FROM
+ERROR:  COPY format "test_format" cannot be used with COPY FROM

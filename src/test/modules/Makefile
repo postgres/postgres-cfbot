@@ -23,6 +23,7 @@ SUBDIRS = \
 		  test_cloexec \
 		  test_checksums \
 		  test_copy_callbacks \
+		  test_copy_custom_format \
 		  test_custom_rmgrs \
 		  test_custom_stats \
 		  test_custom_types \

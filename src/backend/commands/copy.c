@@ -23,6 +23,7 @@
 #include "access/xact.h"
 #include "catalog/pg_authid.h"
 #include "commands/copy.h"
+#include "commands/copyapi.h"
 #include "commands/defrem.h"
 #include "executor/executor.h"
 #include "mb/pg_wchar.h"
@@ -622,6 +623,8 @@ ProcessCopyOptions(ParseState *pstate,
 				opts_out->format = COPY_FORMAT_BINARY;
 			else if (strcmp(fmt, "json") == 0)
 				opts_out->format = COPY_FORMAT_JSON;
+			else if ((opts_out->custom_format_entry = GetCopyCustomFormatEntry(fmt)) != NULL)
+				opts_out->format = COPY_FORMAT_CUSTOM;
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -1050,6 +1053,13 @@ ProcessCopyOptions(ParseState *pstate,
 		 * ON_ERROR, third is the value of the COPY option, e.g. IGNORE */
 				 errmsg("COPY %s requires %s to be set to %s",
 						"REJECT_LIMIT", "ON_ERROR", "IGNORE")));
+
+	/* Custom formats support only COPY TO for now */
+	if (opts_out->format == COPY_FORMAT_CUSTOM && is_from)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("COPY format \"%s\" cannot be used with COPY FROM",
+						opts_out->custom_format_entry->name)));
 }
 
 /*

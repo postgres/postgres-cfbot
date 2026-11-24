@@ -14,11 +14,15 @@
 #ifndef COPYAPI_H
 #define COPYAPI_H
 
+#include "commands/copy_state.h"
 #include "commands/copy.h"
 
 /*
  * API structure for a COPY TO format implementation. Note this must be
  * allocated in a server-lifetime manner, typically as a static const struct.
+ *
+ * A custom format can keep its own state for the COPY in
+ * cstate->format_private.
  */
 typedef struct CopyToRoutine
 {
@@ -30,6 +34,9 @@ typedef struct CopyToRoutine
 	 * the output function.
 	 *
 	 * 'atttypid' is the OID of data type used by the relation's attribute.
+	 *
+	 * For the built-in formats only.  A custom format leaves this NULL, and
+	 * gets the text output functions in cstate->out_functions.
 	 */
 	void		(*CopyToOutFunc) (CopyToState cstate, Oid atttypid,
 								  FmgrInfo *finfo);
@@ -101,6 +108,20 @@ typedef struct CopyFromRoutine
 	 */
 	void		(*CopyFromEnd) (CopyFromState cstate);
 } CopyFromRoutine;
+
+/*
+ * Information about a custom format, passed to RegisterCopyCustomFormat().
+ */
+typedef struct CopyCustomFormatEntry
+{
+	const char *name;			/* format name, stored by reference */
+	bool		binary;			/* use binary format in the COPY protocol? */
+	const CopyToRoutine *to_routine;
+} CopyCustomFormatEntry;
+
+extern void RegisterCopyCustomFormat(const CopyCustomFormatEntry *entry);
+
+extern const CopyCustomFormatEntry *GetCopyCustomFormatEntry(const char *name);
 
 /*
  * Functions for a format to exchange data with the source or destination of
