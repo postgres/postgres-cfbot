@@ -13910,12 +13910,12 @@ get_reloptions(StringInfo buf, Datum reloptions)
 		/*
 		 * In general we need to quote the value; but to avoid unnecessary
 		 * clutter, do not quote if it is an identifier that would not need
-		 * quoting.  (We could also allow numbers, but that is a bit trickier
-		 * than it looks --- for example, are leading zeroes significant?  We
-		 * don't want to assume very much here about what custom reloptions
-		 * might mean.)
+		 * quoting and is short enough not to be truncated as one.  (We could
+		 * also allow numbers, but that is a bit trickier than it looks ---
+		 * for example, are leading zeroes significant?  We don't want to
+		 * assume very much here about what custom reloptions might mean.)
 		 */
-		if (quote_identifier(value) == value)
+		if (strlen(value) < NAMEDATALEN && quote_identifier(value) == value)
 			appendStringInfoString(buf, value);
 		else
 			simple_quote_literal(buf, value);
