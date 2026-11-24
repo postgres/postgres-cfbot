@@ -44,9 +44,31 @@ typedef enum EolType
 /*
  * This struct contains all the state variables used throughout a COPY FROM
  * operation.
+ *
+ * The fields in the first section are available to extensions implementing a
+ * COPY format.  The others are internal to core and the built-in formats, and
+ * an extension must not use them; it uses the functions declared in
+ * copyapi.h instead.
+ *
+ * So that extensions keep working across minor releases, the fields in the
+ * first section must not be changed in a stable branch, and a field added
+ * there must go at the end of the struct.
  */
 typedef struct CopyFromStateData
 {
+	/*
+	 * Fields available to extensions.  rel, attnumlist and opts are read
+	 * only.
+	 */
+	Relation	rel;			/* relation to copy from */
+	List	   *attnumlist;		/* integer list of attnums to copy */
+	CopyFormatOptions opts;
+	MemoryContext copycontext;	/* per-copy execution context */
+
+	/*
+	 * Internal fields
+	 */
+
 	/* format routine */
 	const struct CopyFromRoutine *routine;
 
@@ -61,13 +83,10 @@ typedef struct CopyFromStateData
 	Oid			conversion_proc;	/* encoding conversion function */
 
 	/* parameters from the COPY command */
-	Relation	rel;			/* relation to copy from */
-	List	   *attnumlist;		/* integer list of attnums to copy */
 	char	   *filename;		/* filename, or NULL for STDIN */
 	bool		is_program;		/* is 'filename' a program to popen? */
 	copy_data_source_cb data_source_cb; /* function for reading data */
 
-	CopyFormatOptions opts;
 	bool	   *convert_select_flags;	/* per-column CSV/TEXT CS flags */
 	Node	   *whereClause;	/* WHERE condition (or NULL) */
 
@@ -81,8 +100,6 @@ typedef struct CopyFromStateData
 	/*
 	 * Working state
 	 */
-	MemoryContext copycontext;	/* per-copy execution context */
-
 	AttrNumber	num_defaults;	/* count of att that are missing and have
 								 * default value */
 	FmgrInfo   *in_functions;	/* array of input functions for each attrs */
@@ -210,9 +227,26 @@ typedef enum CopyDest
  * it's faster to make useless comparisons to trailing bytes than it is to
  * invoke pg_encoding_mblen() to skip over them. encoding_embeds_ascii is true
  * when we have to do it the hard way.
+ *
+ * As in CopyFromStateData, the fields in the first section are available to
+ * extensions, and must not be changed in a stable branch.
  */
 typedef struct CopyToStateData
 {
+	/*
+	 * Fields available to extensions.  rel, attnumlist and opts are read
+	 * only; rel is NULL for COPY (query) TO.
+	 */
+	Relation	rel;			/* relation to copy to */
+	List	   *attnumlist;		/* integer list of attnums to copy */
+	CopyFormatOptions opts;
+	MemoryContext copycontext;	/* per-copy execution context */
+	FmgrInfo   *out_functions;	/* lookup info for output functions */
+
+	/*
+	 * Internal fields
+	 */
+
 	/* format-specific routines */
 	const struct CopyToRoutine *routine;
 
@@ -226,9 +260,7 @@ typedef struct CopyToStateData
 	bool		encoding_embeds_ascii;	/* ASCII can be non-first byte? */
 
 	/* parameters from the COPY command */
-	Relation	rel;			/* relation to copy to */
 	QueryDesc  *queryDesc;		/* executable query to copy from */
-	List	   *attnumlist;		/* integer list of attnums to copy */
 	char	   *filename;		/* filename, or NULL for STDOUT */
 	bool		is_program;		/* is 'filename' a program to popen? */
 	bool		json_row_delim_needed;	/* need delimiter before next row */
@@ -241,16 +273,12 @@ typedef struct CopyToStateData
 	bool	   *json_projnulls; /* pre-allocated projection nulls, or NULL */
 	copy_data_dest_cb data_dest_cb; /* function for writing data */
 
-	CopyFormatOptions opts;
 	Node	   *whereClause;	/* WHERE condition (or NULL) */
 	List	   *partitions;		/* OID list of partitions to copy data from */
 
 	/*
 	 * Working state
 	 */
-	MemoryContext copycontext;	/* per-copy execution context */
-
-	FmgrInfo   *out_functions;	/* lookup info for output functions */
 	MemoryContext rowcontext;	/* per-row evaluation context */
 	uint64		bytes_processed;	/* number of bytes processed so far */
 } CopyToStateData;

@@ -363,6 +363,35 @@ CopyGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
 	return bytesread;
 }
 
+/*
+ * Exported for extensions; see copyapi.h.
+ *
+ * Unlike CopyGetData(), this also updates the COPY progress, which the
+ * built-in formats do when loading the raw buffer.
+ */
+int
+CopyFromGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
+{
+	int			nbytes;
+
+	nbytes = CopyGetData(cstate, databuf, minread, maxread);
+
+	cstate->bytes_processed += nbytes;
+	pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED,
+								 cstate->bytes_processed);
+
+	return nbytes;
+}
+
+/*
+ * Exported for extensions; see copyapi.h.
+ */
+char *
+CopyFromConvertToServer(CopyFromState cstate, const char *str, int len)
+{
+	return pg_any_to_server(str, len, cstate->file_encoding);
+}
+
 
 /*
  * These functions do apply some data conversion

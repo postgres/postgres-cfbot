@@ -102,4 +102,35 @@ typedef struct CopyFromRoutine
 	void		(*CopyFromEnd) (CopyFromState cstate);
 } CopyFromRoutine;
 
+/*
+ * Functions for a format to exchange data with the source or destination of
+ * COPY, which can be a file, a program, the client, or a callback.
+ *
+ * CopyToSendData() appends data to the output buffer, and CopyToFlushData()
+ * sends the buffered data to the destination.  A format must flush the
+ * buffered data by the end of its CopyToEnd callback.  Unlike the built-in
+ * text-like formats, these functions don't add any line termination.
+ *
+ * CopyFromGetData() reads at least 'minread' and at most 'maxread' bytes into
+ * 'databuf', and returns the number of bytes read; if this is less than
+ * 'minread', EOF was detected.
+ *
+ * None of these functions applies encoding conversion.  A format converts
+ * the data with CopyToConvertFromServer() and CopyFromConvertToServer(),
+ * between the server encoding and the encoding specified by the ENCODING
+ * option, or the client encoding when it isn't specified.  Both return 'str'
+ * itself if no conversion is needed, and a palloc'd null-terminated string
+ * otherwise.  CopyFromConvertToServer() also verifies that the data is valid
+ * in the encoding.
+ */
+extern void CopyToSendData(CopyToState cstate, const void *databuf,
+						   int datasize);
+extern void CopyToFlushData(CopyToState cstate);
+extern char *CopyToConvertFromServer(CopyToState cstate, const char *str,
+									 int len);
+extern int	CopyFromGetData(CopyFromState cstate, void *databuf, int minread,
+							int maxread);
+extern char *CopyFromConvertToServer(CopyFromState cstate, const char *str,
+									 int len);
+
 #endif							/* COPYAPI_H */

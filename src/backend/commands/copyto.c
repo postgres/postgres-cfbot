@@ -635,6 +635,38 @@ CopySendTextLikeEndOfRow(CopyToState cstate)
 }
 
 /*
+ * CopyToSendData and CopyToFlushData are exported for extensions; see
+ * copyapi.h.
+ */
+void
+CopyToSendData(CopyToState cstate, const void *databuf, int datasize)
+{
+	CopySendData(cstate, databuf, datasize);
+}
+
+void
+CopyToFlushData(CopyToState cstate)
+{
+	/* Nothing to do if no data is buffered */
+	if (cstate->fe_msgbuf->len == 0)
+		return;
+
+	CopySendEndOfRow(cstate);
+}
+
+/*
+ * Exported for extensions; see copyapi.h.
+ */
+char *
+CopyToConvertFromServer(CopyToState cstate, const char *str, int len)
+{
+	if (!cstate->need_transcoding)
+		return unconstify(char *, str);
+
+	return pg_server_to_any(str, len, cstate->file_encoding);
+}
+
+/*
  * These functions do apply some data conversion
  */
 
