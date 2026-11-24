@@ -136,18 +136,23 @@ false, true, false, true);
 
 --
 -- Test ScalarArrayOpExpr row estimates for <> ALL for arrays with NULLs.  We
--- expect the planner to estimate 1 row will match in both of the following
--- tests.
+-- expect the planner to estimate 1 row with NULL and 9997 rows without it.
+-- The OR keeps the scalar-array clause available to the estimator.
 --
 
 -- Try a const array containing a NULL
 SELECT explain_mask_costs($$
-SELECT * FROM tenk1 WHERE unique1 <> ALL (ARRAY[1, 2, 99, NULL]);$$,
+SELECT * FROM tenk1 WHERE unique1 <> ALL (ARRAY[1, 2, 99, NULL]) OR unique2 = 1;$$,
+false, true, false, true);
+
+-- Without NULL, nearly all rows should match.
+SELECT explain_mask_costs($$
+SELECT * FROM tenk1 WHERE unique1 <> ALL (ARRAY[1, 2, 99]) OR unique2 = 1;$$,
 false, true, false, true);
 
 -- Try a non-const array containing a NULL
 SELECT explain_mask_costs($$
-SELECT * FROM tenk1 WHERE unique1 <> ALL (ARRAY[1, 2, 98, (SELECT 99), NULL]);$$,
+SELECT * FROM tenk1 WHERE unique1 <> ALL (ARRAY[1, 2, 98, (SELECT 99), NULL]) OR unique2 = 1;$$,
 false, true, false, true);
 
 -- Verify that scalarineqsel() works on "char" columns
