@@ -176,6 +176,7 @@ static int	CheckCertAuth(Port *port);
 char	   *pg_krb_server_keyfile;
 bool		pg_krb_caseins_users;
 bool		pg_gss_accept_delegation;
+int			credential_validation_kdc_timeout;
 
 
 /*----------------------------------------------------------------
@@ -184,6 +185,11 @@ bool		pg_gss_accept_delegation;
  */
 #ifdef ENABLE_GSS
 #include "libpq/be-gssapi-common.h"
+#ifdef USE_KRB5_KDC_CHECK
+#include <krb5.h>
+#include "storage/fd.h"
+#include "utils/wait_event.h"
+#endif
 
 static int	pg_GSS_checkauth(Port *port);
 static int	pg_GSS_recvauth(Port *port);
@@ -1208,6 +1214,148 @@ pg_GSS_checkauth(Port *port)
 	pfree(princ);
 
 	return ret;
+}
+
+#ifdef USE_KRB5_KDC_CHECK
+
+/*
+ * The MIT Kerberos library takes its request timeout from krb5.conf, not from
+ * its API, and only reads it when a context is created.  So the limit given by
+ * credential_validation_kdc_timeout is written to a small file of our own,
+ * which is put in front of the real configuration through KRB5_CONFIG for the
+ * duration of the check.
+ */
+static File kdc_timeout_conf_file;
+static bool kdc_timeout_conf_ready = false;
+
+static const char *
+kdc_timeout_conf_path(void)
+{
+	char		buf[64];
+	int			len;
+	const char *path;
+
+	if (kdc_timeout_conf_ready)
+		return FilePathName(kdc_timeout_conf_file);
+
+	kdc_timeout_conf_file = OpenTemporaryFile(true);
+	len = snprintf(buf, sizeof(buf),
+				   "[libdefaults]\n request_timeout = %ds\n",
+				   credential_validation_kdc_timeout);
+	if (FileWrite(kdc_timeout_conf_file, buf, len, 0,
+				  WAIT_EVENT_BUFFILE_WRITE) != len)
+	{
+		FileClose(kdc_timeout_conf_file);
+		return NULL;
+	}
+
+	kdc_timeout_conf_ready = true;
+	path = FilePathName(kdc_timeout_conf_file);
+
+	/* KRB5_CONFIG is a colon-separated list, so the path must not contain one */
+	if (strchr(path, ':') != NULL)
+		return NULL;
+	return path;
+}
+#endif							/* USE_KRB5_KDC_CHECK */
+
+/*
+ * Ask the KDC whether the Kerberos principal this session authenticated as is
+ * still usable, for continuous credential validation.
+ *
+ * No credential is sent.  We begin an initial-credentials exchange for the
+ * principal without a password or a prompter and look only at the KDC's first
+ * answer: a principal that has been disabled, deleted or has expired is
+ * refused outright, while an enabled one is merely asked for a password, which
+ * we cannot give, so the exchange stops locally.  Returns false, and a
+ * description of the KDC's answer in reason, only in the former case.
+ * Everything else, including not being able to reach the KDC within
+ * credential_validation_kdc_timeout, counts as still valid.
+ *
+ * This is only built with MIT Kerberos; elsewhere it always reports the
+ * principal as valid.
+ */
+bool
+CheckKerberosPrincipalEnabled(Port *port, char *reason, size_t reasonlen)
+{
+#ifdef USE_KRB5_KDC_CHECK
+	krb5_context kctx;
+	krb5_principal client;
+	krb5_get_init_creds_opt *opt;
+	krb5_creds	creds;
+	krb5_error_code ret;
+	const char *conf;
+	const char *orig;
+	char	   *saved = NULL;
+	char	   *combined;
+	bool		result = true;
+
+	if (port == NULL || port->gss == NULL || port->gss->princ == NULL)
+		return true;
+
+	conf = kdc_timeout_conf_path();
+	if (conf == NULL)
+		return true;
+
+	/*
+	 * Build everything that can fail on memory before touching the
+	 * environment
+	 */
+	orig = getenv("KRB5_CONFIG");
+	if (orig != NULL)
+		saved = pstrdup(orig);
+	combined = psprintf("%s:%s", conf,
+						(orig != NULL && orig[0] != '\0') ? orig : "/etc/krb5.conf");
+
+	setenv("KRB5_CONFIG", combined, 1);
+	ret = krb5_init_context(&kctx);
+	if (saved != NULL)
+		setenv("KRB5_CONFIG", saved, 1);
+	else
+		unsetenv("KRB5_CONFIG");
+	pfree(combined);
+	if (saved != NULL)
+		pfree(saved);
+
+	if (ret != 0)
+		return true;
+
+	if (krb5_parse_name(kctx, port->gss->princ, &client) == 0)
+	{
+		if (krb5_get_init_creds_opt_alloc(kctx, &opt) == 0)
+		{
+			memset(&creds, 0, sizeof(creds));
+			ret = krb5_get_init_creds_password(kctx, &creds, client, NULL,
+											   NULL, NULL, 0, NULL, opt);
+
+			if (ret == KRB5KDC_ERR_CLIENT_REVOKED ||
+				ret == KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN ||
+				ret == KRB5KDC_ERR_NAME_EXP)
+			{
+				const char *msg = krb5_get_error_message(kctx, ret);
+
+				strlcpy(reason, msg, reasonlen);
+				krb5_free_error_message(kctx, msg);
+				result = false;
+			}
+			else if (ret == KRB5_KDC_UNREACH)
+			{
+				ereport(LOG,
+						(errmsg("could not reach the Kerberos KDC for credential validation of principal \"%s\"",
+								port->gss->princ)));
+			}
+
+			krb5_free_cred_contents(kctx, &creds);
+			krb5_get_init_creds_opt_free(kctx, opt);
+		}
+		krb5_free_principal(kctx, client);
+	}
+	krb5_free_context(kctx);
+
+	return result;
+#else
+	return true;
+#endif
 }
 #endif							/* ENABLE_GSS */
 

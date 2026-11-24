@@ -21,6 +21,7 @@
 #include "catalog/pg_authid.h"
 #include "libpq/auth-validate-methods.h"
 #include "libpq/auth-validate.h"
+#include "libpq/auth.h"
 #include "libpq/libpq-be.h"
 #include "libpq/oauth.h"
 #include "miscadmin.h"
@@ -30,6 +31,7 @@
 /* Function declarations for internal use */
 static bool validate_oauth_credentials(void);
 static bool validate_cert_credentials(void);
+static bool validate_gss_credentials(void);
 
 /*
  * Initialize validation methods
@@ -43,6 +45,7 @@ InitializeValidationMethods(void)
 	 */
 	RegisterCredentialValidator(CVT_OAUTH, validate_oauth_credentials);
 	RegisterCredentialValidator(CVT_CERT, validate_cert_credentials);
+	RegisterCredentialValidator(CVT_GSS, validate_gss_credentials);
 }
 
 /*
@@ -139,6 +142,53 @@ validate_cert_credentials(void)
 		SetCredentialValidationFailureDetail("client certificate check failed for user \"%s\": certificate has been revoked",
 											 port->user_name);
 		return false;
+	}
+#endif
+
+	return true;
+}
+
+/*
+ * CVT_GSS validator: the GSS security context established at authentication
+ * has a lifetime that is fixed when the context is set up.  It is bounded by
+ * the lifetime of the Kerberos ticket the client presented and by the allowed
+ * clock skew.  The server never sees the ticket again after authentication,
+ * so it is the context that is checked, not the ticket.  Once that lifetime
+ * has elapsed the credential that authenticated the session is no longer
+ * valid.  This is checked locally from the context retained on the Port, with
+ * no round trip to the KDC.  A session without a GSS context is treated as
+ * valid: there is nothing GSS-specific to check.
+ *
+ * Where MIT Kerberos is available the KDC is then also asked whether the
+ * principal is still enabled (see CheckKerberosPrincipalEnabled()), which
+ * does make a round trip, bounded by credential_validation_kdc_timeout.
+ */
+static bool
+validate_gss_credentials(void)
+{
+#ifdef ENABLE_GSS
+	Port	   *port = MyProcPort;
+
+	if (port == NULL)
+		return true;
+
+	if (be_gssapi_get_context_expired(port))
+	{
+		SetCredentialValidationFailureDetail("GSSAPI check failed for user \"%s\": security context has expired",
+											 port->user_name);
+		return false;
+	}
+
+	/* The principal may also have been disabled or removed at the KDC */
+	{
+		char		reason[256];
+
+		if (!CheckKerberosPrincipalEnabled(port, reason, sizeof(reason)))
+		{
+			SetCredentialValidationFailureDetail("GSSAPI check failed for user \"%s\": the KDC no longer accepts the Kerberos principal (%s)",
+												 port->user_name, reason);
+			return false;
+		}
 	}
 #endif
 

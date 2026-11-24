@@ -813,7 +813,22 @@ if not gssapiopt.disabled()
       args: test_c_args, include_directories: postgres_inc)
     cdata.set('ENABLE_GSS', 1)
 
-    krb_srvtab = 'FILE:/@0@/krb5.keytab)'.format(get_option('sysconfdir'))
+    # Credential validation can also ask the KDC whether a session's principal
+    # is still enabled, using the MIT Kerberos API directly.  The krb5-gssapi
+    # dependency above does not link libkrb5, so look it up separately.
+    krb5_kdc_dep = dependency('krb5', required: false)
+    if host_system != 'windows' and krb5_kdc_dep.found() and cc.check_header(
+        'krb5.h', dependencies: [krb5_kdc_dep], required: false,
+        args: test_c_args, include_directories: postgres_inc) and cc.has_function(
+        'krb5_init_context_profile', dependencies: [krb5_kdc_dep],
+        args: test_c_args, include_directories: postgres_inc) and cc.has_function(
+        'krb5_get_init_creds_password', dependencies: [krb5_kdc_dep],
+        args: test_c_args, include_directories: postgres_inc)
+      cdata.set('USE_KRB5_KDC_CHECK', 1)
+      backend_deps += krb5_kdc_dep
+    endif
+
+    krb_srvtab ='FILE:/@0@/krb5.keytab)'.format(get_option('sysconfdir'))
     cdata.set_quoted('PG_KRB_SRVTAB', krb_srvtab)
   elif gssapiopt.enabled()
     error('''could not find function 'gss_store_cred_into' required for GSSAPI''')

@@ -1641,6 +1641,16 @@ if test "$with_gssapi" = yes ; then
 	[AC_CHECK_HEADERS(gssapi_ext.h, [], [AC_MSG_ERROR([gssapi_ext.h header file is required for GSSAPI])])])
 fi
 
+# Credential validation can also ask the KDC whether a GSSAPI session's
+# principal is still enabled.  That uses the MIT Kerberos API directly, so it
+# is only enabled where that library is found.
+if test "$with_gssapi" = yes && test "$PORTNAME" != "win32"; then
+  AC_CHECK_HEADERS(krb5.h, [
+    AC_SEARCH_LIBS(krb5_init_context_profile, [krb5], [
+      AC_SEARCH_LIBS(krb5_get_init_creds_password, [krb5], [
+        AC_DEFINE(USE_KRB5_KDC_CHECK, 1, [Define to 1 to check GSSAPI principals against the KDC during credential validation. (MIT Kerberos only)])])])])
+fi
+
 PGAC_PATH_PROGS(OPENSSL, openssl)
 pgac_openssl_version="$($OPENSSL version 2> /dev/null || echo openssl not found)"
 AC_MSG_NOTICE([using openssl: $pgac_openssl_version])

@@ -1139,7 +1139,8 @@ include_dir 'conf.d'
         exists and has not passed its <literal>VALID UNTIL</literal> expiration;
         depending on the authentication method, an additional method-specific
         check is applied, such as expiration of an <productname>OAuth</productname>
-        bearer token or of the client certificate.  The default is
+        bearer token, of the client certificate, or of the
+        <acronym>GSSAPI</acronym> security context.  The default is
         <literal>off</literal>.
        </para>
        <para>
@@ -1155,6 +1156,23 @@ include_dir 'conf.d'
         <varname>ssl_crl_dir</varname>, or an intermediate CA revoked after
         the session was established, will therefore not cause an
         already-open session to be terminated by this mechanism.
+       </para>
+       <para>
+        For <acronym>GSSAPI</acronym> sessions, the check ends the session
+        when the lifetime of the security context set up at authentication
+        has elapsed.  That lifetime is bounded by the client's Kerberos
+        ticket and the allowed clock skew; the server does not see the ticket
+        again after authentication, and renewing it does not extend an open
+        session.  When <productname>PostgreSQL</productname> is built with
+        MIT Kerberos, the check also asks the Kerberos KDC whether the
+        principal is still usable, and ends the session if the KDC reports it
+        as disabled, expired or removed.  No credential is sent for this.
+        The check contacts the KDC every time it runs, waiting at most
+        <xref linkend="guc-credential-validation-kdc-timeout"/>; if the KDC
+        cannot be reached in that time the session is treated as valid.  A
+        principal whose password has expired is not ended.  This is not done
+        on Windows, and sessions that use <acronym>SSPI</acronym> are not
+        covered by the <acronym>GSSAPI</acronym> checks.
        </para>
        <para>
         The re-validation period is controlled by
@@ -1201,6 +1219,33 @@ include_dir 'conf.d'
         enabled.  If this value is specified without units, it is taken as
         seconds.  The valid range is from 5 seconds to 3600 seconds (one hour),
         and the default is 60 seconds.
+       </para>
+       <para>
+        Like <xref linkend="guc-credential-validation-enabled"/>, this
+        parameter can only be set at session start and cannot be changed
+        within a session.
+       </para>
+      </listitem>
+     </varlistentry>
+     <varlistentry id="guc-credential-validation-kdc-timeout" xreflabel="credential_validation_kdc_timeout">
+      <term><varname>credential_validation_kdc_timeout</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>credential_validation_kdc_timeout</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+
+      <listitem>
+       <para>
+        Sets how long, for <acronym>GSSAPI</acronym> sessions, a credential
+        re-validation waits on the Kerberos KDC when it checks that the
+        session's principal is still usable.  The limit applies to the whole
+        request, which the Kerberos library would otherwise keep retrying for
+        a long time.  If the KDC does not answer in time the check is treated
+        as passed and the session is left open.  If this value is specified
+        without units, it is taken as seconds.  The valid range is from 1
+        second to 60 seconds, and the default is 5 seconds.  It has an effect
+        only when <productname>PostgreSQL</productname> was built with MIT
+        Kerberos support for this check.
        </para>
        <para>
         Like <xref linkend="guc-credential-validation-enabled"/>, this
