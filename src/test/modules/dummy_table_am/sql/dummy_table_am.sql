@@ -1,0 +1,44 @@
+-- Tests for the SQL-level size functions with a table AM
+CREATE EXTENSION dummy_table_am;
+
+-- The AM reports half of the heap footprint for the main fork, so the size
+-- functions must not report the relation's file sizes.
+CREATE TABLE dummy_table_am_tab (a int) USING dummy_table_am;
+CREATE TABLE dummy_table_am_heap (a int);
+INSERT INTO dummy_table_am_tab SELECT generate_series(1, 1000);
+INSERT INTO dummy_table_am_heap SELECT generate_series(1, 1000);
+
+-- Both tables use the same amount of storage, and the AM reports half of it.
+SELECT pg_relation_size('dummy_table_am_tab') =
+       pg_relation_size('dummy_table_am_heap') / 2 AS half_of_heap;
+SELECT pg_relation_size('dummy_table_am_tab') <>
+       pg_relation_size('dummy_table_am_heap') AS differs_from_heap;
+
+-- The other forks are still measured from their files; the inserts above
+-- already created the fsm fork.
+SELECT pg_relation_size('dummy_table_am_tab', 'fsm') > 0 AS fsm_exists,
+       pg_relation_size('dummy_table_am_tab', 'vm') = 0 AS no_vm_yet;
+
+-- The AM's answer is counted exactly once, not added to the file sizes:
+-- pg_table_size() is the AM's answer plus the other forks.
+SELECT pg_table_size('dummy_table_am_tab') =
+       pg_relation_size('dummy_table_am_tab')
+       + pg_relation_size('dummy_table_am_tab', 'fsm')
+       + pg_relation_size('dummy_table_am_tab', 'vm')
+       + pg_relation_size('dummy_table_am_tab', 'init')
+       AS table_size_counts_forks;
+SELECT pg_total_relation_size('dummy_table_am_tab') =
+       pg_table_size('dummy_table_am_tab') AS total_size_exact;
+
+-- After VACUUM the vm fork appears as well, and the same identity holds.
+VACUUM dummy_table_am_tab;
+SELECT pg_relation_size('dummy_table_am_tab', 'vm') > 0 AS vm_exists;
+SELECT pg_table_size('dummy_table_am_tab') =
+       pg_relation_size('dummy_table_am_tab')
+       + pg_relation_size('dummy_table_am_tab', 'fsm')
+       + pg_relation_size('dummy_table_am_tab', 'vm')
+       + pg_relation_size('dummy_table_am_tab', 'init')
+       AS table_size_counts_forks;
+
+DROP TABLE dummy_table_am_tab, dummy_table_am_heap;
+DROP EXTENSION dummy_table_am;

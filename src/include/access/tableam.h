@@ -754,6 +754,14 @@ typedef struct TableAmRoutine
 	/*
 	 * See table_relation_size().
 	 *
+	 * For MAIN_FORKNUM the callback reports the physical footprint of the
+	 * relation's own storage, including whatever the AM keeps outside the
+	 * main fork -- this is what pg_relation_size() returns to the user.  It
+	 * must not include the relation's TOAST table or its indexes; the
+	 * SQL-level size functions add those separately.  For InvalidForkNumber
+	 * it reports the relation's overall footprint.  For the other forks a
+	 * block-oriented AM reports the size of the corresponding files.
+	 *
 	 * Note that currently a few callers use the MAIN_FORKNUM size to figure
 	 * out the range of potentially interesting blocks (brin, analyze). It's
 	 * probable that we'll need to revise the interface for those at some

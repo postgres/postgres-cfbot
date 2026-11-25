@@ -15,6 +15,7 @@
 
 #include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/tableam.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_database.h"
@@ -319,6 +320,10 @@ pg_tablespace_size_name(PG_FUNCTION_ARGS)
 /*
  * calculate size of (one fork of) a relation
  *
+ * This measures the fork's files directly.  It is used for relations that
+ * have no table access method (indexes, partitioned tables) and for the
+ * forks that are not the main one.
+ *
  * Note: we can safely apply this to temp tables of other sessions, so there
  * is no check here or at the call sites for that.
  */
@@ -360,12 +365,40 @@ calculate_relation_size(RelFileLocator *rfn, ProcNumber backend, ForkNumber fork
 	return totalsize;
 }
 
+/*
+ * Calculate the size of the main fork of a relation.
+ *
+ * For a custom table AM the size of the main fork is provided by the AM.
+ * A table AM may store its data outside the standard main fork (for
+ * example, in additional files of its own), so only the AM itself can
+ * account for all of it.  Relations without a table access method (e.g.
+ * indexes, partitioned tables) are measured by summing up the sizes of
+ * their main fork files on disk.
+ *
+ * The built-in heap AM keeps that file-based measurement as well.  Its
+ * relation_size callback goes through smgr, which raises an error when the
+ * main fork file does not exist, while the size functions have always
+ * reported zero in that case -- an unlogged table on a standby being the
+ * typical example.
+ */
+static int64
+calculate_main_relation_size(Relation rel)
+{
+	if (rel->rd_tableam == NULL ||
+		rel->rd_tableam == GetHeapamTableAmRoutine())
+		return calculate_relation_size(&(rel->rd_locator), rel->rd_backend,
+									   MAIN_FORKNUM);
+
+	return (int64) table_relation_size(rel, MAIN_FORKNUM);
+}
+
 Datum
 pg_relation_size(PG_FUNCTION_ARGS)
 {
 	Oid			relOid = PG_GETARG_OID(0);
 	text	   *forkName = PG_GETARG_TEXT_PP(1);
 	Relation	rel;
+	ForkNumber	forknum;
 	int64		size;
 
 	rel = try_relation_open(relOid, AccessShareLock);
@@ -380,8 +413,13 @@ pg_relation_size(PG_FUNCTION_ARGS)
 	if (rel == NULL)
 		PG_RETURN_NULL();
 
-	size = calculate_relation_size(&(rel->rd_locator), rel->rd_backend,
-								   forkname_to_number(text_to_cstring(forkName)));
+	forknum = forkname_to_number(text_to_cstring(forkName));
+
+	if (forknum == MAIN_FORKNUM)
+		size = calculate_main_relation_size(rel);
+	else
+		size = calculate_relation_size(&(rel->rd_locator), rel->rd_backend,
+									   forknum);
 
 	relation_close(rel, AccessShareLock);
 
@@ -403,10 +441,15 @@ calculate_toast_table_size(Oid toastrelid)
 
 	toastRel = relation_open(toastrelid, AccessShareLock);
 
-	/* toast heap size, including FSM and VM size */
+	/* toast table size, including FSM and VM size */
 	for (forkNum = 0; forkNum <= MAX_FORKNUM; forkNum++)
-		size += calculate_relation_size(&(toastRel->rd_locator),
-										toastRel->rd_backend, forkNum);
+	{
+		if (forkNum == MAIN_FORKNUM)
+			size += calculate_main_relation_size(toastRel);
+		else
+			size += calculate_relation_size(&(toastRel->rd_locator),
+											toastRel->rd_backend, forkNum);
+	}
 
 	/* toast index size, including FSM and VM size */
 	indexlist = RelationGetIndexList(toastRel);
@@ -445,11 +488,21 @@ calculate_table_size(Relation rel)
 	ForkNumber	forkNum;
 
 	/*
-	 * heap size, including FSM and VM
+	 * relation size, including FSM and VM.  The main fork comes from the
+	 * relation's table access method, the other forks are measured from
+	 * their files.  This deliberately does not ask the AM for the overall
+	 * size: an AM's answer for that need not be the sum of the per-fork
+	 * sizes (table_block_relation_size() leaves out the init fork, for
+	 * instance), and pg_table_size() has always added up the forks.
 	 */
 	for (forkNum = 0; forkNum <= MAX_FORKNUM; forkNum++)
-		size += calculate_relation_size(&(rel->rd_locator), rel->rd_backend,
-										forkNum);
+	{
+		if (forkNum == MAIN_FORKNUM)
+			size += calculate_main_relation_size(rel);
+		else
+			size += calculate_relation_size(&(rel->rd_locator),
+											rel->rd_backend, forkNum);
+	}
 
 	/*
 	 * Size of toast relation
