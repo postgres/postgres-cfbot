@@ -2117,6 +2117,23 @@ select pg_get_viewdef('tt201v', true);
             FROM SYSTEM_USER "system_user"("system_user")) AS su2;
 (1 row)
 
+-- SUBSTRING SIMILAR with an operator as first argument
+create function tt202f(text, int) returns text
+  language sql immutable as 'select $1 || $2';
+create operator < (leftarg = text, rightarg = int, function = tt202f);
+create view tt202v as
+select substring((s < 1) similar '%#"1#"' escape '#') as ss
+from (values ('x'::text)) t(s);
+select pg_get_viewdef('tt202v', true);
+                              pg_get_viewdef                              
+--------------------------------------------------------------------------
+  SELECT SUBSTRING((s < 1) SIMILAR '%#"1#"'::text ESCAPE '#'::text) AS ss+
+    FROM ( VALUES ('x'::text)) t(s);
+(1 row)
+
+drop view tt202v;
+drop operator < (text, int);
+drop function tt202f(text, int);
 -- corner cases with empty join conditions
 create view tt21v as
 select * from tt5 natural inner join tt6;
