@@ -55,7 +55,6 @@
 #include "utils/wait_event.h"
 
 #define MIN_SPINS_PER_DELAY 10
-#define MAX_SPINS_PER_DELAY 1000
 #define NUM_DELAYS			1000
 #define MIN_DELAY_USEC		1000L
 #define MAX_DELAY_USEC		1000000L

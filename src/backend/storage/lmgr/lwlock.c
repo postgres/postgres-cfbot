@@ -170,6 +170,19 @@ static LWLockHandle held_lwlocks[MAX_SIMUL_LWLOCKS];
 #define MAX_USER_DEFINED_TRANCHES 256
 
 /*
+ * Per-tranche adaptive read interval for LWLockWaitListLock(). Sized to
+ * cover both built-in and extension tranches so each gets its own slot.
+ */
+#define NUM_ADAPTIVE_TRANCHES (LWTRANCHE_FIRST_USER_DEFINED + MAX_USER_DEFINED_TRANCHES)
+
+/* State re-read threshold for increasing the polling interval */
+#define SPINS_PER_LOCK_READ_THRESHOLD   5
+
+/* Current re-read interval of each tranche, indexed by lock->tranche */
+static int      spins_per_lock_read[NUM_ADAPTIVE_TRANCHES];
+
+
+/*
  * Shared memory structure holding user-defined tranches.
  */
 typedef struct LWLockTrancheShmemData
@@ -835,6 +848,8 @@ static void
 LWLockWaitListLock(LWLock *lock)
 {
 	uint32		old_state;
+	int			read_interval;
+	int			idx;
 #ifdef LWLOCK_STATS
 	lwlock_stats *lwstats;
 	uint32		delays = 0;
@@ -842,37 +857,74 @@ LWLockWaitListLock(LWLock *lock)
 	lwstats = get_lwlock_stats_entry(lock);
 #endif
 
+	/*
+	 * Use a backend-local polling interval for each tranche.
+	 * Clamp out-of-range tranche IDs into the last array slot.
+	 */
+	idx = Min(lock->tranche, NUM_ADAPTIVE_TRANCHES - 1);
+	read_interval = Max(spins_per_lock_read[idx], 1);
+
 	while (true)
 	{
 		/*
 		 * Always try once to acquire the lock directly, without setting up
-		 * the spin-delay infrastructure. The work necessary for that shows up
-		 * in profiles and is rarely necessary.
+		 * the spin-delay infrastructure.  The work necessary for that shows
+		 * up in profiles and is rarely necessary.
 		 */
 		old_state = pg_atomic_fetch_or_u32(&lock->state, LW_FLAG_LOCKED);
 		if (likely(!(old_state & LW_FLAG_LOCKED)))
 			break;				/* got lock */
 
-		/* and then spin without atomic operations until lock is released */
+		/* Then spin without atomic operations until lock is released. */
 		{
 			SpinDelayStatus delayStatus;
+			int			spins_since_read = 0;
+			int			lock_read_count = 0;
 
 			init_local_spin_delay(&delayStatus);
 
 			while (old_state & LW_FLAG_LOCKED)
 			{
 				perform_spin_delay(&delayStatus);
-				old_state = pg_atomic_read_u32(&lock->state);
+
+				/*
+				 * Poll lock->state every read_interval active-spin iterations
+				 * and immediately after every sleep.
+				 */
+				if (delayStatus.spins == 0 ||
+					++spins_since_read >= read_interval)
+				{
+					/*
+					 * A high read count means that this wait was long relative to the current interval.
+					 * Widen it gradually, but not beyond the maximum active-spin period.
+					 * Do not widen it for the mandatory poll after a sleep.
+					 */
+					if (delayStatus.spins != 0 && lock_read_count > SPINS_PER_LOCK_READ_THRESHOLD)
+					{
+						read_interval = Min(read_interval + 1, MAX_SPINS_PER_DELAY);
+					}
+
+					old_state = pg_atomic_read_u32(&lock->state);
+					++lock_read_count;
+					spins_since_read = 0;
+				}
 			}
 #ifdef LWLOCK_STATS
 			delays += delayStatus.delays;
 #endif
 			finish_spin_delay(&delayStatus);
+
+			/*
+			 * Bias the interval back toward polling on every spin,
+			 * and save it for subsequent waits on this tranche in this backend.
+			 */
+			read_interval = Max(read_interval - 2, 1);
+			spins_per_lock_read[idx] = read_interval;
 		}
 
 		/*
-		 * Retry. The lock might obviously already be re-acquired by the time
-		 * we're attempting to get it again.
+		 * Retry.  The lock might already have been re-acquired by the time
+		 * we attempt to get it again.
 		 */
 	}
 
