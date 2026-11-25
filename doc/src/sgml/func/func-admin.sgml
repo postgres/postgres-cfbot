@@ -1682,6 +1682,12 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
           </para>
          </listitem>
         </itemizedlist>
+       </para>
+       <para>
+        The size of the main fork is reported by the relation's table access
+        method, which may keep its data somewhere other than the relation's
+        main fork; the other forks are measured from the size of their files
+        on disk.
        </para></entry>
       </row>
 
@@ -1733,7 +1739,9 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
        <para>
         Computes the disk space used by the specified table, excluding indexes
         (but including its TOAST table if any, free space map, and visibility
-        map).
+        map).  The size of the table itself is reported by its table access
+        method; the TOAST table, free space map and visibility map are added
+        to that.
        </para></entry>
       </row>
 

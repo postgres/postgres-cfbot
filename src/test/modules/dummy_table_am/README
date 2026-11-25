@@ -1,0 +1,13 @@
+Dummy Table AM
+==============
+
+Dummy table AM is a module for testing any facility usable by a table access
+method.  The routine is a copy of the heap one with a few callbacks replaced,
+so that a table created with this access method has real storage while the
+answers the core gets from the AM are easy to predict.
+
+Currently it only overrides relation_size(), which reports half of the heap
+footprint for the main fork.  The number tracks the relation's real size but
+is never equal to it, so the SQL-level size functions can be told apart from
+plain file measurement, while RelationGetNumberOfBlocks() still stays within
+the relation.
