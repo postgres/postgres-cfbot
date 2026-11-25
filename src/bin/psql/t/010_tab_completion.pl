@@ -206,6 +206,31 @@ check_completion(
 
 clear_query();
 
+check_completion(
+	"grant select on tab1 to r with grant \t",
+	qr/with grant option /i,
+	"complete OPTION after WITH GRANT");
+check_completion(
+	"\t",
+	qr/granted by /i,
+	"complete GRANTED BY after WITH GRANT OPTION");
+clear_query();
+
+check_completion(
+	"revoke grant option \t",
+	qr/revoke grant option for /i,
+	"complete FOR after REVOKE GRANT OPTION");
+check_completion(
+	"select on tab1 from r granted \t",
+	qr/from r granted by /i,
+	"complete BY after GRANTED in REVOKE");
+check_completion("pg_mon\t", qr/pg_monitor /, "complete the grantor role");
+check_completion(
+	"ca\t",
+	qr/cascade /i,
+	"complete CASCADE after the grantor in REVOKE");
+clear_query();
+
 # check interpretation of referenced names
 check_completion(
 	"alter table tab1 drop constraint t\t",
