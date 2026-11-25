@@ -1497,7 +1497,8 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 	 * the children.
 	 */
 	tableOIDs =
-		find_all_inheritors(RelationGetRelid(onerel), AccessShareLock, NULL);
+		find_all_inheritors_extended(RelationGetRelid(onerel), true,
+									 AccessShareLock, NULL);
 
 	/*
 	 * Check that there's at least one descendant, else fail.  This could

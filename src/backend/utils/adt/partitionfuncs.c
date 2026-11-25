@@ -85,7 +85,8 @@ pg_partition_tree(PG_FUNCTION_ARGS)
 		 * Find all members of inheritance set.  We only need AccessShareLock
 		 * on the children for the partition information lookup.
 		 */
-		partitions = find_all_inheritors(rootrelid, AccessShareLock, NULL);
+		partitions = find_all_inheritors_extended(rootrelid, true,
+												  AccessShareLock, NULL);
 
 		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 			elog(ERROR, "return type must be a row type");

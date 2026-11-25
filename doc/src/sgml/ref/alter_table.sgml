@@ -1174,7 +1174,8 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       <literal>DETACH CONCURRENTLY</literal> invocation that was canceled or
       interrupted is completed.
       At most one partition in a partitioned table can be pending detach at
-      a time.
+      a time.  Until the detach is completed, commands that alter the
+      partitioned table also apply to, and lock, the partition pending detach.
      </para>
     </listitem>
    </varlistentry>

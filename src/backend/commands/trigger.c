@@ -1171,7 +1171,7 @@ CreateTriggerFiringOn(const CreateTrigStmt *stmt, const char *queryString,
 	 */
 	if (partition_recurse)
 	{
-		PartitionDesc partdesc = RelationGetPartitionDesc(rel, true);
+		PartitionDesc partdesc = RelationGetPartitionDesc(rel);
 		int			i;
 		MemoryContext oldcxt,
 					perChildCxt;
@@ -1580,7 +1580,7 @@ renametrig(RenameStmt *stmt)
 		/* ... and if it is partitioned, recurse to its partitions */
 		if (targetrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 		{
-			PartitionDesc partdesc = RelationGetPartitionDesc(targetrel, true);
+			PartitionDesc partdesc = RelationGetPartitionDesc(targetrel);
 
 			for (int i = 0; i < partdesc->nparts; i++)
 			{
@@ -1726,8 +1726,7 @@ renametrig_partition(Relation tgrel, Oid partitionId, Oid parentTriggerOid,
 		/* And if this relation is partitioned, recurse to its partitions */
 		if (partitionRel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 		{
-			PartitionDesc partdesc = RelationGetPartitionDesc(partitionRel,
-															  true);
+			PartitionDesc partdesc = RelationGetPartitionDesc(partitionRel);
 
 			for (int i = 0; i < partdesc->nparts; i++)
 			{
@@ -1849,7 +1848,7 @@ EnableDisableTrigger(Relation rel, const char *tgname, Oid tgparent,
 			rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
 			(TRIGGER_FOR_ROW(oldtrig->tgtype)))
 		{
-			PartitionDesc partdesc = RelationGetPartitionDesc(rel, true);
+			PartitionDesc partdesc = RelationGetPartitionDesc(rel);
 			int			i;
 
 			for (i = 0; i < partdesc->nparts; i++)
