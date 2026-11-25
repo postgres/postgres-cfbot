@@ -249,11 +249,6 @@ ExecInitSort(Sort *node, EState *estate, int eflags)
 	outerPlanState(sortstate) = ExecInitNode(outerPlan(node), estate, eflags);
 
 	/*
-	 * Initialize scan slot and type.
-	 */
-	ExecCreateScanSlotFromOuterPlan(estate, &sortstate->ss, &TTSOpsVirtual);
-
-	/*
 	 * Initialize return slot and type. No need to initialize projection info
 	 * because this node doesn't do projections.
 	 */
