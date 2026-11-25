@@ -276,6 +276,10 @@ extern List *make_inner_pathkeys_for_merge(PlannerInfo *root,
 extern List *trim_mergeclauses_for_inner_pathkeys(PlannerInfo *root,
 												  List *mergeclauses,
 												  List *pathkeys);
+extern List *get_distinct_required_pathkeys(PlannerInfo *root);
+extern int	count_presorted_distinct_pathkeys(PlannerInfo *root,
+											  List *needed_pathkeys,
+											  List *pathkeys);
 extern List *truncate_useless_pathkeys(PlannerInfo *root,
 									   RelOptInfo *rel,
 									   List *pathkeys);

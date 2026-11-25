@@ -5411,12 +5411,7 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		ListCell   *lc;
 		double		limittuples = root->distinct_pathkeys == NIL ? 1.0 : -1.0;
 
-		if (parse->hasDistinctOn &&
-			list_length(root->distinct_pathkeys) <
-			list_length(root->sort_pathkeys))
-			needed_pathkeys = root->sort_pathkeys;
-		else
-			needed_pathkeys = root->distinct_pathkeys;
+		needed_pathkeys = get_distinct_required_pathkeys(root);
 
 		foreach(lc, input_rel->pathlist)
 		{
@@ -5539,7 +5534,8 @@ get_useful_pathkeys_for_distinct(PlannerInfo *root, List *needed_pathkeys,
 								 List *path_pathkeys)
 {
 	List	   *useful_pathkeys_list = NIL;
-	List	   *useful_pathkeys = NIL;
+	List	   *useful_pathkeys;
+	int			npresorted;
 
 	/* always include the given 'needed_pathkeys' */
 	useful_pathkeys_list = lappend(useful_pathkeys_list,
@@ -5548,45 +5544,17 @@ get_useful_pathkeys_for_distinct(PlannerInfo *root, List *needed_pathkeys,
 	if (!enable_distinct_reordering)
 		return useful_pathkeys_list;
 
-	/*
-	 * Scan the given 'path_pathkeys' and construct a list of PathKey nodes
-	 * that match 'needed_pathkeys', but only up to the longest matching
-	 * prefix.
-	 *
-	 * When we have DISTINCT ON, we must ensure that the resulting pathkey
-	 * list matches initial distinctClause pathkeys; otherwise, it won't have
-	 * the desired behavior.
-	 */
-	foreach_node(PathKey, pathkey, path_pathkeys)
-	{
-		/*
-		 * The PathKey nodes are canonical, so they can be checked for
-		 * equality by simple pointer comparison.
-		 */
-		if (!list_member_ptr(needed_pathkeys, pathkey))
-			break;
-		if (root->parse->hasDistinctOn &&
-			!list_member_ptr(root->distinct_pathkeys, pathkey))
-			break;
-
-		useful_pathkeys = lappend(useful_pathkeys, pathkey);
-	}
-
-	/* If no match at all, no point in reordering needed_pathkeys */
-	if (useful_pathkeys == NIL)
+	npresorted = count_presorted_distinct_pathkeys(root, needed_pathkeys,
+												 path_pathkeys);
+	if (npresorted == 0)
 		return useful_pathkeys_list;
 
-	/*
-	 * If not full match, the resulting pathkey list is not useful without
-	 * incremental sort.
-	 */
-	if (list_length(useful_pathkeys) < list_length(needed_pathkeys) &&
-		!enable_incremental_sort)
+	/* A partial match only helps when incremental sort is available. */
+	if (!enable_incremental_sort && npresorted < list_length(needed_pathkeys))
 		return useful_pathkeys_list;
 
-	/* Append the remaining PathKey nodes in needed_pathkeys */
-	useful_pathkeys = list_concat_unique_ptr(useful_pathkeys,
-											 needed_pathkeys);
+	useful_pathkeys = list_copy_head(path_pathkeys, npresorted);
+	useful_pathkeys = list_concat_unique_ptr(useful_pathkeys, needed_pathkeys);
 
 	/*
 	 * If the resulting pathkey list is the same as the 'needed_pathkeys',

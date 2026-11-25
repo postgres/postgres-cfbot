@@ -2199,6 +2199,71 @@ count_common_leading_pathkeys_unordered(List *keys1, List *keys2)
 }
 
 /*
+ * Return the required ordering for sort-based DISTINCT.  For DISTINCT ON,
+ * include any additional ORDER BY keys that determine which row to keep.
+ */
+List *
+get_distinct_required_pathkeys(PlannerInfo *root)
+{
+	if (root->parse->hasDistinctOn &&
+		list_length(root->sort_pathkeys) > list_length(root->distinct_pathkeys))
+		return root->sort_pathkeys;
+
+	return root->distinct_pathkeys;
+}
+
+/*
+ * Count the input pathkeys that can be used as the prefix of a reordered
+ * DISTINCT ordering.  DISTINCT keys may be permuted, but any remaining keys
+ * must match in order after all the DISTINCT keys have been matched.
+ */
+int
+count_presorted_distinct_pathkeys(PlannerInfo *root, List *needed_pathkeys,
+								List *pathkeys)
+{
+	List	   *distinct_pathkeys = root->distinct_pathkeys;
+	int			ncommon = 0;
+	int			ndistinct = list_length(distinct_pathkeys);
+	int			ncheck = Min(list_length(pathkeys), list_length(needed_pathkeys));
+
+	if (distinct_pathkeys == NIL)
+		return 0;
+
+	/* Retain the traditional DISTINCT prefix when reordering is disabled. */
+	if (!enable_distinct_reordering || needed_pathkeys == distinct_pathkeys)
+		return count_common_leading_pathkeys_unordered(distinct_pathkeys,
+													  pathkeys);
+
+	for (; ncommon < ncheck && ncommon < ndistinct; ncommon++)
+	{
+		PathKey    *pathkey = list_nth(pathkeys, ncommon);
+
+		if (!list_member_ptr(distinct_pathkeys, pathkey) ||
+			!list_member_ptr(needed_pathkeys, pathkey))
+			return ncommon;
+	}
+
+	/*
+	 * Only interpret the trailing keys as an ORDER BY suffix when the
+	 * required ordering starts with the DISTINCT keys.
+	 */
+	if (ncommon == ndistinct && ncommon < ncheck &&
+		pathkeys_contained_in(distinct_pathkeys, needed_pathkeys))
+	{
+		for (; ncommon < ncheck; ncommon++)
+		{
+			PathKey    *pathkey1 = list_nth(pathkeys, ncommon);
+			PathKey    *pathkey2 = list_nth(needed_pathkeys, ncommon);
+
+			if (pathkey1 != pathkey2)
+				break;
+		}
+	}
+
+	return ncommon;
+}
+
+/*
  * truncate_useless_pathkeys
  *		Shorten the given PathKey List to just the useful PathKeys.  If all
  *		PathKeys are useful, return the input List, otherwise return a new
@@ -2243,10 +2308,8 @@ truncate_useless_pathkeys(PlannerInfo *root,
 	nuseful = Max(nuseful, nuseful2);
 
 	/*
-	 * Check if these pathkeys are useful for GROUP BY or DISTINCT.  The order
-	 * of the pathkeys does not matter here as Unique and GroupAggregate for
-	 * these operations can take advantage of Paths presorted by any of the
-	 * GROUP BY/DISTINCT pathkeys.
+	 * Check if these pathkeys are useful for GROUP BY or DISTINCT.  Their
+	 * grouping keys can be reordered to take advantage of presorted input.
 	 */
 	nuseful2 = count_common_leading_pathkeys_unordered(root->group_pathkeys,
 													   pathkeys);
@@ -2254,8 +2317,9 @@ truncate_useless_pathkeys(PlannerInfo *root,
 		return pathkeys;
 
 	nuseful = Max(nuseful, nuseful2);
-	nuseful2 = count_common_leading_pathkeys_unordered(root->distinct_pathkeys,
-													   pathkeys);
+	nuseful2 = count_presorted_distinct_pathkeys(root,
+												get_distinct_required_pathkeys(root),
+												pathkeys);
 
 	if (nuseful2 == ntotal)
 		return pathkeys;
