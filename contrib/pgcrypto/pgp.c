@@ -264,7 +264,8 @@ pgp_set_s2k_mode(PGP_Context *ctx, int mode)
 int
 pgp_set_s2k_count(PGP_Context *ctx, int count)
 {
-	if (ctx->s2k_mode == PGP_S2K_ISALTED && count >= 1024 && count <= 65011712)
+	if (ctx->s2k_mode == PGP_S2K_ISALTED &&
+		count >= PGP_S2K_COUNT_MIN && count <= PGP_S2K_COUNT_MAX)
 	{
 		ctx->s2k_count = count;
 		return PXE_OK;
