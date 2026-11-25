@@ -295,6 +295,8 @@ _readBoolExpr(ReadNodeContext *ctx)
 		local_node->boolop = OR_EXPR;
 	else if (length == 3 && strncmp(token, "not", 3) == 0)
 		local_node->boolop = NOT_EXPR;
+	else if (length == 7 && strncmp(token, "implies", 7) == 0)
+		local_node->boolop = IMPLIES_EXPR;
 	else
 		elog(ERROR, "unrecognized boolop \"%.*s\"", length, token);
 

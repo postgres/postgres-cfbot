@@ -1428,6 +1428,9 @@ transformBoolExpr(ParseState *pstate, BoolExpr *a)
 		case NOT_EXPR:
 			opname = "NOT";
 			break;
+		case IMPLIES_EXPR:
+			opname = "IMPLIES";
+			break;
 		default:
 			elog(ERROR, "unrecognized boolop: %d", (int) a->boolop);
 			opname = NULL;		/* keep compiler quiet */
