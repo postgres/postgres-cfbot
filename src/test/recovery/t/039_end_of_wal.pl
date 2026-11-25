@@ -376,4 +376,73 @@ ok( $node->log_contains(
 		"invalid contrecord length 123456 .* at .*", $log_size),
 	"xlp_rem_len bad (split record header)");
 
+
+###########################################################################
+note "xlog-switch record ending on a segment boundary";
+###########################################################################
+
+# A switch record that starts SizeOfXLogRecord bytes before the end of a
+# segment ends exactly on the boundary, and pg_switch_wal() has to return
+# the boundary, not a position past the next page header.
+
+# Emit a non-transactional logical message (no XID, no commit record)
+# with a payload of $size bytes, returning its end LSN in bytes.
+sub emit_message
+{
+	my ($node, $size) = @_;
+	return int(
+		$node->safe_psql(
+			'postgres',
+			"SELECT pg_logical_emit_message(false, '', repeat('a', $size)) - '0/0'"
+		));
+}
+
+my $SizeOfXLogRecord = 24;
+
+# Start on a fresh segment.  Nothing else writes WAL on this node, so the
+# positions below are exact.
+$node->safe_psql('postgres', "SELECT pg_switch_wal()");
+my $lsn = int(
+	$node->safe_psql(
+		'postgres', "SELECT pg_current_wal_insert_lsn() - '0/0'"));
+my $seg_end = ($lsn / $WAL_SEGMENT_SIZE + 1) * $WAL_SEGMENT_SIZE;
+
+# Measure the space a message takes beyond its payload, padding included.
+# 256 is a multiple of MAXALIGN, over 255 so the record uses the long
+# main-data header like the fill, and small enough to stay on the first page.
+my $probe_size = 256;
+my $end = emit_message($node, $probe_size);
+my $overhead = $end - $lsn - $probe_size;
+$lsn = $end;
+
+# Measure the page header size with a message crossing one page boundary.
+# The first page of a segment has a longer header, but nothing below
+# crosses a segment boundary.
+my $size = start_of_next_page($lsn) - $lsn;
+$end = emit_message($node, $size);
+my $SizeOfXLogShortPHD = $end - $lsn - $size - $overhead;
+$lsn = $end;
+
+# Fill the segment in steps, so that no record gets too big for any
+# segment size, until the rest fits in one message.
+my $step = $WAL_SEGMENT_SIZE / 16;
+$lsn = emit_message($node, $step) while $seg_end - $lsn > 2 * $step;
+
+# Size the last message to end SizeOfXLogRecord bytes before the
+# boundary, less the page headers it crosses.  A record ending exactly on
+# a page boundary reports the boundary while the next one starts after
+# the page header, hence the - 1.
+my $headers =
+  ($seg_end - start_of_next_page($lsn - 1)) / $WAL_BLOCK_SIZE *
+  $SizeOfXLogShortPHD;
+$lsn = emit_message($node,
+	$seg_end - $SizeOfXLogRecord - $lsn - $headers - $overhead);
+is($lsn, $seg_end - $SizeOfXLogRecord,
+	"message ends SizeOfXLogRecord bytes before the segment end");
+
+# The switch record is only a header, so it ends on the boundary.
+is( $node->safe_psql('postgres', "SELECT pg_switch_wal() - '0/0'"),
+	$seg_end,
+	"pg_switch_wal() returns the segment boundary");
+
 done_testing();
