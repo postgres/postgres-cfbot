@@ -1832,7 +1832,7 @@ SELECT c~>1, c FROM test_cube ORDER BY c~>1 LIMIT 15; -- ascending by left bound
       240 | (337, 455),(240, 359)
 (15 rows)
 
-SELECT c~>2, c FROM test_cube ORDER BY c~>2 LIMIT 15; -- ascending by right bound
+SELECT c~>2, c FROM test_cube ORDER BY c~>2, c~>4 LIMIT 15; -- ascending by right bound (c~>4 breaks the tie at 270)
  ?column? |             c             
 ----------+---------------------------
         0 | (0, 100000)
