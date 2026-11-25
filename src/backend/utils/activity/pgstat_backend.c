@@ -383,7 +383,7 @@ pgstat_flush_backend(bool nowait, uint32 flags)
  * If some stats could not be flushed due to lock contention, return true.
  */
 bool
-pgstat_backend_flush_cb(bool nowait)
+pgstat_backend_flush_cb(bool nowait, bool xact_boundary)
 {
 	return pgstat_flush_backend(nowait, PGSTAT_BACKEND_FLUSH_ALL);
 }
