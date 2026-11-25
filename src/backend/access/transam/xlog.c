@@ -8532,9 +8532,9 @@ CreateRestartPoint(int flags)
 	 * before the last shutdown. Such time travel is still possible in case of
 	 * immediate shutdown, though.
 	 *
-	 * We don't explicitly advance minRecoveryPoint when we do create a
-	 * restartpoint. It's assumed that flushing the buffers will do that as a
-	 * side-effect.
+	 * When we do create a restartpoint, flushing the buffers advances
+	 * minRecoveryPoint as a side-effect, but not necessarily up to the last
+	 * record replayed.  A shutdown restartpoint takes care of that below.
 	 */
 	if (!XLogRecPtrIsValid(lastCheckPointRecPtr) ||
 		lastCheckPoint.redo <= ControlFile->checkPointCopy.redo)
@@ -8645,6 +8645,15 @@ CreateRestartPoint(int flags)
 	 * work has already happened during this checkpoint.
 	 */
 	INJECTION_POINT("create-restart-point", NULL);
+
+	/*
+	 * The flush above advanced minRecoveryPoint only if something written
+	 * carried a newer LSN, which not every record leaves behind, e.g. an
+	 * abort.  At shutdown, make it cover everything replayed, as pg_rewind
+	 * takes it for the end of WAL of a standby.
+	 */
+	if (flags & CHECKPOINT_IS_SHUTDOWN)
+		UpdateMinRecoveryPoint(InvalidXLogRecPtr, true);
 
 	/*
 	 * Remember the prior checkpoint's redo ptr for
