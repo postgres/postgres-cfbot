@@ -906,6 +906,15 @@
   boot_val => 'true',
 },
 
+/* WIP: for now keep this in QUERY_TUNING_GEQO group for testing convenience */
+{ name => 'enable_goo_join_search', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
+  short_desc => 'Enables the planner\'s use of GOO join search for large join problems.',
+  long_desc => 'Greedy Operator Ordering (GOO) is a deterministic join search algorithm for queries with many relations.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_goo_join_search',
+  boot_val => 'false',
+},
+
 { name => 'enable_group_by_reordering', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables reordering of GROUP BY keys.',
   flags => 'GUC_EXPLAIN',
@@ -1217,6 +1226,16 @@
   boot_val => '4096',
   min => '64',
   max => 'MAX_KILOBYTES',
+},
+
+/* Test-only GUC. */
+{ name => 'goo_greedy_strategy', type => 'enum', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
+  short_desc => 'Selects the heuristic used by GOO to compare join candidates.',
+  long_desc => 'Valid values are result_size, cost, and combined.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'goo_greedy_strategy',
+  boot_val => 'GOO_GREEDY_STRATEGY_COMBINED',
+  options => 'goo_greedy_strategy_options',
 },
 
 { name => 'gss_accept_delegation', type => 'bool', context => 'PGC_SIGHUP', group => 'CONN_AUTH_AUTH',

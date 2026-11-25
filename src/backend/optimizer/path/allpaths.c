@@ -35,6 +35,7 @@
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/geqo.h"
+#include "optimizer/goo.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -3932,6 +3933,9 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
 
 		if (join_search_hook)
 			return (*join_search_hook) (root, levels_needed, initial_rels);
+		/* WIP: for now use geqo_threshold for testing */
+		else if (enable_goo_join_search && levels_needed >= geqo_threshold)
+			return goo_join_search(root, levels_needed, initial_rels);
 		else if (enable_geqo && levels_needed >= geqo_threshold)
 			return geqo(root, levels_needed, initial_rels);
 		else
