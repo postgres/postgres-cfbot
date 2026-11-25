@@ -51,6 +51,9 @@ The basic operations on a ResourceOwner are:
 * release a ResourceOwner's assets (free all owned resources, but not the
   owner object itself)
 
+* reset a ResourceOwner (including child owner objects) for reuse; all resources
+  must have been released beforehand
+
 * delete a ResourceOwner (including child owner objects); all resources
   must have been released beforehand
 
@@ -168,6 +171,10 @@ phases, but after the first call to ResourceOwnerRelease(), you cannot use
 the ResourceOwner to remember any more resources. You also cannot call
 ResourceOwnerForget on the resource owner to release any previously
 remembered resources "in retail", after you have started the release process.
+
+After all three release phases have completed, ResourceOwnerReset() can be
+used to make the ResourceOwner and its descendants reusable. The owner
+objects and their allocated storage are retained.
 
 Normally, you are expected to call ResourceOwnerForget on every resource so
 that at commit, the ResourceOwner is empty (locks are an exception). If there
