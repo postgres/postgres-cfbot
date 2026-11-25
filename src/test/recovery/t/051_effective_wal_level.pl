@@ -479,6 +479,63 @@ select pg_drop_replication_slot('slot_2');
 ]);
 	wait_for_logical_decoding_disabled($primary);
 
+	# Test logging a standby snapshot during the activation. An assertion in
+	# LogStandbySnapshot() fails if ProcArrayLock is released too early.
+
+	# Use a transaction with an XID to delay its XLogLogicalInfo cache update.
+	my $psql_snapshot = $primary->background_psql('postgres');
+	$psql_snapshot->query_safe(
+		q[
+select injection_points_set_local();
+select injection_points_attach('log-standby-snapshot', 'wait');
+begin;
+select pg_current_xact_id();
+]);
+
+	# Stop the activation right before enabling logical decoding.
+	$psql_create_slot = $primary->background_psql('postgres');
+	$psql_create_slot_pid =
+	  $psql_create_slot->query_safe('select pg_backend_pid()');
+	$psql_create_slot->query_until(
+		qr/create_slot_snapshot/,
+		q(\echo create_slot_snapshot
+select injection_points_set_local();
+select injection_points_attach('logical-decoding-activation', 'wait');
+select pg_create_logical_replication_slot('slot_snapshot', 'test_decoding');
+));
+	$primary->wait_for_event('client backend', 'logical-decoding-activation');
+
+	# Stop logging a standby snapshot before collecting running transactions.
+	$psql_snapshot->query_until(
+		qr/log_snapshot/,
+		q(\echo log_snapshot
+select pg_log_standby_snapshot();
+));
+	$primary->wait_for_event('client backend', 'log-standby-snapshot');
+
+	# Let the activation complete, then resume logging the snapshot.
+	my $snapshot_log_offset = -s $primary->logfile;
+	$primary->safe_psql('postgres',
+		qq[select injection_points_wakeup('logical-decoding-activation')]);
+	$primary->wait_for_log(
+		"logical decoding is enabled upon creating a new logical replication slot",
+		$snapshot_log_offset);
+	$primary->safe_psql('postgres',
+		qq[select injection_points_wakeup('log-standby-snapshot')]);
+
+	# The slot creation waits for the transaction to finish.
+	$psql_snapshot->query_safe('commit');
+	$psql_snapshot->quit;
+	quit_and_wait($primary, $psql_create_slot, $psql_create_slot_pid);
+	test_wal_level($primary, "replica|logical",
+		"standby snapshot is logged during the activation of logical decoding"
+	);
+
+	# Restore the disabled state for the tests that follow.
+	$primary->safe_psql('postgres',
+		qq[select pg_drop_replication_slot('slot_snapshot')]);
+	wait_for_logical_decoding_disabled($primary);
+
 	# Test a race when logical decoding activation is concurrently interrupted.
 
 	# Start a psql session to test the case where the activation process is
