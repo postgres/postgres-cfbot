@@ -153,3 +153,20 @@ select regexp_match('foo', '(?:.|){99}');
 select 'xyz' ~ 'x(\w)(?=\1)';  -- no backrefs in LACONs
 select 'xyz' ~ 'x(\w)(?=(\1))';
 select 'a' ~ '\x7fffffff';  -- invalid chr code
+
+-- Test the regexp cache, which keeps the 32 most recently used regexps.
+-- Fill it, reuse the oldest entry, then compile one more regexp: the least
+-- recently used entry should be discarded, not the one we just reused.
+-- (we must disable parallel query here, else the regexps might be compiled
+-- in a parallel worker rather than in this backend)
+set debug_parallel_query = off;
+select count(*) from generate_series(0, 31) g where 'x' ~ ('^cache_test_' || g);
+select 'x' ~ '^cache_test_0' as f;
+select 'x' ~ '^cache_test_32' as f;
+reset debug_parallel_query;
+select count(*) from pg_backend_memory_contexts
+  where name = 'RegexpMemoryContext';
+select ident from pg_backend_memory_contexts
+  where name = 'RegexpMemoryContext' and
+    ident in ('^cache_test_0', '^cache_test_1', '^cache_test_32')
+  order by ident;
