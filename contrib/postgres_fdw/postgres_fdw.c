@@ -532,6 +532,14 @@ static void adjust_foreign_grouping_path_cost(PlannerInfo *root,
 											  int *p_disabled_nodes,
 											  Cost *p_startup_cost,
 											  Cost *p_run_cost);
+static Path *make_remote_join_input_path(RelOptInfo *rel,
+										 PgFdwRelationInfo *func_fpinfo);
+static void estimate_remote_hashjoin_cost(PlannerInfo *root,
+										  RelOptInfo *joinrel,
+										  RelOptInfo *outerrel,
+										  RelOptInfo *innerrel,
+										  JoinType jointype,
+										  JoinPathExtraData *extra);
 static bool ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
 									  EquivalenceClass *ec, EquivalenceMember *em,
 									  void *arg);
@@ -3614,6 +3622,17 @@ estimate_path_cost_size(PlannerInfo *root,
 			run_cost += nrows * join_cost.per_tuple;
 			nrows = clamp_row_est(nrows * fpinfo->joinclause_sel);
 			run_cost += nrows * remote_conds_cost.per_tuple;
+
+			/*
+			 * If the foreign server can use a hash join, use what that would
+			 * cost if we did it ourselves instead of the above.  See
+			 * estimate_remote_hashjoin_cost().
+			 */
+			if (fpinfo->remote_hashjoin)
+			{
+				startup_cost = fpinfo->remote_hashjoin_startup_cost;
+				run_cost = fpinfo->remote_hashjoin_run_cost;
+			}
 		}
 		else if (IS_UPPER_REL(foreignrel))
 		{
@@ -3989,6 +4008,89 @@ adjust_foreign_grouping_path_cost(PlannerInfo *root,
 		*p_startup_cost *= sort_multiplier;
 		*p_run_cost *= sort_multiplier;
 	}
+}
+
+/*
+ * Build a dummy path for one side of a pushed down join.  It carries the cost
+ * and size of computing that side on the foreign server, so that the
+ * planner's join costing functions can be used to cost the remote join.
+ *
+ * func_fpinfo is the stub fpinfo to use if the side is a FUNCTION RTE that
+ * was absorbed into the join, because such a rel has no fdw_private.
+ */
+static Path *
+make_remote_join_input_path(RelOptInfo *rel, PgFdwRelationInfo *func_fpinfo)
+{
+	PgFdwRelationInfo *fpinfo = func_fpinfo ? func_fpinfo :
+		(PgFdwRelationInfo *) rel->fdw_private;
+	Path	   *path = makeNode(Path);
+
+	path->parent = rel;
+	path->pathtarget = rel->reltarget;
+	path->rows = fpinfo->rows;
+	path->startup_cost = fpinfo->rel_startup_cost;
+	path->total_cost = fpinfo->rel_startup_cost + fpinfo->rel_run_cost;
+
+	return path;
+}
+
+/*
+ * Estimate the cost of computing a join on the foreign server with a hash
+ * join, for when we're not using remote estimates.
+ *
+ * We don't know what join strategy the foreign server is going to use.  But
+ * when there are pushed down clauses that can be hashed, it can at least use
+ * a hash join, just like we could.  So we cost the remote join with the
+ * planner's own hash join costing, using the remote costs of the two sides as
+ * the inputs.  The result is stored in the joinrel's fpinfo.
+ */
+static void
+estimate_remote_hashjoin_cost(PlannerInfo *root, RelOptInfo *joinrel,
+							  RelOptInfo *outerrel, RelOptInfo *innerrel,
+							  JoinType jointype, JoinPathExtraData *extra)
+{
+	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) joinrel->fdw_private;
+	Path	   *outer_path = make_remote_join_input_path(outerrel,
+														 fpinfo->outer_func_fpinfo);
+	Path	   *inner_path = make_remote_join_input_path(innerrel,
+														 fpinfo->inner_func_fpinfo);
+	HashPath   *hash_path = makeNode(HashPath);
+	JoinCostWorkspace workspace;
+
+	/* Like for a local hash join, only join clauses can be hash clauses */
+	foreach_node(RestrictInfo, rinfo, fpinfo->joinclauses)
+	{
+		if (rinfo->can_join && OidIsValid(rinfo->hashjoinoperator) &&
+			clause_sides_match_join(rinfo, outerrel->relids, innerrel->relids))
+			hash_path->path_hashclauses = lappend(hash_path->path_hashclauses,
+												  rinfo);
+	}
+
+	fpinfo->remote_hashjoin = (hash_path->path_hashclauses != NIL);
+	if (!fpinfo->remote_hashjoin)
+		return;
+
+	/*
+	 * The target list is left empty, because estimate_path_cost_size() adds
+	 * the cost of evaluating it for every foreign path.
+	 */
+	hash_path->jpath.path.parent = joinrel;
+	hash_path->jpath.path.pathtarget = create_empty_pathtarget();
+	hash_path->jpath.jointype = jointype;
+	hash_path->jpath.inner_unique = extra->inner_unique;
+	hash_path->jpath.outerjoinpath = outer_path;
+	hash_path->jpath.innerjoinpath = inner_path;
+	hash_path->jpath.joinrestrictinfo = list_concat_copy(fpinfo->joinclauses,
+														 fpinfo->remote_conds);
+
+	initial_cost_hashjoin(root, &workspace, jointype,
+						  hash_path->path_hashclauses,
+						  outer_path, inner_path, extra, false);
+	final_cost_hashjoin(root, hash_path, &workspace, extra);
+
+	fpinfo->remote_hashjoin_startup_cost = hash_path->jpath.path.startup_cost;
+	fpinfo->remote_hashjoin_run_cost = hash_path->jpath.path.total_cost -
+		hash_path->jpath.path.startup_cost;
 }
 
 /*
@@ -7782,9 +7884,19 @@ postgresGetForeignJoinPaths(PlannerInfo *root,
 	 * selectivity here while we have special join info.
 	 */
 	if (!fpinfo->use_remote_estimate)
+	{
 		fpinfo->joinclause_sel = clauselist_selectivity(root, fpinfo->joinclauses,
 														0, fpinfo->jointype,
 														extra->sjinfo);
+
+		/*
+		 * Likewise estimate what a hash join would cost on the foreign
+		 * server, while we have the information that the hash join costing
+		 * functions need.
+		 */
+		estimate_remote_hashjoin_cost(root, joinrel, outerrel, innerrel,
+									  jointype, extra);
+	}
 
 	/* Estimate costs for bare join relation */
 	estimate_path_cost_size(root, joinrel, NIL, NIL, NULL,

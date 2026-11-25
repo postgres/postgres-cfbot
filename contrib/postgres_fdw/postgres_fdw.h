@@ -59,6 +59,15 @@ typedef struct PgFdwRelationInfo
 	/* Selectivity of join conditions */
 	Selectivity joinclause_sel;
 
+	/*
+	 * Cost of computing a join on the foreign server with a hash join, when
+	 * not using remote estimates.  Only valid if remote_hashjoin is true,
+	 * i.e. when the join has pushed down clauses that can be hashed.
+	 */
+	bool		remote_hashjoin;
+	Cost		remote_hashjoin_startup_cost;
+	Cost		remote_hashjoin_run_cost;
+
 	/* Estimated size and cost for a scan, join, or grouping/aggregation. */
 	double		rows;
 	int			width;
