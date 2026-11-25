@@ -250,11 +250,13 @@ CREATE INDEX test_index1 on testschema.test_default_tab (id);
 CREATE INDEX test_index2 on testschema.test_default_tab (id) TABLESPACE regress_tblspace;
 ALTER TABLE testschema.test_default_tab ADD CONSTRAINT test_index3 PRIMARY KEY (id);
 ALTER TABLE testschema.test_default_tab ADD CONSTRAINT test_index4 UNIQUE (id) USING INDEX TABLESPACE regress_tblspace;
+ALTER TABLE testschema.test_default_tab ADD CONSTRAINT test_index5 EXCLUDE (id WITH =) USING INDEX TABLESPACE regress_tblspace;
 
 \d testschema.test_index1
 \d testschema.test_index2
 \d testschema.test_index3
 \d testschema.test_index4
+\d testschema.test_index5
 -- use a custom tablespace for default_tablespace
 SET default_tablespace TO regress_tblspace;
 -- tablespace should not change if no rewrite
@@ -263,6 +265,7 @@ ALTER TABLE testschema.test_default_tab ALTER id TYPE bigint;
 \d testschema.test_index2
 \d testschema.test_index3
 \d testschema.test_index4
+\d testschema.test_index5
 SELECT * FROM testschema.test_default_tab;
 -- tablespace should not change even if there is an index rewrite
 ALTER TABLE testschema.test_default_tab ALTER id TYPE int;
@@ -270,6 +273,7 @@ ALTER TABLE testschema.test_default_tab ALTER id TYPE int;
 \d testschema.test_index2
 \d testschema.test_index3
 \d testschema.test_index4
+\d testschema.test_index5
 SELECT * FROM testschema.test_default_tab;
 -- now use the default tablespace for default_tablespace
 SET default_tablespace TO '';
@@ -279,12 +283,14 @@ ALTER TABLE testschema.test_default_tab ALTER id TYPE int;
 \d testschema.test_index2
 \d testschema.test_index3
 \d testschema.test_index4
+\d testschema.test_index5
 -- tablespace should not change even if there is an index rewrite
 ALTER TABLE testschema.test_default_tab ALTER id TYPE bigint;
 \d testschema.test_index1
 \d testschema.test_index2
 \d testschema.test_index3
 \d testschema.test_index4
+\d testschema.test_index5
 DROP TABLE testschema.test_default_tab;
 
 -- check that default_tablespace doesn't affect ALTER TABLE index rebuilds
