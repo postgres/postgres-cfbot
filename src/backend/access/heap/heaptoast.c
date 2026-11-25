@@ -84,9 +84,11 @@ heap_toast_delete(Relation rel, HeapTuple oldtup, bool is_speculative)
  *	newtup: the candidate new tuple to be inserted
  *	oldtup: the old row version for UPDATE, or NULL for INSERT
  *	options: options to be passed to heap_insert() for toast rows
+ *	flags: TOAST fetch flags, see toast_helper.h
  * Result:
  *	either newtup if no toasting is needed, or a palloc'd modified tuple
- *	that is what should actually get stored
+ *	that is what should actually get stored, or NULL if flags includes
+ *	TOAST_MISSING_OK and an external value of newtup could not be fetched
  *
  * NOTE: neither newtup nor oldtup will be modified.  This is a change
  * from the pre-8.1 API of this routine.
@@ -94,7 +96,7 @@ heap_toast_delete(Relation rel, HeapTuple oldtup, bool is_speculative)
  */
 HeapTuple
 heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
-							uint32 options)
+							uint32 options, uint32 flags)
 {
 	HeapTuple	result_tuple;
 	TupleDesc	tupleDesc;
@@ -154,7 +156,8 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 		ttc.ttc_oldisnull = toast_oldisnull;
 	}
 	ttc.ttc_attr = toast_attr;
-	toast_tuple_init(&ttc);
+	if (!toast_tuple_init(&ttc, flags))
+		return NULL;
 
 	/* ----------
 	 * Compress and/or save external until data fits into target length
@@ -636,11 +639,15 @@ toast_build_flattened_tuple(TupleDesc tupleDesc,
  * sliceoffset is the byte offset within the TOAST value from which to fetch.
  * slicelength is the number of bytes to be fetched from the TOAST value.
  * result is the varlena into which the results should be written.
+ * flags are TOAST fetch flags, see toast_helper.h.
+ *
+ * Returns true on success.  If flags includes TOAST_MISSING_OK, returns false
+ * instead of raising an error when chunks are missing or inconsistent.
  */
-void
+bool
 heap_fetch_toast_slice(Relation toastrel, Oid8 valueid, int32 attrsize,
 					   int32 sliceoffset, int32 slicelength,
-					   varlena *result)
+					   varlena *result, uint32 flags)
 {
 	Relation   *toastidxs;
 	ScanKeyData toastkey[3];
@@ -753,27 +760,45 @@ heap_fetch_toast_slice(Relation toastrel, Oid8 valueid, int32 attrsize,
 		 * Some checks on the data we've found
 		 */
 		if (curchunk != expectedchunk)
+		{
+			if (flags & TOAST_MISSING_OK)
+				goto toast_missing;
+
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg_internal("unexpected chunk number %d (expected %d) for toast value %" PRIu64 " in %s",
 									 curchunk, expectedchunk, valueid,
 									 RelationGetRelationName(toastrel))));
+		}
+
 		if (curchunk > endchunk)
+		{
+			if (flags & TOAST_MISSING_OK)
+				goto toast_missing;
+
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg_internal("unexpected chunk number %d (out of range %d..%d) for toast value %" PRIu64 " in %s",
 									 curchunk,
 									 startchunk, endchunk, valueid,
 									 RelationGetRelationName(toastrel))));
+		}
+
 		expected_size = curchunk < totalchunks - 1 ? max_chunk_size
 			: attrsize - ((totalchunks - 1) * max_chunk_size);
+
 		if (chunksize != expected_size)
+		{
+			if (flags & TOAST_MISSING_OK)
+				goto toast_missing;
+
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg_internal("unexpected chunk size %d (expected %d) in chunk %d of %d for toast value %" PRIu64 " in %s",
 									 chunksize, expected_size,
 									 curchunk, totalchunks, valueid,
 									 RelationGetRelationName(toastrel))));
+		}
 
 		/*
 		 * Copy the data into proper place in our result
@@ -797,13 +822,26 @@ heap_fetch_toast_slice(Relation toastrel, Oid8 valueid, int32 attrsize,
 	 * Final checks that we successfully fetched the datum
 	 */
 	if (expectedchunk != (endchunk + 1))
+	{
+		if (flags & TOAST_MISSING_OK)
+			goto toast_missing;
+
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg_internal("missing chunk number %d for toast value %" PRIu64 " in %s",
 								 expectedchunk, valueid,
 								 RelationGetRelationName(toastrel))));
+	}
 
 	/* End scan and close indexes. */
 	systable_endscan_ordered(toastscan);
 	toast_close_indexes(toastidxs, num_indexes, AccessShareLock);
+
+	return true;
+
+toast_missing:
+	systable_endscan_ordered(toastscan);
+	toast_close_indexes(toastidxs, num_indexes, AccessShareLock);
+
+	return false;
 }
