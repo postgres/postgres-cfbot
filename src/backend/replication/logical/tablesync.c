@@ -431,9 +431,8 @@ ProcessSyncingTablesForApply(XLogRecPtr current_lsn)
 			if (current_lsn >= rstate->lsn)
 			{
 				char		originname[NAMEDATALEN];
-
-				rstate->state = SUBREL_STATE_READY;
-				rstate->lsn = current_lsn;
+				char		current_relstate;
+				XLogRecPtr	statelsn;
 
 				/*
 				 * Remove the tablesync origin tracking if exists.
@@ -452,6 +451,24 @@ ProcessSyncingTablesForApply(XLogRecPtr current_lsn)
 				 */
 				LockSharedObject(SubscriptionRelationId, MyLogicalRepWorker->subid,
 								 0, AccessShareLock);
+
+				/*
+				 * A concurrent REFRESH PUBLICATION may have removed or
+				 * re-added the table since we cached SYNCDONE.  Only this
+				 * apply worker launches tablesync workers, so a re-added
+				 * table cannot have reached SYNCDONE yet.
+				 */
+				current_relstate = GetSubscriptionRelState(MyLogicalRepWorker->subid,
+														   rstate->relid, &statelsn);
+				if (current_relstate != SUBREL_STATE_SYNCDONE)
+				{
+					elog(DEBUG1, "skipping READY transition for relation %u of subscription \"%s\" as it is no longer SYNCDONE",
+						 rstate->relid, MySubscription->name);
+					continue;
+				}
+
+				rstate->state = SUBREL_STATE_READY;
+				rstate->lsn = current_lsn;
 
 				if (!rel)
 					rel = table_open(SubscriptionRelRelationId, RowExclusiveLock);
