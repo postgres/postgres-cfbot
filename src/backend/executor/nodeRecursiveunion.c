@@ -24,6 +24,7 @@
 #include "utils/memutils.h"
 #include "utils/tuplestore.h"
 
+static void update_storage_stats(RecursiveUnionState *node);
 
 
 /*
@@ -134,6 +135,8 @@ ExecRecursiveUnion(PlanState *pstate)
 			 * table.  This saves a round of free/malloc from creating a new
 			 * tuple store.
 			 */
+			if (node->ps.instrument)
+				update_storage_stats(node);
 			tuplestore_clear(node->working_table);
 
 			swaptemp = node->working_table;
@@ -336,6 +339,41 @@ ExecReScanRecursiveUnion(RecursiveUnionState *node)
 	/* reset processing state */
 	node->recursing = false;
 	node->intermediate_empty = true;
+	if (node->ps.instrument)
+		update_storage_stats(node);
 	tuplestore_clear(node->working_table);
 	tuplestore_clear(node->intermediate_table);
+}
+
+/*
+ * update_storage_stats
+ *		Update the storage statistics for EXPLAIN ANALYZE with the storage
+ *		space used by the working and intermediate tables.
+ *
+ * We expect this to be called before clearing the tables so that the
+ * maxSpaceUsed and usedDisk fields are not forgotten between iterations and
+ * rescans.  We calculate the total space used by both tables since they were
+ * last cleared and store that if it's higher than any previous iteration's.
+ * "usedDisk" is marked if either table spilled during any iteration.
+ */
+static void
+update_storage_stats(RecursiveUnionState *node)
+{
+	Tuplestorestate *tables[2] = {node->working_table,
+	node->intermediate_table};
+	int64		totalSpaceUsed = 0;
+
+	/* Calculate the sum of the space used by both tables. */
+	for (int i = 0; i < 2; i++)
+	{
+		bool		usedDisk;
+		int64		spaceUsed;
+
+		tuplestore_get_stats_since_clear(tables[i], &usedDisk, &spaceUsed);
+		totalSpaceUsed += spaceUsed;
+		node->usedDisk |= usedDisk;
+	}
+
+	/* Record this one if it beats the previous best. */
+	node->maxSpaceUsed = Max(node->maxSpaceUsed, totalSpaceUsed);
 }
