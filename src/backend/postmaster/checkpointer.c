@@ -67,6 +67,7 @@
 #include "storage/subsystems.h"
 #include "utils/acl.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "utils/wait_event.h"
@@ -796,6 +797,24 @@ CheckpointWriteDelay(int flags, double progress)
 		return;
 
 	/*
+	 * Apply configuration changes promptly, even during a fast checkpoint or
+	 * one that is behind schedule, so that e.g. a change of
+	 * synchronous_standby_names takes effect without waiting for the
+	 * checkpoint to finish.  But not during a shutdown or end-of-recovery
+	 * checkpoint: UpdateFullPageWrites() would either write WAL between the
+	 * REDO point and the shutdown checkpoint record, or, while recovery is
+	 * still in progress, change full_page_writes without WAL-logging it.
+	 */
+	if (ConfigReloadPending &&
+		!(flags & (CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_END_OF_RECOVERY)))
+	{
+		ConfigReloadPending = false;
+		ProcessConfigFile(PGC_SIGHUP);
+		/* update shmem copies of config variables */
+		UpdateSharedMemoryConfig();
+	}
+
+	/*
 	 * Perform the usual duties and take a nap, unless we're behind schedule,
 	 * in which case we just try to catch up as quickly as possible.
 	 */
@@ -805,14 +824,6 @@ CheckpointWriteDelay(int flags, double progress)
 		!FastCheckpointRequested() &&
 		IsCheckpointOnSchedule(progress))
 	{
-		if (ConfigReloadPending)
-		{
-			ConfigReloadPending = false;
-			ProcessConfigFile(PGC_SIGHUP);
-			/* update shmem copies of config variables */
-			UpdateSharedMemoryConfig();
-		}
-
 		AbsorbSyncRequests();
 		absorb_counter = WRITES_PER_ABSORB;
 
@@ -846,6 +857,8 @@ CheckpointWriteDelay(int flags, double progress)
 	/* Check for barrier events. */
 	if (ProcSignalBarrierPending)
 		ProcessProcSignalBarrier();
+
+	INJECTION_POINT("checkpoint-write-delay", NULL);
 }
 
 /*
