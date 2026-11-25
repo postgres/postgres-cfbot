@@ -6,7 +6,6 @@
 #include <limits.h>
 #include <unistd.h>
 
-#include "ecpg-pthread-win32.h"
 #include "ecpgerrno.h"
 #include "ecpglib.h"
 #include "ecpglib_extern.h"
@@ -16,6 +15,7 @@
 #include "pgtypes_interval.h"
 #include "pgtypes_numeric.h"
 #include "pgtypes_timestamp.h"
+#include "port/pg_threads_ext.h"
 #include "sqlca.h"
 
 #ifndef LONG_LONG_MIN
@@ -55,11 +55,13 @@ static struct sqlca_t sqlca_init =
 	}
 };
 
-static pthread_key_t sqlca_key;
-static pthread_once_t sqlca_key_once = PTHREAD_ONCE_INIT;
+static thread_local struct sqlca_t *sqlca_thread_local;
 
-static pthread_mutex_t debug_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t debug_init_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pg_tss_t ecpg_on_thread_exit_id;
+static bool ecpg_on_thread_exit_initialized;
+
+static pg_mtx_t debug_mutex = PG_MTX_PLAIN_INIT;
+static pg_mtx_t debug_init_mutex = PG_MTX_PLAIN_INIT;
 static volatile int simple_debug = 0;
 static FILE *debugstream = NULL;
 
@@ -93,34 +95,65 @@ ecpg_init(const struct connection *con, const char *connection_name, const int l
 }
 
 static void
-ecpg_sqlca_key_destructor(void *arg)
+ecpg_on_thread_exit(void *argument)
 {
-	free(arg);					/* sqlca structure allocated in ECPGget_sqlca */
+	/* Clean up thread-local data in memory.c. */
+	ecpg_clear_auto_mem();
+
+	/* Clean up thread-local data in descriptor.h. */
+	ecpg_descriptor_on_thread_exit();
+
+	/* Clean up thread-local SQL state object. */
+	if (sqlca_thread_local)
+		free(sqlca_thread_local);
 }
 
-static void
-ecpg_sqlca_key_init(void)
+static bool
+ecpg_on_thread_exit_initialize(void)
 {
-	pthread_key_create(&sqlca_key, ecpg_sqlca_key_destructor);
+	bool		result = false;
+	static pg_mtx_t mutex = PG_MTX_PLAIN_INIT;
+
+	/*
+	 * This is only reached when sqlca_thread_local is not already set, ie
+	 * once per thread (unless it failed last time and we're trying again), so
+	 * keep things simple with a big lock.
+	 */
+	pg_mtx_lock(&mutex);
+	if (ecpg_on_thread_exit_initialized)
+	{
+		result = true;
+	}
+	else if (pg_tss_create(&ecpg_on_thread_exit_id,
+						   ecpg_on_thread_exit) == pg_thrd_success)
+	{
+		result = true;
+		ecpg_on_thread_exit_initialized = true;
+	}
+	pg_mtx_unlock(&mutex);
+
+	/* Make sure the cleanup function runs in this thread. */
+	if (result)
+		pg_tss_set(ecpg_on_thread_exit_id, (void *) 1);
+
+	return result;
 }
 
 struct sqlca_t *
 ECPGget_sqlca(void)
 {
-	struct sqlca_t *sqlca;
+	if (sqlca_thread_local)
+		return sqlca_thread_local;
 
-	pthread_once(&sqlca_key_once, ecpg_sqlca_key_init);
+	if (!ecpg_on_thread_exit_initialize())
+		return NULL;
 
-	sqlca = pthread_getspecific(sqlca_key);
-	if (sqlca == NULL)
-	{
-		sqlca = malloc(sizeof(struct sqlca_t));
-		if (sqlca == NULL)
-			return NULL;
-		ecpg_init_sqlca(sqlca);
-		pthread_setspecific(sqlca_key, sqlca);
-	}
-	return sqlca;
+	sqlca_thread_local = malloc(sizeof(struct sqlca_t));
+	if (sqlca_thread_local == NULL)
+		return NULL;
+	ecpg_init_sqlca(sqlca_thread_local);
+
+	return sqlca_thread_local;
 }
 
 bool
@@ -204,10 +237,10 @@ void
 ECPGdebug(int n, FILE *dbgs)
 {
 	/* Interlock against concurrent executions of ECPGdebug() */
-	pthread_mutex_lock(&debug_init_mutex);
+	pg_mtx_lock(&debug_init_mutex);
 
 	/* Prevent ecpg_log() from printing while we change settings */
-	pthread_mutex_lock(&debug_mutex);
+	pg_mtx_lock(&debug_mutex);
 
 	if (n > 100)
 	{
@@ -220,12 +253,12 @@ ECPGdebug(int n, FILE *dbgs)
 	debugstream = dbgs;
 
 	/* We must release debug_mutex before invoking ecpg_log() ... */
-	pthread_mutex_unlock(&debug_mutex);
+	pg_mtx_unlock(&debug_mutex);
 
 	/* ... but keep holding debug_init_mutex to avoid racy printout */
 	ecpg_log("ECPGdebug: set to %d\n", simple_debug);
 
-	pthread_mutex_unlock(&debug_init_mutex);
+	pg_mtx_unlock(&debug_init_mutex);
 }
 
 void
@@ -264,7 +297,7 @@ ecpg_log(const char *format, ...)
 
 	sqlca = ECPGget_sqlca();
 
-	pthread_mutex_lock(&debug_mutex);
+	pg_mtx_lock(&debug_mutex);
 
 	/* Now that we hold the mutex, recheck simple_debug */
 	if (simple_debug)
@@ -283,7 +316,7 @@ ecpg_log(const char *format, ...)
 		fflush(debugstream);
 	}
 
-	pthread_mutex_unlock(&debug_mutex);
+	pg_mtx_unlock(&debug_mutex);
 
 	free(fmt);
 }
@@ -424,60 +457,6 @@ ECPGis_noind_null(enum ECPGttype type, const void *ptr)
 	return false;
 }
 
-#ifdef WIN32
-
-int
-pthread_mutex_init(pthread_mutex_t *mp, void *attr)
-{
-	mp->initstate = 0;
-	return 0;
-}
-
-int
-pthread_mutex_lock(pthread_mutex_t *mp)
-{
-	/* Initialize the csection if not already done */
-	if (mp->initstate != 1)
-	{
-		LONG		istate;
-
-		while ((istate = InterlockedExchange(&mp->initstate, 2)) == 2)
-			Sleep(0);			/* wait, another thread is doing this */
-		if (istate != 1)
-			InitializeCriticalSection(&mp->csection);
-		InterlockedExchange(&mp->initstate, 1);
-	}
-	EnterCriticalSection(&mp->csection);
-	return 0;
-}
-
-int
-pthread_mutex_unlock(pthread_mutex_t *mp)
-{
-	if (mp->initstate != 1)
-		return EINVAL;
-	LeaveCriticalSection(&mp->csection);
-	return 0;
-}
-
-static pthread_mutex_t win32_pthread_once_lock = PTHREAD_MUTEX_INITIALIZER;
-
-void
-win32_pthread_once(volatile pthread_once_t *once, void (*fn) (void))
-{
-	if (!*once)
-	{
-		pthread_mutex_lock(&win32_pthread_once_lock);
-		if (!*once)
-		{
-			fn();
-			*once = true;
-		}
-		pthread_mutex_unlock(&win32_pthread_once_lock);
-	}
-}
-#endif							/* WIN32 */
-
 #ifdef ENABLE_NLS
 
 char *
@@ -491,7 +470,7 @@ ecpg_gettext(const char *msgid)
 	 * might as well do it the same way everywhere.
 	 */
 	static volatile bool already_bound = false;
-	static pthread_mutex_t binddomain_mutex = PTHREAD_MUTEX_INITIALIZER;
+	static pg_mtx_t binddomain_mutex = PG_MTX_PLAIN_INIT;
 
 	if (!already_bound)
 	{
@@ -502,7 +481,7 @@ ecpg_gettext(const char *msgid)
 		int			save_errno = errno;
 #endif
 
-		(void) pthread_mutex_lock(&binddomain_mutex);
+		pg_mtx_lock(&binddomain_mutex);
 
 		if (!already_bound)
 		{
@@ -519,7 +498,7 @@ ecpg_gettext(const char *msgid)
 			already_bound = true;
 		}
 
-		(void) pthread_mutex_unlock(&binddomain_mutex);
+		pg_mtx_unlock(&binddomain_mutex);
 
 #ifdef WIN32
 		SetLastError(save_errno);

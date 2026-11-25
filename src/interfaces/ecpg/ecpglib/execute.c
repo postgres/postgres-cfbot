@@ -1968,8 +1968,6 @@ ecpg_do_prologue(int lineno, const int compat, const int force_indicator,
 		return false;
 	}
 
-	ecpg_pthreads_init();
-
 	con = ecpg_get_connection(connection_name);
 
 	if (!ecpg_init(con, connection_name, lineno))

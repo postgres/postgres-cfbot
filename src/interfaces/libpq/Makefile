@@ -75,7 +75,6 @@ endif
 
 ifeq ($(PORTNAME), win32)
 OBJS += \
-	pthread-win32.o \
 	win32.o
 endif
 
@@ -187,6 +186,6 @@ uninstall: uninstall-lib
 clean distclean: clean-lib
 	$(MAKE) -C test $@
 	rm -rf tmp_check
-	rm -f $(OBJS) $(OBJS_SHLIB) $(OBJS_STATIC) pthread.h libpq-refs-stamp
+	rm -f $(OBJS) $(OBJS_SHLIB) $(OBJS_STATIC) libpq-refs-stamp
 # Might be left over from a Win32 client-only build
 	rm -f pg_config_paths.h

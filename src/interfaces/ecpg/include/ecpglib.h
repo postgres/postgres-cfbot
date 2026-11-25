@@ -70,8 +70,6 @@ void	   *ECPGget_var(int number);
 /* dynamic result allocation */
 void		ECPGfree_auto_mem(void);
 
-void		ecpg_pthreads_init(void);
-
 #ifdef __cplusplus
 }
 #endif

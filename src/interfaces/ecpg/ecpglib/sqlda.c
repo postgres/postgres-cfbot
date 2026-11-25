@@ -11,11 +11,11 @@
 
 #include "catalog/pg_type_d.h"
 #include "decimal.h"
-#include "ecpg-pthread-win32.h"
 #include "ecpgerrno.h"
 #include "ecpglib.h"
 #include "ecpglib_extern.h"
 #include "ecpgtype.h"
+#include "port/pg_threads.h"
 #include "sqlca.h"
 #include "sqlda-compat.h"
 #include "sqlda-native.h"

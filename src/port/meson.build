@@ -13,7 +13,9 @@ pgport_sources = [
   'pg_numa.c',
   'pg_popcount_aarch64.c',
   'pg_popcount_x86.c',
+  'pg_signal_processor.c',
   'pg_strong_random.c',
+  'pg_threads.c',
   'pgcheckdir.c',
   'pgmkdirp.c',
   'pgsleep.c',
@@ -77,10 +79,6 @@ replace_funcs_neg = [
   ['strsep'],
   ['timingsafe_bcmp'],
 ]
-
-if host_system != 'windows'
-  replace_funcs_neg += [['pthread_barrier_wait']]
-endif
 
 # Replacement functionality to be built if corresponding configure symbol
 # is true
@@ -157,11 +155,11 @@ pgport_variants = {
     'dependencies': [backend_port_code],
   },
   '': default_lib_args + {
-    'dependencies': [frontend_port_code],
+    'dependencies': [frontend_port_code, thread_dep],
   },
   '_shlib': default_lib_args + {
     'pic': true,
-    'dependencies': [frontend_port_code],
+    'dependencies': [frontend_port_code, thread_dep],
   },
 }
 
