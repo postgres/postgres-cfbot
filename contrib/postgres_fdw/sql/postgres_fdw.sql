@@ -284,6 +284,14 @@ ORDER BY c2;
 DROP FUNCTION local_filter(int);
 DROP FUNCTION local_project(int);
 
+-- Without remote estimates we don't know what join strategy the foreign
+-- server is going to use for a pushed down join.  With an equality join
+-- clause it can use a hash join though, just like we could.  So pushing the
+-- join down should not look more expensive than fetching both sides and
+-- joining them locally.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft1 t2 ON (t1.c1 = t2.c1);
+
 -- ===================================================================
 -- test subscription
 -- ===================================================================
