@@ -60,9 +60,20 @@ PGconn	   *conn = NULL;
 PGconn *
 GetConnection(void)
 {
+	return GetConnectionWithOptions(NULL);
+}
+
+/*
+ * Like GetConnection(), but if options is not NULL, use it as the "options"
+ * connection parameter, replacing any given in the connection string.  The
+ * caller must include any options that should be kept.
+ */
+PGconn *
+GetConnectionWithOptions(const char *options)
+{
 	PGconn	   *tmpconn;
-	int			argcount = 7;	/* dbname, replication, fallback_app_name,
-								 * host, user, port, password */
+	int			argcount = 8;	/* dbname, replication, fallback_app_name,
+								 * host, user, port, options, password */
 	int			i;
 	const char **keywords;
 	const char **values;
@@ -108,6 +119,10 @@ GetConnection(void)
 
 		for (conn_opt = conn_opts; conn_opt->keyword != NULL; conn_opt++)
 		{
+			/* Our own options are added below */
+			if (options && strcmp(conn_opt->keyword, "options") == 0)
+				continue;
+
 			if (conn_opt->val != NULL && conn_opt->val[0] != '\0')
 			{
 				keywords[i] = conn_opt->keyword;
@@ -148,6 +163,12 @@ GetConnection(void)
 	{
 		keywords[i] = "port";
 		values[i] = dbport;
+		i++;
+	}
+	if (options)
+	{
+		keywords[i] = "options";
+		values[i] = options;
 		i++;
 	}
 

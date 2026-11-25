@@ -109,6 +109,11 @@ typedef void (*WriteDataCallback) (size_t nbytes, char *buf,
 #define MINIMUM_VERSION_FOR_WAL_SUMMARIES 170000
 
 /*
+ * idle_session_timeout was added in version 14.
+ */
+#define MINIMUM_VERSION_FOR_IDLE_SESSION_TIMEOUT 140000
+
+/*
  * Different ways to include WAL
  */
 typedef enum
@@ -164,6 +169,15 @@ static bool made_new_xlogdir = false;
 static bool found_existing_xlogdir = false;
 static bool made_tablespace_dirs = false;
 static bool found_tablespace_dirs = false;
+
+/* Connection for the background WAL receiver, see PrepareLogStreamer() */
+static PGconn *bgconn = NULL;
+
+/*
+ * Temporary slot reserving WAL until streaming starts, or NULL.  Without
+ * --slot it is also the slot we stream with.
+ */
+static char *temp_slot_name = NULL;
 
 /* Progress indicators */
 static uint64 totalsize_kb;
@@ -608,6 +622,169 @@ LogStreamerMain(logstreamer_param *param)
 }
 
 /*
+ * Open a connection for the background WAL receiver.
+ *
+ * With a temporary slot, the connection is opened before BASE_BACKUP and
+ * stays idle until the backup's checkpoint has completed, which with a spread
+ * checkpoint can take minutes.  Disable idle_session_timeout on it, so that
+ * it is not closed while it waits, dropping its temporary slot.  Any options
+ * the main connection was opened with are kept, with ours added last so that
+ * they take precedence.
+ */
+static PGconn *
+GetStreamingConnection(void)
+{
+	char	   *options_val = NULL;
+	PGconn	   *tmpconn;
+
+	if (PQserverVersion(conn) >= MINIMUM_VERSION_FOR_IDLE_SESSION_TIMEOUT)
+	{
+		PQconninfoOption *opts;
+		char	   *option = NULL;
+
+		/*
+		 * Take the options from the main connection rather than from the
+		 * connection string, so that those given in PGOPTIONS are kept too.
+		 */
+		opts = PQconninfo(conn);
+		if (opts == NULL)
+			pg_fatal("out of memory");
+
+		for (PQconninfoOption *opt = opts; opt->keyword != NULL; ++opt)
+		{
+			if (strcmp(opt->keyword, "options") == 0 && opt->val &&
+				*opt->val)
+				option = opt->val;
+		}
+
+		options_val = psprintf("%s -c idle_session_timeout=0",
+							   (option == NULL) ? "" : option);
+
+		PQconninfoFree(opts);
+	}
+
+	tmpconn = GetConnectionWithOptions(options_val);
+	pg_free(options_val);
+
+	return tmpconn;
+}
+
+/*
+ * Open the connection for the background WAL receiver, and create a
+ * temporary slot on it that reserves WAL until streaming starts, also with
+ * --create-slot.  This must be done before BASE_BACKUP, as a checkpoint could
+ * otherwise remove WAL from the backup's start position before the receiver
+ * gets to it.
+ *
+ * Without a temporary slot, that is with --no-slot or with --slot naming an
+ * existing slot, there is nothing to reserve, so the connection is opened
+ * only after BASE_BACKUP has returned, in SetupStreamingSlot(), and is not
+ * left idle during the backup's checkpoint.
+ */
+static void
+PrepareLogStreamer(void)
+{
+	/* Temporary replication slots are only supported in 10 and newer */
+	if (PQserverVersion(conn) < MINIMUM_VERSION_FOR_TEMP_SLOTS)
+	{
+		temp_replication_slot = false;
+		return;
+	}
+
+	if (!temp_replication_slot && !create_slot)
+		return;
+
+	/* Get a WAL serving connection */
+	bgconn = GetStreamingConnection();
+	if (!bgconn)
+		/* Error message already written in GetConnection() */
+		exit(1);
+
+	temp_slot_name = psprintf("pg_basebackup_%u",
+							  (unsigned int) PQbackendPID(bgconn));
+	if (!CreateReplicationSlot(bgconn, temp_slot_name, NULL, true, true, true,
+							   false, false, false))
+		exit(1);
+	if (verbose)
+		pg_log_info("created temporary replication slot \"%s\"",
+					temp_slot_name);
+
+	/* Without --slot, stream with the temporary slot */
+	if (temp_replication_slot)
+		replication_slot = temp_slot_name;
+}
+
+/*
+ * Set up the slot to stream with, after BASE_BACKUP has returned.
+ *
+ * If the temporary slot's connection was lost during the backup's checkpoint,
+ * the slot is gone too, so reconnect and create it again.  The checkpoint
+ * should keep the WAL from the backup's start position, so the new slot
+ * covers it.
+ *
+ * The permanent slot for --create-slot is created here, after the checkpoint,
+ * and only then is the temporary slot dropped.
+ */
+static void
+SetupStreamingSlot(void)
+{
+	if (bgconn == NULL)
+	{
+		Assert(temp_slot_name == NULL);
+
+		bgconn = GetStreamingConnection();
+		if (!bgconn)
+			/* Error message already written in GetConnection() */
+			exit(1);
+	}
+	else if (temp_slot_name)
+	{
+		PGresult   *res = PQexec(bgconn, "IDENTIFY_SYSTEM");
+
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		{
+			pg_log_warning("connection for streaming write-ahead log was lost during the base backup checkpoint, reconnecting");
+			pg_log_warning_detail("%s", PQerrorMessage(bgconn));
+
+			PQfinish(bgconn);
+			bgconn = GetStreamingConnection();
+			if (!bgconn)
+				/* Error message already written in GetConnection() */
+				exit(1);
+
+			/* Recreate the temporary slot only if we stream with it */
+			if (temp_replication_slot)
+			{
+				if (!CreateReplicationSlot(bgconn, temp_slot_name, NULL, true,
+										   true, true, false, false, false))
+					exit(1);
+				if (verbose)
+					pg_log_info("created temporary replication slot \"%s\"",
+								temp_slot_name);
+			}
+			else
+				temp_slot_name = NULL;
+		}
+		PQclear(res);
+	}
+
+	if (create_slot)
+	{
+		if (!CreateReplicationSlot(bgconn, replication_slot, NULL, false, true,
+								   true, false, false, false))
+			exit(1);
+		if (verbose)
+			pg_log_info("created replication slot \"%s\"", replication_slot);
+
+		/*
+		 * The regular slot takes over.
+		 */
+		if (temp_slot_name && !DropReplicationSlot(bgconn, temp_slot_name))
+			exit(1);
+	}
+}
+
+/*
  * Initiate background process for receiving xlog during the backup.
  * The background stream will use its own database connection so we can
  * stream the logfile in parallel with the backups.
@@ -620,7 +797,10 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 	logstreamer_param *param;
 	char		statusdir[MAXPGPATH];
 
+	Assert(bgconn != NULL);
+
 	param = pg_malloc0_object(logstreamer_param);
+	param->bgconn = bgconn;
 	param->timeline = timeline;
 	param->sysidentifier = sysidentifier;
 	param->wal_compress_algorithm = wal_compress_algorithm;
@@ -639,45 +819,11 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 		pg_fatal("could not create pipe for background process: %m");
 #endif
 
-	/* Get a second connection */
-	param->bgconn = GetConnection();
-	if (!param->bgconn)
-		/* Error message already written in GetConnection() */
-		exit(1);
-
 	/* In post-10 cluster, pg_xlog has been renamed to pg_wal */
 	snprintf(param->xlog, sizeof(param->xlog), "%s/%s",
 			 basedir,
 			 PQserverVersion(conn) < MINIMUM_VERSION_FOR_PG_WAL ?
 			 "pg_xlog" : "pg_wal");
-
-	/* Temporary replication slots are only supported in 10 and newer */
-	if (PQserverVersion(conn) < MINIMUM_VERSION_FOR_TEMP_SLOTS)
-		temp_replication_slot = false;
-
-	/*
-	 * Create replication slot if requested
-	 */
-	if (temp_replication_slot && !replication_slot)
-		replication_slot = psprintf("pg_basebackup_%u",
-									(unsigned int) PQbackendPID(param->bgconn));
-	if (temp_replication_slot || create_slot)
-	{
-		if (!CreateReplicationSlot(param->bgconn, replication_slot, NULL,
-								   temp_replication_slot, true, true, false,
-								   false, false))
-			exit(1);
-
-		if (verbose)
-		{
-			if (temp_replication_slot)
-				pg_log_info("created temporary replication slot \"%s\"",
-							replication_slot);
-			else
-				pg_log_info("created replication slot \"%s\"",
-							replication_slot);
-		}
-	}
 
 	if (format == 'p')
 	{
@@ -1970,6 +2116,10 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 									  compression_detail);
 	}
 
+	/* If streaming WAL, reserve it before starting the backup */
+	if (includewal == STREAM_WAL)
+		PrepareLogStreamer();
+
 	if (verbose)
 		pg_log_info("initiating base backup, waiting for checkpoint to complete");
 
@@ -2086,6 +2236,8 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	{
 		pg_compress_algorithm wal_compress_algorithm;
 		int			wal_compress_level;
+
+		SetupStreamingSlot();
 
 		if (verbose)
 			pg_log_info("starting background WAL receiver");

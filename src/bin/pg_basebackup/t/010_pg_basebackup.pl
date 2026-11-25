@@ -830,6 +830,25 @@ $node->command_fails_like(
 	'pg_basebackup fails with --create-slot --slot and a previously existing slot'
 );
 
+# A failure of BASE_BACKUP must not leave a slot created by --create-slot
+# behind.
+$node->command_fails_like(
+	[
+		@pg_basebackup_defs,
+		'--pgdata' => "$tempdir/backupxs_slot2",
+		'--create-slot',
+		'--slot' => 'slot2',
+		'--manifest-checksums' => 'bogus'
+	],
+	qr/unrecognized checksum algorithm/,
+	'pg_basebackup --create-slot fails when BASE_BACKUP fails');
+is( $node->safe_psql(
+		'postgres',
+		q{SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'slot2'}
+	),
+	'0',
+	'no slot is left behind when pg_basebackup --create-slot fails');
+
 $node->safe_psql('postgres',
 	q{SELECT * FROM pg_create_physical_replication_slot('slot1')});
 my $lsn = $node->safe_psql('postgres',
