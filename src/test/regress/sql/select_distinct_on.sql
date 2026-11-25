@@ -81,4 +81,19 @@ SELECT DISTINCT ON (y, x) x, y FROM (select * from distinct_on_tbl order by x, z
 
 RESET enable_hashagg;
 
+-- Keep the ORDER BY suffix after reordering the DISTINCT ON keys.
+DROP INDEX distinct_on_tbl_x_y_idx;
+CREATE INDEX distinct_on_tbl_x_y_z_idx ON distinct_on_tbl (x, y, z DESC);
+INSERT INTO distinct_on_tbl VALUES (0, 0, 21), (0, 0, 22);
+ANALYZE distinct_on_tbl;
+
+SET enable_seqscan TO OFF;
+-- The index provides the full ordering needed below Unique.
+SET enable_incremental_sort TO OFF;
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (y, x) x, y, z FROM distinct_on_tbl ORDER BY y, x, z DESC;
+SELECT DISTINCT ON (y, x) x, y, z FROM distinct_on_tbl ORDER BY y, x, z DESC;
+RESET enable_incremental_sort;
+RESET enable_seqscan;
+
 DROP TABLE distinct_on_tbl;
