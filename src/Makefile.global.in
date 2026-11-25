@@ -195,6 +195,7 @@ with_systemd	= @with_systemd@
 with_gssapi	= @with_gssapi@
 with_krb_srvnam	= @with_krb_srvnam@
 with_ldap	= @with_ldap@
+with_pam	= @with_pam@
 with_libcurl	= @with_libcurl@
 with_libnuma	= @with_libnuma@
 with_liburing	= @with_liburing@
