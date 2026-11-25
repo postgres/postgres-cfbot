@@ -11,6 +11,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "lib/stringinfo.h"
+#include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/tuplestore.h"
 #include "utils/xml.h"
@@ -772,6 +773,8 @@ xpath_table(PG_FUNCTION_ARGS)
 			char	   *xmldoc;
 			HeapTuple	ret_tuple;
 
+			CHECK_FOR_INTERRUPTS();
+
 			/* Extract the row data as C Strings */
 			spi_tuple = tuptable->vals[i];
 			pkey = SPI_getvalue(spi_tuple, spi_tupdesc, 1);
@@ -810,6 +813,8 @@ xpath_table(PG_FUNCTION_ARGS)
 
 				do
 				{
+					CHECK_FOR_INTERRUPTS();
+
 					/* Now evaluate the set of xpaths. */
 					had_values = false;
 					for (j = 0; j < numpaths; j++)
