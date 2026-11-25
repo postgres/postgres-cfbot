@@ -148,3 +148,66 @@ end $$;
 ERROR:  bigint out of range
 CONTEXT:  SQL statement "select x*x*x"
 PL/pgSQL function inline_code_block line 5 at SQL statement
+-- Check case where the type name passed to pg_input_is_valid() and
+-- pg_input_error_info() changes between evaluations
+do $$
+declare r record;
+begin
+  for r in select * from (values ('42', 'integer'), ('hello', 'text'),
+                                 ('100000', 'smallint'),
+                                 ('abcdefg', 'varchar(5)'),
+                                 ('abcdefg', 'varchar(10)'),
+                                 ('abcdefghijk', 'varchar(10)')) as v(val, typ) loop
+    raise notice '% as %: % %', r.val, r.typ, pg_input_is_valid(r.val, r.typ),
+      (pg_input_error_info(r.val, r.typ)).message;
+  end loop;
+end $$;
+NOTICE:  42 as integer: t <NULL>
+NOTICE:  hello as text: t <NULL>
+NOTICE:  100000 as smallint: f value "100000" is out of range for type smallint
+NOTICE:  abcdefg as varchar(5): f value too long for type character varying(5)
+NOTICE:  abcdefg as varchar(10): t <NULL>
+NOTICE:  abcdefghijk as varchar(10): f value too long for type character varying(10)
+-- Check that a type name is resolved again when the type is dropped and
+-- recreated, or when search_path changes
+create domain input_check_dom as int;
+do $$
+declare typ text := 'input_check_dom';
+begin
+  for i in 1..2 loop
+    if i = 2 then
+      drop domain input_check_dom;
+      create domain input_check_dom as text;
+    end if;
+    raise notice 'constant: %, variable: %',
+      pg_input_is_valid('abc', 'input_check_dom'),
+      pg_input_is_valid('abc', typ);
+  end loop;
+end $$;
+NOTICE:  constant: f, variable: f
+NOTICE:  constant: t, variable: t
+drop domain input_check_dom;
+create schema input_check_s1;
+create schema input_check_s2;
+create domain input_check_s1.dom as int;
+create domain input_check_s2.dom as text;
+do $$
+declare
+  c refcursor;
+  v bool;
+begin
+  perform set_config('search_path', 'input_check_s1', true);
+  open c for select pg_input_is_valid('abc', 'dom') from generate_series(1, 2);
+  fetch c into v;
+  raise notice 'input_check_s1: %', v;
+  perform set_config('search_path', 'input_check_s2', true);
+  fetch c into v;
+  raise notice 'input_check_s2: %', v;
+  close c;
+end $$;
+NOTICE:  input_check_s1: f
+NOTICE:  input_check_s2: t
+drop schema input_check_s1, input_check_s2 cascade;
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to type input_check_s2.dom
+drop cascades to type input_check_s1.dom
