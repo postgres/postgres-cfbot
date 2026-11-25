@@ -651,6 +651,8 @@ copy_read_data(void *outbuf, int minread, int maxread)
 	int			bytesread = 0;
 	int			avail;
 
+	Assert(minread > 0 && maxread >= minread);
+
 	/* If there are some leftover data from previous read, use it. */
 	avail = copybuf.len - copybuf.cursor;
 	if (avail)
@@ -664,7 +666,7 @@ copy_read_data(void *outbuf, int minread, int maxread)
 		bytesread += avail;
 	}
 
-	while (maxread > 0 && bytesread < minread)
+	while (bytesread < minread)
 	{
 		pgsocket	fd = PGINVALID_SOCKET;
 		int			len;
@@ -697,7 +699,7 @@ copy_read_data(void *outbuf, int minread, int maxread)
 				bytesread += avail;
 			}
 
-			if (maxread <= 0 || bytesread >= minread)
+			if (bytesread >= minread)
 				return bytesread;
 		}
 
