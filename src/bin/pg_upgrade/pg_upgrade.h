@@ -115,6 +115,12 @@ extern char *output_files[];
 #define DEFAULT_CHAR_SIGNEDNESS_CAT_VER 202502212
 
 /*
+ * change of SLRU segment filenames length in PG19
+ * TODO FIXME CHANGE TO THE ACTUAL VALUE BEFORE COMMITTING
+ */
+#define SLRU_SEG_FILENAMES_CHANGE_CAT_VER 202601061
+
+/*
  * Each relation is represented by a relinfo structure.
  */
 typedef struct
