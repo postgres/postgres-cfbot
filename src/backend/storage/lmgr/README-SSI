@@ -466,6 +466,17 @@ is based on the top level xid.  When looking at an xid that comes
 from a tuple's xmin or xmax, for example, we always call
 SubTransGetTopmostTransaction() before doing much else with it.
 
+    * For the same reason, a serialization failure raised while a
+subtransaction is active must doom the top level transaction: if the
+error is caught by a subtransaction abort (ROLLBACK TO SAVEPOINT, or a
+PL/pgSQL exception block), the reads that created the dangerous
+structure are not undone, so the transaction must not be allowed to
+commit.  Therefore SXACT_FLAG_DOOMED is always set on the current
+transaction before one of these errors is raised (see
+DoomMyselfAndRaiseSerializationFailure()), so that
+PreCommit_CheckForSerializationFailure() cancels the transaction at
+commit even if the error was swallowed.
+
     * PostgreSQL does not use "update in place" with a rollback log
 for its MVCC implementation.  Where possible it uses "HOT" updates on
 the same page (if there is room and no indexed value is changed).
