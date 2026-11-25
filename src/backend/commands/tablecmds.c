@@ -7384,49 +7384,39 @@ check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 				 */
 				if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 				{
-					List	   *partexprs;
-					ListCell   *lc;
-
 					catalog_tup = SearchSysCache1(PARTRELID,
 												  ObjectIdGetDatum(RelationGetRelid(rel)));
 					if (!HeapTupleIsValid(catalog_tup))
 						elog(ERROR, "cache lookup failed for partition key of relation %u",
 							 RelationGetRelid(rel));
-					partexprs = (List *)
-						get_node_tree_attr(PARTRELID, catalog_tup,
-										   Anum_pg_partitioned_table_partexprs);
-					foreach(lc, partexprs)
+					expr = get_node_tree_attr(PARTRELID, catalog_tup,
+											  Anum_pg_partitioned_table_partexprs);
+					if (expr)
 					{
-						Node	   *partexpr = lfirst(lc);
-
 						/*
-						 * Check if it's the PARTITION BY's return type.
+						 * Check if any PARTITION BY expression uses or
+						 * returns the rowtype.  We must reject if the
+						 * expression uses the rowtype because otherwise we'd
+						 * need to rewrite the expression stored in the
+						 * catalog, as well as the partition bounds of all the
+						 * partitions, and also because the data might no
+						 * longer be in the correct partitions according to
+						 * the new datatype's sort order.
 						 *
-						 * (This could be allowed as long as the table has no
-						 * partitions.  The problem really only arises from
-						 * the partition bounds stored in the 'relpartbound'
-						 * of the partitions.  But it's not worth
-						 * distinguishing that case.)
+						 * (If it's the expression's return type, this could
+						 * be allowed as long as the table has no partitions,
+						 * since the problem really only arises from the
+						 * partition bounds stored in the 'relpartbound' of
+						 * the partitions.  But it's not worth distinguishing
+						 * that case.)
 						 *
 						 * We had a gap in our dependency tracking in the
-						 * past, and didn't record a pg_depend entry for
-						 * these.  Any missing dependencies not caught here
-						 * are handled by
+						 * past, and didn't record a pg_depend entry for the
+						 * return type.  Any missing dependencies not caught
+						 * here are handled by
 						 * find_missing_composite_type_dependencies().
 						 */
-						if (exprType(partexpr) == typeOid)
-							report_type_used_in_expr(depobj, origRelation, origTypeName);
-
-						/*
-						 * Check if the expression uses the rowtype.  We must
-						 * reject that case because otherwise we'd need to
-						 * rewrite the expression stored in the catalog, as
-						 * well as the partition bounds of all the partitions,
-						 * and also because the data might no longer be in the
-						 * correct partitions according to the new datatype's
-						 * sort order.
-						 */
-						if (CheckTypeDependencyInSingleRelExpr(partexpr, RelationGetRelid(rel), typeOid))
+						if (CheckTypeDependencyInSingleRelExpr(expr, RelationGetRelid(rel), typeOid))
 							report_type_used_in_expr(depobj, origRelation, origTypeName);
 					}
 					ReleaseSysCache(catalog_tup);
@@ -7442,24 +7432,27 @@ check_composite_type_dependency(ObjectAddress *depobj, Oid typeOid,
 				 */
 				if (rel->rd_indextuple)
 				{
+					Oid			indrelid = rel->rd_index->indrelid;
+
 					expr = get_node_tree_attr(INDEXRELID, rel->rd_indextuple,
 											  Anum_pg_index_indexprs);
 					if (expr)
 					{
-						if (CheckTypeDependencyInSingleRelExpr(expr, RelationGetRelid(rel), typeOid))
-							report_type_used_in_expr(depobj, origRelation, origTypeName);
-
 						/*
-						 * If it's the *return type* of an index expression,
-						 * it becomes a column type and we checked that above
-						 * already.
+						 * CheckTypeDependencyInSingleRelExpr() also checks
+						 * each expression's return type, which may differ
+						 * from the index column's storage type when the index
+						 * access method or operator class uses a separate key
+						 * type (for example in hash or GIN indexes).
 						 */
+						if (CheckTypeDependencyInSingleRelExpr(expr, indrelid, typeOid))
+							report_type_used_in_expr(depobj, origRelation, origTypeName);
 					}
 					expr = get_node_tree_attr(INDEXRELID, rel->rd_indextuple,
 											  Anum_pg_index_indpred);
 					if (expr)
 					{
-						if (CheckTypeDependencyInSingleRelExpr(expr, RelationGetRelid(rel), typeOid))
+						if (CheckTypeDependencyInSingleRelExpr(expr, indrelid, typeOid))
 							report_type_used_in_expr(depobj, origRelation, origTypeName);
 					}
 				}
