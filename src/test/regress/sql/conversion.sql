@@ -331,6 +331,27 @@ select description, inbytes, (test_conv(inbytes, 'iso8859-5', 'utf8')).* from is
 select description, inbytes, (test_conv(inbytes, 'iso8859-5', 'koi8r')).* from iso8859_5_inputs;
 
 --
+-- WIN1252
+--
+CREATE TABLE win1252_inputs (inbytes bytea, description text);
+insert into win1252_inputs  values
+  ('\x666f6f',		'valid, pure ASCII'),
+  ('\x80e9',		'valid'),
+  ('\x81',		'invalid, unassigned byte'),
+  ('\x80e99d',		'invalid, unassigned byte'),
+  ('\x00',		'invalid, NUL byte');
+
+-- Test WIN1252 verification
+select description, inbytes, (test_conv(inbytes, 'win1252', 'win1252')).* from win1252_inputs;
+select description, length(inbytes, 'win1252') from win1252_inputs where inbytes = '\x80e9';
+select description, length(inbytes, 'win1252') from win1252_inputs where inbytes = '\x80e99d';
+-- Test conversions from WIN1252
+select description, inbytes, (test_conv(inbytes, 'win1252', 'utf8')).* from win1252_inputs;
+
+-- LATIN2 control characters that WIN1250 has no byte for
+select (test_conv('\x418142', 'latin2', 'win1250')).*;
+
+--
 -- Big5
 --
 CREATE TABLE big5_inputs (inbytes bytea, description text);
