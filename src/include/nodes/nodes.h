@@ -14,6 +14,8 @@
 #ifndef NODES_H
 #define NODES_H
 
+#include "utils/palloc.h"
+
 /*
  * The first field of every node is NodeTag. Each node created (with makeNode)
  * will have one of the following tags as the value of its first field.

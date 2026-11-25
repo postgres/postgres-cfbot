@@ -1,0 +1,308 @@
+--
+-- SLOPE catalog: verify prosupport assignments for monotonic functions
+--
+-- Operators with slope prosupport
+SELECT
+    o.oid AS "oid",
+    o.oprname AS operator,
+    format_type(o.oprleft, NULL) COLLATE "C" AS left_type,
+    format_type(o.oprright, NULL) COLLATE "C" AS right_type,
+    sp.proname AS prosupport
+FROM pg_operator o
+JOIN pg_proc p ON p.oid = o.oprcode
+JOIN pg_proc sp ON sp.oid = p.prosupport
+WHERE sp.proname LIKE '%slope%'
+   OR sp.proname LIKE '%prosupport'
+ORDER BY sp.proname, o.oprname, left_type, right_type;
+ oid  | operator |          left_type          |         right_type          |       prosupport        
+------+----------+-----------------------------+-----------------------------+-------------------------
+  684 | +        | bigint                      | bigint                      | addition_slope_support
+ 2638 | +        | bigint                      | inet                        | addition_slope_support
+  688 | +        | bigint                      | integer                     | addition_slope_support
+  818 | +        | bigint                      | smallint                    | addition_slope_support
+ 1100 | +        | date                        | integer                     | addition_slope_support
+ 1360 | +        | date                        | time without time zone      | addition_slope_support
+  591 | +        | double precision            | double precision            | addition_slope_support
+ 1126 | +        | double precision            | real                        | addition_slope_support
+ 2637 | +        | inet                        | bigint                      | addition_slope_support
+  692 | +        | integer                     | bigint                      | addition_slope_support
+ 2555 | +        | integer                     | date                        | addition_slope_support
+  551 | +        | integer                     | integer                     | addition_slope_support
+  553 | +        | integer                     | smallint                    | addition_slope_support
+  906 | +        | money                       | money                       | addition_slope_support
+ 1758 | +        | numeric                     | numeric                     | addition_slope_support
+ 5026 | +        | numeric                     | pg_lsn                      | addition_slope_support
+ 5025 | +        | pg_lsn                      | numeric                     | addition_slope_support
+ 1116 | +        | real                        | double precision            | addition_slope_support
+  586 | +        | real                        | real                        | addition_slope_support
+  822 | +        | smallint                    | bigint                      | addition_slope_support
+  552 | +        | smallint                    | integer                     | addition_slope_support
+  550 | +        | smallint                    | smallint                    | addition_slope_support
+ 1916 | +        | -                           | bigint                      | arg0_asc_slope_support
+ 1920 | +        | -                           | double precision            | arg0_asc_slope_support
+ 1918 | +        | -                           | integer                     | arg0_asc_slope_support
+ 1921 | +        | -                           | numeric                     | arg0_asc_slope_support
+ 1919 | +        | -                           | real                        | arg0_asc_slope_support
+ 1917 | +        | -                           | smallint                    | arg0_asc_slope_support
+ 1361 | +        | date                        | time with time zone         | arg0_asc_slope_support
+  484 | -        | -                           | bigint                      | arg0_desc_slope_support
+  585 | -        | -                           | double precision            | arg0_desc_slope_support
+  558 | -        | -                           | integer                     | arg0_desc_slope_support
+ 1751 | -        | -                           | numeric                     | arg0_desc_slope_support
+  584 | -        | -                           | real                        | arg0_desc_slope_support
+  559 | -        | -                           | smallint                    | arg0_desc_slope_support
+ 1366 | +        | time with time zone         | date                        | arg1_asc_slope_support
+ 1363 | +        | time without time zone      | date                        | arg1_asc_slope_support
+  685 | -        | bigint                      | bigint                      | diff_slope_support
+  689 | -        | bigint                      | integer                     | diff_slope_support
+  819 | -        | bigint                      | smallint                    | diff_slope_support
+ 1099 | -        | date                        | date                        | diff_slope_support
+ 1101 | -        | date                        | integer                     | diff_slope_support
+  592 | -        | double precision            | double precision            | diff_slope_support
+ 1127 | -        | double precision            | real                        | diff_slope_support
+ 2639 | -        | inet                        | bigint                      | diff_slope_support
+ 2640 | -        | inet                        | inet                        | diff_slope_support
+  693 | -        | integer                     | bigint                      | diff_slope_support
+  555 | -        | integer                     | integer                     | diff_slope_support
+  557 | -        | integer                     | smallint                    | diff_slope_support
+  907 | -        | money                       | money                       | diff_slope_support
+ 1759 | -        | numeric                     | numeric                     | diff_slope_support
+ 5027 | -        | pg_lsn                      | numeric                     | diff_slope_support
+ 3228 | -        | pg_lsn                      | pg_lsn                      | diff_slope_support
+ 1117 | -        | real                        | double precision            | diff_slope_support
+  587 | -        | real                        | real                        | diff_slope_support
+  823 | -        | smallint                    | bigint                      | diff_slope_support
+  556 | -        | smallint                    | integer                     | diff_slope_support
+  554 | -        | smallint                    | smallint                    | diff_slope_support
+ 1328 | -        | timestamp with time zone    | timestamp with time zone    | diff_slope_support
+ 2067 | -        | timestamp without time zone | timestamp without time zone | diff_slope_support
+  687 | /        | bigint                      | bigint                      | divide_slope_support
+  691 | /        | bigint                      | integer                     | divide_slope_support
+  821 | /        | bigint                      | smallint                    | divide_slope_support
+  593 | /        | double precision            | double precision            | divide_slope_support
+ 1128 | /        | double precision            | real                        | divide_slope_support
+  695 | /        | integer                     | bigint                      | divide_slope_support
+  528 | /        | integer                     | integer                     | divide_slope_support
+  547 | /        | integer                     | smallint                    | divide_slope_support
+ 3347 | /        | money                       | bigint                      | divide_slope_support
+  909 | /        | money                       | double precision            | divide_slope_support
+  913 | /        | money                       | integer                     | divide_slope_support
+ 3825 | /        | money                       | money                       | divide_slope_support
+  844 | /        | money                       | real                        | divide_slope_support
+  915 | /        | money                       | smallint                    | divide_slope_support
+ 1761 | /        | numeric                     | numeric                     | divide_slope_support
+ 1118 | /        | real                        | double precision            | divide_slope_support
+  588 | /        | real                        | real                        | divide_slope_support
+  825 | /        | smallint                    | bigint                      | divide_slope_support
+  546 | /        | smallint                    | integer                     | divide_slope_support
+  527 | /        | smallint                    | smallint                    | divide_slope_support
+  686 | *        | bigint                      | bigint                      | multiply_slope_support
+  690 | *        | bigint                      | integer                     | multiply_slope_support
+ 3349 | *        | bigint                      | money                       | multiply_slope_support
+  820 | *        | bigint                      | smallint                    | multiply_slope_support
+  594 | *        | double precision            | double precision            | multiply_slope_support
+  916 | *        | double precision            | money                       | multiply_slope_support
+ 1129 | *        | double precision            | real                        | multiply_slope_support
+  694 | *        | integer                     | bigint                      | multiply_slope_support
+  514 | *        | integer                     | integer                     | multiply_slope_support
+  917 | *        | integer                     | money                       | multiply_slope_support
+  545 | *        | integer                     | smallint                    | multiply_slope_support
+ 3346 | *        | money                       | bigint                      | multiply_slope_support
+  908 | *        | money                       | double precision            | multiply_slope_support
+  912 | *        | money                       | integer                     | multiply_slope_support
+  843 | *        | money                       | real                        | multiply_slope_support
+  914 | *        | money                       | smallint                    | multiply_slope_support
+ 1760 | *        | numeric                     | numeric                     | multiply_slope_support
+ 1119 | *        | real                        | double precision            | multiply_slope_support
+  845 | *        | real                        | money                       | multiply_slope_support
+  589 | *        | real                        | real                        | multiply_slope_support
+  824 | *        | smallint                    | bigint                      | multiply_slope_support
+  544 | *        | smallint                    | integer                     | multiply_slope_support
+  918 | *        | smallint                    | money                       | multiply_slope_support
+  526 | *        | smallint                    | smallint                    | multiply_slope_support
+(104 rows)
+
+-- Functions (non-operator) with slope prosupport
+SELECT
+    p.oid AS "oid",
+    p.proname AS "function",
+    pg_get_function_arguments(p.oid) COLLATE "C" AS arguments,
+    format_type(p.prorettype, NULL) AS returns,
+    sp.proname AS prosupport
+FROM pg_proc p
+JOIN pg_proc sp ON sp.oid = p.prosupport
+WHERE (sp.proname LIKE '%slope%' OR sp.proname LIKE '%prosupport')
+  AND NOT EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprcode = p.oid)
+ORDER BY sp.proname, p.proname, arguments;
+ oid  |   function   |              arguments               |           returns           |           prosupport           
+------+--------------+--------------------------------------+-----------------------------+--------------------------------
+ 2025 | timestamp    | date, time without time zone         | timestamp without time zone | addition_slope_support
+ 2466 | acosh        | double precision                     | double precision            | arg0_asc_slope_support
+ 1600 | asin         | double precision                     | double precision            | arg0_asc_slope_support
+ 2731 | asind        | double precision                     | double precision            | arg0_asc_slope_support
+ 2465 | asinh        | double precision                     | double precision            | arg0_asc_slope_support
+ 1602 | atan         | double precision                     | double precision            | arg0_asc_slope_support
+ 2733 | atand        | double precision                     | double precision            | arg0_asc_slope_support
+ 2467 | atanh        | double precision                     | double precision            | arg0_asc_slope_support
+ 1345 | cbrt         | double precision                     | double precision            | arg0_asc_slope_support
+ 2308 | ceil         | double precision                     | double precision            | arg0_asc_slope_support
+ 1711 | ceil         | numeric                              | numeric                     | arg0_asc_slope_support
+ 2320 | ceiling      | double precision                     | double precision            | arg0_asc_slope_support
+ 2167 | ceiling      | numeric                              | numeric                     | arg0_asc_slope_support
+ 2029 | date         | timestamp without time zone          | date                        | arg0_asc_slope_support
+ 1608 | degrees      | double precision                     | double precision            | arg0_asc_slope_support
+ 6219 | erf          | double precision                     | double precision            | arg0_asc_slope_support
+ 1347 | exp          | double precision                     | double precision            | arg0_asc_slope_support
+ 1732 | exp          | numeric                              | numeric                     | arg0_asc_slope_support
+ 2309 | floor        | double precision                     | double precision            | arg0_asc_slope_support
+ 1712 | floor        | numeric                              | numeric                     | arg0_asc_slope_support
+ 1341 | ln           | double precision                     | double precision            | arg0_asc_slope_support
+ 1734 | ln           | numeric                              | numeric                     | arg0_asc_slope_support
+ 1340 | log          | double precision                     | double precision            | arg0_asc_slope_support
+ 1741 | log          | numeric                              | numeric                     | arg0_asc_slope_support
+ 1194 | log10        | double precision                     | double precision            | arg0_asc_slope_support
+ 1481 | log10        | numeric                              | numeric                     | arg0_asc_slope_support
+ 1733 | numeric_exp  | numeric                              | numeric                     | arg0_asc_slope_support
+ 1735 | numeric_ln   | numeric                              | numeric                     | arg0_asc_slope_support
+ 1731 | numeric_sqrt | numeric                              | numeric                     | arg0_asc_slope_support
+ 1609 | radians      | double precision                     | double precision            | arg0_asc_slope_support
+ 1342 | round        | double precision                     | double precision            | arg0_asc_slope_support
+ 1708 | round        | numeric                              | numeric                     | arg0_asc_slope_support
+ 1707 | round        | numeric, integer                     | numeric                     | arg0_asc_slope_support
+ 2462 | sinh         | double precision                     | double precision            | arg0_asc_slope_support
+ 1344 | sqrt         | double precision                     | double precision            | arg0_asc_slope_support
+ 1730 | sqrt         | numeric                              | numeric                     | arg0_asc_slope_support
+ 2464 | tanh         | double precision                     | double precision            | arg0_asc_slope_support
+ 2024 | timestamp    | date                                 | timestamp without time zone | arg0_asc_slope_support
+ 1174 | timestamptz  | date                                 | timestamp with time zone    | arg0_asc_slope_support
+ 1359 | timestamptz  | date, time with time zone            | timestamp with time zone    | arg0_asc_slope_support
+ 1176 | timestamptz  | date, time without time zone         | timestamp with time zone    | arg0_asc_slope_support
+ 1158 | to_timestamp | double precision                     | timestamp with time zone    | arg0_asc_slope_support
+ 1343 | trunc        | double precision                     | double precision            | arg0_asc_slope_support
+ 1710 | trunc        | numeric                              | numeric                     | arg0_asc_slope_support
+ 1709 | trunc        | numeric, integer                     | numeric                     | arg0_asc_slope_support
+ 1601 | acos         | double precision                     | double precision            | arg0_desc_slope_support
+ 2732 | acosd        | double precision                     | double precision            | arg0_desc_slope_support
+ 6220 | erfc         | double precision                     | double precision            | arg0_desc_slope_support
+ 1217 | date_trunc   | text, timestamp with time zone       | timestamp with time zone    | date_trunc_slope_support
+ 1284 | date_trunc   | text, timestamp with time zone, text | timestamp with time zone    | date_trunc_slope_support
+ 2020 | date_trunc   | text, timestamp without time zone    | timestamp without time zone | date_trunc_slope_support
+ 1178 | date         | timestamp with time zone             | date                        | timestamptz_date_slope_support
+ 1159 | timezone     | text, timestamp with time zone       | timestamp without time zone | timezone_prosupport
+ 2069 | timezone     | text, timestamp without time zone    | timestamp with time zone    | timezone_prosupport
+ 6334 | timezone     | timestamp with time zone             | timestamp without time zone | timezone_prosupport
+ 6335 | timezone     | timestamp without time zone          | timestamp with time zone    | timezone_prosupport
+(56 rows)
+
+-- Operators whose name has slope support for some types but not others
+SELECT
+    u.oid AS "oid",
+    u.oprname AS operator,
+    format_type(u.oprleft, NULL) COLLATE "C" AS left_type,
+    format_type(u.oprright, NULL) COLLATE "C" AS right_type
+FROM pg_operator u
+JOIN pg_proc up ON up.oid = u.oprcode
+WHERE (up.prosupport = 0 OR NOT EXISTS (
+        SELECT 1 FROM pg_proc sp
+        WHERE sp.oid = up.prosupport
+          AND (sp.proname LIKE '%slope%' OR sp.proname LIKE '%prosupport')))
+  AND EXISTS (
+      SELECT 1
+      FROM pg_operator s
+      JOIN pg_proc sp_impl ON sp_impl.oid = s.oprcode
+      JOIN pg_proc sp_sup ON sp_sup.oid = sp_impl.prosupport
+      WHERE s.oprname = u.oprname
+        AND (sp_sup.proname LIKE '%slope%' OR sp_sup.proname LIKE '%prosupport'))
+ORDER BY u.oprname, left_type, right_type;
+ oid  | operator |          left_type          |         right_type          
+------+----------+-----------------------------+-----------------------------
+ 4394 | *        | anymultirange               | anymultirange
+ 3900 | *        | anyrange                    | anyrange
+  806 | *        | box                         | point
+ 1518 | *        | circle                      | point
+ 1584 | *        | double precision            | interval
+ 1583 | *        | interval                    | double precision
+  738 | *        | path                        | point
+  733 | *        | point                       | point
+  966 | +        | aclitem[]                   | aclitem
+ 4392 | +        | anymultirange               | anymultirange
+ 3898 | +        | anyrange                    | anyrange
+  804 | +        | box                         | point
+ 1516 | +        | circle                      | point
+ 1076 | +        | date                        | interval
+ 2551 | +        | interval                    | date
+ 1337 | +        | interval                    | interval
+ 2552 | +        | interval                    | time with time zone
+ 1849 | +        | interval                    | time without time zone
+ 2554 | +        | interval                    | timestamp with time zone
+ 2553 | +        | interval                    | timestamp without time zone
+  735 | +        | path                        | path
+  736 | +        | path                        | point
+  731 | +        | point                       | point
+ 1802 | +        | time with time zone         | interval
+ 1800 | +        | time without time zone      | interval
+ 1327 | +        | timestamp with time zone    | interval
+ 2066 | +        | timestamp without time zone | interval
+ 1336 | -        | -                           | interval
+  967 | -        | aclitem[]                   | aclitem
+ 4393 | -        | anymultirange               | anymultirange
+ 3899 | -        | anyrange                    | anyrange
+  805 | -        | box                         | point
+ 1517 | -        | circle                      | point
+ 1077 | -        | date                        | interval
+ 1338 | -        | interval                    | interval
+ 3286 | -        | jsonb                       | integer
+ 3285 | -        | jsonb                       | text
+ 3398 | -        | jsonb                       | text[]
+  737 | -        | path                        | point
+  732 | -        | point                       | point
+ 1803 | -        | time with time zone         | interval
+ 1801 | -        | time without time zone      | interval
+ 1399 | -        | time without time zone      | time without time zone
+ 1329 | -        | timestamp with time zone    | interval
+ 2068 | -        | timestamp without time zone | interval
+  807 | /        | box                         | point
+ 1519 | /        | circle                      | point
+ 1585 | /        | interval                    | double precision
+  739 | /        | path                        | point
+  734 | /        | point                       | point
+(50 rows)
+
+-- Functions whose name has slope support for some signatures but not others
+SELECT
+    u.oid AS "oid",
+    u.proname AS "function",
+    pg_get_function_arguments(u.oid) COLLATE "C" AS arguments,
+    format_type(u.prorettype, NULL) AS returns
+FROM pg_proc u
+WHERE (u.prosupport = 0 OR NOT EXISTS (
+        SELECT 1 FROM pg_proc sp
+        WHERE sp.oid = u.prosupport
+          AND (sp.proname LIKE '%slope%' OR sp.proname LIKE '%prosupport')))
+  AND NOT EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprcode = u.oid)
+  AND EXISTS (
+      SELECT 1
+      FROM pg_proc s
+      JOIN pg_proc sp ON sp.oid = s.prosupport
+      WHERE s.proname = u.proname
+        AND (sp.proname LIKE '%slope%' OR sp.proname LIKE '%prosupport')
+        AND NOT EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprcode = s.oid))
+ORDER BY u.proname, arguments;
+ oid  |   function   |               arguments               |           returns           
+------+--------------+---------------------------------------+-----------------------------
+ 1218 | date_trunc   | text, interval                        | interval
+ 1736 | log          | numeric, numeric                      | numeric
+ 2027 | timestamp    | timestamp with time zone              | timestamp without time zone
+ 1961 | timestamp    | timestamp without time zone, integer  | timestamp without time zone
+ 1967 | timestamptz  | timestamp with time zone, integer     | timestamp with time zone
+ 2028 | timestamptz  | timestamp without time zone           | timestamp with time zone
+ 2038 | timezone     | interval, time with time zone         | time with time zone
+ 1026 | timezone     | interval, timestamp with time zone    | timestamp without time zone
+ 2070 | timezone     | interval, timestamp without time zone | timestamp with time zone
+ 2037 | timezone     | text, time with time zone             | time with time zone
+ 6336 | timezone     | time with time zone                   | time with time zone
+ 1778 | to_timestamp | text, text                            | timestamp with time zone
+  753 | trunc        | macaddr                               | macaddr
+ 4112 | trunc        | macaddr8                              | macaddr8
+(14 rows)
+
