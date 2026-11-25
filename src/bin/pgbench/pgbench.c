@@ -4961,9 +4961,22 @@ initCreateTables(PGconn *con)
 	{
 		const struct ddlinfo *ddl = &DDLs[i];
 
+		bool		unlogged = unlogged_tables;
+
+		/*
+		 * When the accounts table is partitioned, it cannot be unlogged
+		 * itself; its partitions are created unlogged instead.  In that case
+		 * pgbench_branches must stay permanent too, so that the permanent
+		 * pgbench_accounts can reference it when --foreign-keys is used.
+		 */
+		if (partition_method != PART_NONE &&
+			(strcmp(ddl->table, "pgbench_accounts") == 0 ||
+			 strcmp(ddl->table, "pgbench_branches") == 0))
+			unlogged = false;
+
 		/* Construct new create table statement. */
 		printfPQExpBuffer(&query, "create%s table %s(%s)",
-						  (unlogged_tables && partition_method == PART_NONE) ? " unlogged" : "",
+						  unlogged ? " unlogged" : "",
 						  ddl->table,
 						  (scale >= SCALE_32BIT_THRESHOLD) ? ddl->bigcols : ddl->smcols);
 
