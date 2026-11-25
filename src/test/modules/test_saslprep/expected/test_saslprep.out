@@ -149,4 +149,71 @@ SELECT
  <DEL>    | \x7f | (,PROHIBITED)
 (128 rows)
 
+-- Test SASLprep validation before and after normalization.
+-- Prohibited output characters and bidi rules must be checked
+-- after normalization, while code points unassigned in Unicode
+-- 3.2 must be rejected before normalization.
+WITH cases(name, src, expected_status, expected_res) AS (
+    VALUES
+    -- Characters that become valid after normalization.
+    ('combining grave', 'cd80', 'SUCCESS', 'cc80'),
+    ('combining acute', 'cd81', 'SUCCESS', 'cc81'),
+    ('grave after a', '61cd80', 'SUCCESS', 'c3a0'),
+    -- Normalization can increase the number of code points.
+    ('latin ligature ff', 'efac80', 'SUCCESS', '6666'),
+    -- Normalization introduces prohibited bidi sequences.
+    ('hebrew presentation', 'efac9d', 'PROHIBITED', NULL),
+    ('hebrew shin', 'efacaa', 'PROHIBITED', NULL),
+    ('arabic ligature', 'efb19b', 'PROHIBITED', NULL),
+    -- Normalization changes bidi properties (L to R).
+    ('alef after latin', '41e284b5', 'PROHIBITED', NULL),
+    ('alef in RTL', 'd790e284b5d791', 'SUCCESS', 'd790d790d791'),
+    -- Normalization introduces L characters into an RTL string.
+    ('rupee in RTL', 'd790e282a8d791', 'PROHIBITED', NULL),
+    -- Code points unassigned in Unicode 3.2 that normalize
+    -- to assigned characters using newer Unicode data.
+    ('unassigned Greek', 'cfb9', 'PROHIBITED', NULL),
+    ('unassigned modifier', 'e1b4ac', 'PROHIBITED', NULL),
+    -- Control case: valid RTL string containing a digit.
+    ('valid RTL digits', 'd79031d791', 'SUCCESS', 'd79031d791'),
+    -- Unicode 3.2, Corrigendum #4
+    ('U+2f868 from U+2136a to U+36fc', 'f0afa1a8' , 'SUCCESS', 'f0a18daa'),
+    ('U+2f874 from U+5f33 to U+5f53',  'f0afa1b4' , 'SUCCESS', 'e5bcb3'),
+    ('U+2f91f from U+43ab to U+243ab', 'f0afa49f' , 'SUCCESS', 'e48eab'),
+    ('U+2f95f from U+7aae to U+7aee',  'f0afa59f' , 'SUCCESS', 'e7aaae'),
+    ('U+2f9bf from U+4d57 to U+45d7',  'f0afa6bf' , 'SUCCESS', 'e4b597')
+)
+SELECT name,
+       actual.status,
+       encode(actual.res, 'hex') AS result,
+       actual.status = expected_status
+         AND encode(actual.res, 'hex')
+             IS NOT DISTINCT FROM expected_res AS passed
+FROM cases
+CROSS JOIN LATERAL test_saslprep(
+    decode(cases.src, 'hex')
+) AS actual
+ORDER BY name COLLATE "C";
+              name              |   status   |    result    | passed 
+--------------------------------+------------+--------------+--------
+ U+2f868 from U+2136a to U+36fc | SUCCESS    | f0a18daa     | t
+ U+2f874 from U+5f33 to U+5f53  | SUCCESS    | e5bcb3       | t
+ U+2f91f from U+43ab to U+243ab | SUCCESS    | e48eab       | t
+ U+2f95f from U+7aae to U+7aee  | SUCCESS    | e7aaae       | t
+ U+2f9bf from U+4d57 to U+45d7  | SUCCESS    | e4b597       | t
+ alef after latin               | PROHIBITED |              | t
+ alef in RTL                    | SUCCESS    | d790d790d791 | t
+ arabic ligature                | PROHIBITED |              | t
+ combining acute                | SUCCESS    | cc81         | t
+ combining grave                | SUCCESS    | cc80         | t
+ grave after a                  | SUCCESS    | c3a0         | t
+ hebrew presentation            | PROHIBITED |              | t
+ hebrew shin                    | PROHIBITED |              | t
+ latin ligature ff              | SUCCESS    | 6666         | t
+ rupee in RTL                   | PROHIBITED |              | t
+ unassigned Greek               | PROHIBITED |              | t
+ unassigned modifier            | PROHIBITED |              | t
+ valid RTL digits               | SUCCESS    | d79031d791   | t
+(18 rows)
+
 DROP EXTENSION test_saslprep;

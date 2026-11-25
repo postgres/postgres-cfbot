@@ -1049,6 +1049,7 @@ pg_saslprep(const char *input, char **output)
 	char32_t   *input_chars = NULL;
 	char32_t   *output_chars = NULL;
 	int			input_size;
+	int			output_size;
 	char	   *result;
 	int			result_size;
 	int			count;
@@ -1098,6 +1099,15 @@ pg_saslprep(const char *input, char **output)
 	{
 		char32_t	code = input_chars[i];
 
+		/*
+		 * Reject code points unassigned in Unicode 3.2 before normalization.
+		 * The normalizer uses newer Unicode data and may map such code
+		 * points to characters that were already assigned in Unicode 3.2.
+		 * See Unicode Standard Annex #15, section 11.3 for details.
+		 */
+		if (IS_CODE_IN_TABLE(code, unassigned_codepoint_ranges))
+			goto prohibited;
+
 		if (IS_CODE_IN_TABLE(code, non_ascii_space_ranges))
 			input_chars[count++] = 0x0020;
 		else if (IS_CODE_IN_TABLE(code, commonly_mapped_to_nothing_ranges))
@@ -1105,7 +1115,36 @@ pg_saslprep(const char *input, char **output)
 			/* map to nothing */
 		}
 		else
+		{
+			/*
+			 * PostgreSQL's Unicode normalization tables include the corrections
+			 * introduced by Unicode Corrigendum #4. SASLprep (RFC 4013), however,
+			 * requires Unicode 3.2 normalization, which predates these corrections.
+			 * Map the five affected characters to their original Unicode 3.2
+			 * values before normalization.
+			 * See Unicode Standard Annex #15, section 11.3 for details.
+			 */
+			switch (code)
+			{
+				case 0x2F868:
+					code = 0x2136A;
+					break;
+				case 0x2F874:
+					code = 0x5F33;
+					break;
+				case 0x2F91F:
+					code = 0x43AB;
+					break;
+				case 0x2F95F:
+					code = 0x7AAE;
+					break;
+				case 0x2F9BF:
+					code = 0x4D57;
+					break;
+			}
+
 			input_chars[count++] = code;
+		}
 	}
 	input_chars[count] = (char32_t) '\0';
 	input_size = count;
@@ -1121,13 +1160,20 @@ pg_saslprep(const char *input, char **output)
 	if (!output_chars)
 		goto oom;
 
+	output_size = 0;
+	for (wp = output_chars; *wp; wp++)
+		output_size++;
+
+	if (output_size == 0)
+		goto prohibited;		/* don't allow empty password, after NFKC */
+
 	/*
 	 * 3) Prohibit -- Check for any characters that are not allowed in the
 	 * output.  If any are found, return an error.
 	 */
-	for (i = 0; i < input_size; i++)
+	for (i = 0; i < output_size; i++)
 	{
-		char32_t	code = input_chars[i];
+		char32_t	code = output_chars[i];
 
 		if (IS_CODE_IN_TABLE(code, prohibited_output_ranges))
 			goto prohibited;
@@ -1157,9 +1203,9 @@ pg_saslprep(const char *input, char **output)
 	 * MUST be the last character of the string."
 	 */
 	contains_RandALCat = false;
-	for (i = 0; i < input_size; i++)
+	for (i = 0; i < output_size; i++)
 	{
-		char32_t	code = input_chars[i];
+		char32_t	code = output_chars[i];
 
 		if (IS_CODE_IN_TABLE(code, RandALCat_codepoint_ranges))
 		{
@@ -1170,12 +1216,12 @@ pg_saslprep(const char *input, char **output)
 
 	if (contains_RandALCat)
 	{
-		char32_t	first = input_chars[0];
-		char32_t	last = input_chars[input_size - 1];
+		char32_t	first = output_chars[0];
+		char32_t	last = output_chars[output_size - 1];
 
-		for (i = 0; i < input_size; i++)
+		for (i = 0; i < output_size; i++)
 		{
-			char32_t	code = input_chars[i];
+			char32_t	code = output_chars[i];
 
 			if (IS_CODE_IN_TABLE(code, LCat_codepoint_ranges))
 				goto prohibited;
