@@ -208,3 +208,28 @@ EXECUTE foo;
 ALTER TABLE articles DROP CONSTRAINT articles_pkey RESTRICT;
 
 EXECUTE foo;  -- fail
+
+
+-- Temporal (WITHOUT OVERLAPS) primary keys do not prove functional dependency:
+-- the key enforces uniqueness with its operator class's equality and overlap
+-- semantics, which need not match the equality that GROUP BY uses for the same
+-- columns.
+
+CREATE TEMP TABLE temporal_articles (
+    id int4range,
+    valid_at int4range,
+    title text NOT NULL,
+    PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)
+);
+
+-- group by a temporal primary key (fail)
+SELECT id, valid_at, title
+FROM temporal_articles
+GROUP BY id, valid_at;
+
+-- but grouping by all the selected columns is fine
+SELECT id, valid_at, title
+FROM temporal_articles
+GROUP BY id, valid_at, title;
+
+DROP TABLE temporal_articles;
