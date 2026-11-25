@@ -304,12 +304,14 @@ static const char *progname;
 
 static volatile sig_atomic_t timer_exceeded = false;	/* flag from signal
 														 * handler */
+static volatile sig_atomic_t aborted_by_sigint = false; /* Ctrl-C pressed */
 
 /*
  * We don't want to allocate variables one by one; for efficiency, add a
  * constant margin each time it overflows.
  */
 #define VARIABLES_ALLOC_MARGIN	8
+#define MAX_IDLE_WAIT_USEC	INT64CONST(1000000)
 
 /*
  * Variable definitions.
@@ -842,6 +844,7 @@ static void addScript(const ParsedScript *script);
 static THREAD_FUNC_RETURN_TYPE THREAD_FUNC_CC threadRun(void *arg);
 static void finishCon(CState *st);
 static void setalarm(int seconds);
+static void install_sigint_handler(void);
 static socket_set *alloc_socket_set(int count);
 static void free_socket_set(socket_set *sa);
 static void clear_socket_set(socket_set *sa);
@@ -7452,6 +7455,12 @@ main(int argc, char **argv)
 	if (duration > 0)
 		setalarm(duration);
 
+	/*
+	 * Install a SIGINT handler so that Ctrl-C stops the benchmark and
+	 * reports the partial results gathered so far.
+	 */
+	install_sigint_handler();
+
 	errno = THREAD_BARRIER_INIT(&barrier, nthreads);
 	if (errno != 0)
 		pg_fatal("could not initialize barrier: %m");
@@ -7527,6 +7536,9 @@ main(int argc, char **argv)
 				 bench_start - start_time, latency_late);
 
 	THREAD_BARRIER_DESTROY(&barrier);
+
+	if (aborted_by_sigint)
+		exit_code = 130;
 
 	if (exit_code != 0)
 		pg_log_error("Run was aborted; the above results are incomplete.");
@@ -7618,6 +7630,17 @@ threadRun(void *arg)
 		pg_time_usec_t min_usec;
 		pg_time_usec_t now = 0; /* set this only if needed */
 
+		if (aborted_by_sigint)
+		{
+			for (int i = 0; i < nstate; i++)
+			{
+				if (state[i].state != CSTATE_FINISHED &&
+					state[i].state != CSTATE_ABORTED)
+					state[i].state = CSTATE_FINISHED;
+			}
+			break;
+		}
+
 		/*
 		 * identify which client sockets should be checked for input, and
 		 * compute the nearest time (if any) at which we need to wake up.
@@ -7686,7 +7709,12 @@ threadRun(void *arg)
 		/*
 		 * If no clients are ready to execute actions, sleep until we receive
 		 * data on some client socket or the timeout (if any) elapses.
+		 *
+		 * pg_usleep() wait for all specified time and ignores EINTR,
+		 * so lets do a little compromise: do sleeping with little intervals
 		 */
+		if (min_usec > MAX_IDLE_WAIT_USEC)
+			min_usec = MAX_IDLE_WAIT_USEC;
 		if (min_usec > 0)
 		{
 			int			rc = 0;
@@ -7752,6 +7780,13 @@ threadRun(void *arg)
 					 st->state == CSTATE_ABORTED)
 			{
 				/* this client is done, no need to consider it anymore */
+				continue;
+			}
+
+			if (aborted_by_sigint)
+			{
+				st->state = CSTATE_FINISHED;
+				remains--;
 				continue;
 			}
 
@@ -7863,6 +7898,23 @@ setalarm(int seconds)
 	alarm(seconds);
 }
 
+static void
+handle_sig_int(SIGNAL_ARGS)
+{
+	if (aborted_by_sigint)
+	{
+		pqsignal(SIGINT, PG_SIG_DFL);
+		raise(SIGINT);
+	}
+	aborted_by_sigint = true;
+}
+
+static void
+install_sigint_handler(void)
+{
+	pqsignal(SIGINT, handle_sig_int);
+}
+
 #else							/* WIN32 */
 
 static VOID CALLBACK
@@ -7884,6 +7936,25 @@ setalarm(int seconds)
 							   win32_timer_callback, NULL, seconds * 1000, 0,
 							   WT_EXECUTEINTIMERTHREAD | WT_EXECUTEONLYONCE))
 		pg_fatal("failed to set timer");
+}
+
+static BOOL WINAPI
+win32_sigint_callback(DWORD ctrl_type)
+{
+	if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT)
+	{
+		if (aborted_by_sigint)
+			return FALSE;
+		aborted_by_sigint = true;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static void
+install_sigint_handler(void)
+{
+	SetConsoleCtrlHandler(win32_sigint_callback, TRUE);
 }
 
 #endif							/* WIN32 */
