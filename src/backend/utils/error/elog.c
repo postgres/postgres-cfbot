@@ -89,6 +89,7 @@
 #include "utils/pg_locale.h"
 #include "utils/ps_status.h"
 #include "utils/varlena.h"
+#include "utils/wait_event.h"
 
 
 /* In this module, access gettext() via err_gettext() */
@@ -2837,9 +2838,11 @@ write_syslog(int level, const char *line)
 	/* Open syslog connection if not done yet */
 	if (!openlog_done)
 	{
+		pgstat_report_wait_start(WAIT_EVENT_SYSLOG_WRITE);
 		openlog(syslog_ident ? syslog_ident : "postgres",
 				LOG_PID | LOG_NDELAY | LOG_NOWAIT,
 				syslog_facility);
+		pgstat_report_wait_end();
 		openlog_done = true;
 	}
 
@@ -2912,10 +2915,12 @@ write_syslog(int level, const char *line)
 
 			chunk_nr++;
 
+			pgstat_report_wait_start(WAIT_EVENT_SYSLOG_WRITE);
 			if (syslog_sequence_numbers)
 				syslog(level, "[%lu-%d] %s", seq, chunk_nr, buf);
 			else
 				syslog(level, "[%d] %s", chunk_nr, buf);
+			pgstat_report_wait_end();
 
 			line += buflen;
 			len -= buflen;
@@ -2924,10 +2929,12 @@ write_syslog(int level, const char *line)
 	else
 	{
 		/* message short enough */
+		pgstat_report_wait_start(WAIT_EVENT_SYSLOG_WRITE);
 		if (syslog_sequence_numbers)
 			syslog(level, "[%lu] %s", seq, line);
 		else
 			syslog(level, "%s", line);
+		pgstat_report_wait_end();
 	}
 }
 #endif							/* HAVE_SYSLOG */
@@ -3112,7 +3119,9 @@ write_console(const char *line, int len)
 	 * We ignore any error from write() here.  We have no useful way to report
 	 * it ... certainly whining on stderr isn't likely to be productive.
 	 */
+	pgstat_report_wait_start(WAIT_EVENT_STDERR_WRITE);
 	rc = write(fileno(stderr), line, len);
+	pgstat_report_wait_end();
 	(void) rc;
 }
 
@@ -3959,7 +3968,9 @@ write_pipe_chunks(char *data, int len, int dest)
 		/* no need to set PIPE_PROTO_IS_LAST yet */
 		p.proto.len = PIPE_MAX_PAYLOAD;
 		memcpy(p.proto.data, data, PIPE_MAX_PAYLOAD);
+		pgstat_report_wait_start(WAIT_EVENT_SYSLOGGER_WRITE);
 		rc = write(fd, &p, PIPE_HEADER_SIZE + PIPE_MAX_PAYLOAD);
+		pgstat_report_wait_end();
 		(void) rc;
 		data += PIPE_MAX_PAYLOAD;
 		len -= PIPE_MAX_PAYLOAD;
@@ -3969,7 +3980,9 @@ write_pipe_chunks(char *data, int len, int dest)
 	p.proto.flags |= PIPE_PROTO_IS_LAST;
 	p.proto.len = len;
 	memcpy(p.proto.data, data, len);
+	pgstat_report_wait_start(WAIT_EVENT_SYSLOGGER_WRITE);
 	rc = write(fd, &p, PIPE_HEADER_SIZE + len);
+	pgstat_report_wait_end();
 	(void) rc;
 }
 
