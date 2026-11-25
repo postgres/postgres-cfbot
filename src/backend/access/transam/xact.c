@@ -65,6 +65,7 @@
 #include "utils/builtins.h"
 #include "utils/combocid.h"
 #include "utils/guc.h"
+#include "utils/guc_hooks.h"
 #include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
@@ -88,6 +89,15 @@ bool		DefaultXactDeferrable = false;
 bool		XactDeferrable;
 
 int			synchronous_commit = SYNCHRONOUS_COMMIT_ON;
+
+bool		report_commit_lsn = false;
+
+/*
+ * End of the commit record of the most recent transaction this session
+ * committed, shown as last_commit_lsn.  Unlike XactLastCommitEnd, this
+ * doesn't advance for transactions that wrote WAL but no commit record.
+ */
+XLogRecPtr	XactLastCommitRecordEnd = InvalidXLogRecPtr;
 
 /*
  * CheckXidAlive is a xid value pointing to a possibly ongoing (sub)
@@ -1492,6 +1502,7 @@ RecordTransactionCommit(void)
 							RelcacheInitFileInval,
 							MyXactFlags,
 							InvalidTransactionId, NULL /* plain commit */ );
+		XactLastCommitRecordEnd = XactLastRecEnd;
 
 		if (replorigin)
 			/* Move LSNs forward for this replication origin */
@@ -1621,6 +1632,19 @@ cleanup:
 		pfree(droppedstats);
 
 	return latestXid;
+}
+
+/*
+ * GUC show_hook for last_commit_lsn
+ */
+const char *
+show_last_commit_lsn(void)
+{
+	static char buf[32];
+
+	snprintf(buf, sizeof(buf), "%X/%08X",
+			 LSN_FORMAT_ARGS(XactLastCommitRecordEnd));
+	return buf;
 }
 
 

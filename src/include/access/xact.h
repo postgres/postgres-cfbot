@@ -83,6 +83,10 @@ typedef enum
 /* Synchronous commit level */
 extern PGDLLIMPORT int synchronous_commit;
 
+/* End of this session's last commit record, and whether to report it */
+extern PGDLLIMPORT bool report_commit_lsn;
+extern PGDLLIMPORT XLogRecPtr XactLastCommitRecordEnd;
+
 /* used during logical streaming of a transaction */
 extern PGDLLIMPORT TransactionId CheckXidAlive;
 extern PGDLLIMPORT bool bsysscan;

@@ -2518,6 +2518,23 @@ ReportChangedGUCOptions(void)
 		SetConfigOption("in_hot_standby", "false",
 						PGC_INTERNAL, PGC_S_OVERRIDE);
 
+	/*
+	 * last_commit_lsn isn't GUC_REPORT, since only clients that ask for it
+	 * with report_commit_lsn want a report after each commit.  Its value
+	 * changes without going through the GUC machinery, so check it here.
+	 * ReportGUCOption sends nothing if it hasn't changed since the last
+	 * report.
+	 */
+	if (report_commit_lsn)
+	{
+		static struct config_generic *last_commit_lsn_conf = NULL;
+
+		if (last_commit_lsn_conf == NULL)
+			last_commit_lsn_conf = find_option("last_commit_lsn",
+											   false, false, ERROR);
+		ReportGUCOption(last_commit_lsn_conf);
+	}
+
 	/* Transmit new values of interesting variables */
 	slist_foreach_modify(iter, &guc_report_list)
 	{

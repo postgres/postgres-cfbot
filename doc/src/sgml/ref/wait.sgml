@@ -330,7 +330,10 @@ WAIT FOR LSN '<replaceable class="parameter">lsn</replaceable>'
    <literal>primary_flush</literal> mode waits for WAL to be flushed on
    a primary server. In all cases, the <acronym>LSN</acronym> of the last
    modification should be stored on the client application side or the
-   connection pooler side.
+   connection pooler side.  The session's <xref linkend="guc-last-commit-lsn"/>
+   is the end of its most recent <literal>COMMIT</literal> record, and with
+   <xref linkend="guc-report-commit-lsn"/> on, the server sends it to the
+   client after each commit.
   </para>
 
   <para>

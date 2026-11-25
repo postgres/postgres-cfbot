@@ -98,6 +98,7 @@ typedef struct FixedParallelState
 	ProcNumber	parallel_leader_proc_number;
 	TimestampTz xact_ts;
 	TimestampTz stmt_ts;
+	XLogRecPtr	last_commit_record_end;
 	SerializableXactHandle serializable_xact_handle;
 
 	/* Maximum XactLastRecEnd of any worker. */
@@ -353,6 +354,7 @@ InitializeParallelDSM(ParallelContext *pcxt)
 	fps->parallel_leader_proc_number = MyProcNumber;
 	fps->xact_ts = GetCurrentTransactionStartTimestamp();
 	fps->stmt_ts = GetCurrentStatementStartTimestamp();
+	fps->last_commit_record_end = XactLastCommitRecordEnd;
 	fps->serializable_xact_handle = ShareSerializableXact();
 	pg_atomic_init_u64(&fps->last_xlog_end, InvalidXLogRecPtr);
 	shm_toc_insert(pcxt->toc, PARALLEL_KEY_FIXED, fps);
@@ -1416,6 +1418,9 @@ ParallelWorkerMain(Datum main_arg)
 	 * xact.c will fire.
 	 */
 	SetParallelStartTimestamps(fps->xact_ts, fps->stmt_ts);
+
+	/* Show the leader's last_commit_lsn. */
+	XactLastCommitRecordEnd = fps->last_commit_record_end;
 
 	/*
 	 * Identify the entry point to be called.  In theory this could result in
