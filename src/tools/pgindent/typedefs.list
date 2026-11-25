@@ -636,7 +636,9 @@ DataChecksumsStateStruct
 DataChecksumsWorkerDatabase
 DataChecksumsWorkerOperation
 DataChecksumsWorkerResult
+DataDirSyncEntry
 DataDirSyncMethod
+DataDirSyncState
 DataDumperPtr
 DataPageDeleteStack
 DataTypesUsageChecks
@@ -1337,6 +1339,7 @@ IndexVacuumInfo
 IndxInfo
 InferClause
 InferenceElem
+InflightSyncEntry
 InfoItem
 InhInfo
 InheritableSocket
@@ -2263,6 +2266,7 @@ PgAioOpData
 PgAioResult
 PgAioResultStatus
 PgAioReturn
+PgAioSyncFileTag
 PgAioTargetData
 PgAioTargetID
 PgAioTargetInfo
@@ -3053,12 +3057,14 @@ SupportRequestSimplify
 SupportRequestSimplifyAggref
 SupportRequestWFuncMonotonic
 Syn
+SyncFileCloseMethod
 SyncOps
 SyncRepConfigData
 SyncRepStandbyData
 SyncRequestHandler
 SyncRequestType
 SyncStandbySlotsConfigData
+SyncState
 SyncingRelationsState
 SysCacheIdentifier
 SysFKRelationship
