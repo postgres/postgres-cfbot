@@ -3497,6 +3497,24 @@ SELECT repeat('Pg', -4);
  
 (1 row)
 
+SELECT repeat('', 10);
+ repeat 
+--------
+ 
+(1 row)
+
+SELECT repeat('x', 0);
+ repeat 
+--------
+ 
+(1 row)
+
+SELECT repeat('x', 4);
+ repeat 
+--------
+ xxxx
+(1 row)
+
 SELECT SUBSTRING('1234567890'::bytea FROM 3) "34567890";
  34567890 
 ----------
