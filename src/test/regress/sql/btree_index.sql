@@ -411,6 +411,13 @@ explain (costs off)
 select * from btree_bpchar where f1::bpchar like 'foo%';
 select * from btree_bpchar where f1::bpchar like 'foo%';
 
+-- regexp_like() should get an index condition, like the ~ operator:
+create index on btree_bpchar(f1);
+set enable_seqscan to false;
+explain (costs off)
+select * from btree_bpchar where regexp_like(f1, '^foo');
+reset enable_seqscan;
+
 --
 -- Perform unique checking, with and without the use of deduplication
 --

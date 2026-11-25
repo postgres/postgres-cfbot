@@ -765,6 +765,19 @@ select * from btree_bpchar where f1::bpchar like 'foo%';
  fool
 (2 rows)
 
+-- regexp_like() should get an index condition, like the ~ operator:
+create index on btree_bpchar(f1);
+set enable_seqscan to false;
+explain (costs off)
+select * from btree_bpchar where regexp_like(f1, '^foo');
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Index Only Scan using btree_bpchar_f1_idx1 on btree_bpchar
+   Index Cond: ((f1 >= 'foo'::text) AND (f1 < 'fop'::text))
+   Filter: regexp_like(f1, '^foo'::text)
+(3 rows)
+
+reset enable_seqscan;
 --
 -- Perform unique checking, with and without the use of deduplication
 --

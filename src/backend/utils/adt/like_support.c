@@ -74,6 +74,7 @@ typedef enum
 	(OidIsValid(coll) && !get_collation_isdeterministic(coll))
 
 static Node *like_regex_support(Node *rawreq, Pattern_Type ptype);
+static bool funccall_has_stats(SupportRequestSelectivity *req);
 static List *match_pattern_prefix(Node *leftop,
 								  Node *rightop,
 								  Pattern_Type ptype,
@@ -168,6 +169,15 @@ like_regex_support(Node *rawreq, Pattern_Type ptype)
 		SupportRequestSelectivity *req = (SupportRequestSelectivity *) rawreq;
 		Selectivity s1;
 
+		/*
+		 * If there are statistics on the function call itself, which can come
+		 * from an expression index or extended statistics, they are better
+		 * than anything we can derive from the pattern.  Decline, so that the
+		 * planner falls back to boolvarsel(), which uses them.
+		 */
+		if (!req->is_join && funccall_has_stats(req))
+			return NULL;
+
 		if (req->is_join)
 		{
 			/*
@@ -233,6 +243,26 @@ like_regex_support(Node *rawreq, Pattern_Type ptype)
 	}
 
 	return ret;
+}
+
+/*
+ * Are there statistics on the function call described by a selectivity
+ * request?
+ */
+static bool
+funccall_has_stats(SupportRequestSelectivity *req)
+{
+	FuncExpr   *fexpr;
+	VariableStatData vardata;
+	bool		result;
+
+	fexpr = makeFuncExpr(req->funcid, BOOLOID, req->args,
+						 InvalidOid, req->inputcollid, COERCE_EXPLICIT_CALL);
+	examine_variable(req->root, (Node *) fexpr, req->varRelid, &vardata);
+	result = HeapTupleIsValid(vardata.statsTuple);
+	ReleaseVariableStats(vardata);
+
+	return result;
 }
 
 /*
