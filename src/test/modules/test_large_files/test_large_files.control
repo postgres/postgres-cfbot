@@ -1,0 +1,5 @@
+# test_large_files extension
+comment = 'Test module for large file I/O operations'
+default_version = '1.0'
+module_pathname = '$libdir/test_large_files'
+relocatable = true
