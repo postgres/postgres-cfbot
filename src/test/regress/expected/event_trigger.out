@@ -639,6 +639,109 @@ ERROR:  cannot alter type "rewritetype" because column "rewritemetoo3.a" uses it
 drop table rewriteme;
 drop event trigger no_rewrite_allowed;
 drop function test_evtrig_no_rewrite();
+-- Recheck persistence restrictions after table rewrite event triggers.
+-- Case: adding a table to a publication during a rewrite event.
+CREATE TABLE rewrite_pub_target (a int);
+-- Suppress warning that depends on wal_level
+SET client_min_messages = 'ERROR';
+CREATE PUBLICATION rewrite_pub;
+RESET client_min_messages;
+-- Define a function which adds a table to the publication for a rewrite
+-- event trigger.
+CREATE FUNCTION test_evtrig_add_table() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF pg_event_trigger_table_rewrite_oid() = 'rewrite_pub_target'::regclass THEN
+    EXECUTE 'ALTER PUBLICATION rewrite_pub ADD TABLE rewrite_pub_target';
+  END IF;
+END;
+$$;
+CREATE EVENT TRIGGER add_table_during_rewrite ON table_rewrite
+  WHEN TAG IN ('ALTER TABLE')
+  EXECUTE FUNCTION test_evtrig_add_table();
+-- Should fail
+ALTER TABLE rewrite_pub_target SET UNLOGGED;
+ERROR:  cannot change table "rewrite_pub_target" to unlogged because it is referenced by a publication
+DETAIL:  Unlogged relations cannot be published or excluded via an EXCEPT clause.
+HINT:  Drop the table from the publication, or remove it from the publication's EXCEPT clause, first.
+-- Cleanup
+DROP EVENT TRIGGER add_table_during_rewrite;
+DROP FUNCTION test_evtrig_add_table();
+DROP PUBLICATION rewrite_pub;
+DROP TABLE rewrite_pub_target;
+-- Case: changing the referenced table to unlogged during a rewrite event.
+CREATE TABLE rewrite_referenced (a int PRIMARY KEY);
+CREATE UNLOGGED TABLE rewrite_to_logged (a int REFERENCES rewrite_referenced);
+-- Define a function which sets a table to unlogged for a rewrite event
+-- trigger.
+CREATE FUNCTION test_evtrig_set_unlogged() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF pg_event_trigger_table_rewrite_oid() = 'rewrite_to_logged'::regclass THEN
+    EXECUTE 'ALTER TABLE rewrite_referenced SET UNLOGGED';
+  END IF;
+END;
+$$;
+CREATE EVENT TRIGGER set_unlogged_during_rewrite ON table_rewrite
+  WHEN TAG IN ('ALTER TABLE')
+  EXECUTE FUNCTION test_evtrig_set_unlogged();
+-- Should fail
+ALTER TABLE rewrite_to_logged SET LOGGED;
+ERROR:  could not change table "rewrite_to_logged" to logged because it references unlogged table "rewrite_referenced"
+-- Cleanup
+DROP EVENT TRIGGER set_unlogged_during_rewrite;
+DROP FUNCTION test_evtrig_set_unlogged();
+DROP TABLE rewrite_to_logged;
+DROP TABLE rewrite_referenced;
+-- Case: changing the referencing table to logged during a rewrite event.
+CREATE TABLE rewrite_to_unlogged (a int PRIMARY KEY);
+CREATE UNLOGGED TABLE rewrite_referencing (a int REFERENCES rewrite_to_unlogged);
+-- Define a function which sets a table to logged for a rewrite event
+-- trigger.
+CREATE FUNCTION test_evtrig_set_logged() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF pg_event_trigger_table_rewrite_oid() = 'rewrite_to_unlogged'::regclass THEN
+    EXECUTE 'ALTER TABLE rewrite_referencing SET LOGGED';
+  END IF;
+END;
+$$;
+CREATE EVENT TRIGGER set_logged_during_rewrite ON table_rewrite
+  WHEN TAG IN ('ALTER TABLE')
+  EXECUTE FUNCTION test_evtrig_set_logged();
+-- Should fail
+ALTER TABLE rewrite_to_unlogged SET UNLOGGED;
+ERROR:  could not change table "rewrite_to_unlogged" to unlogged because it references logged table "rewrite_referencing"
+-- Cleanup
+DROP EVENT TRIGGER set_logged_during_rewrite;
+DROP FUNCTION test_evtrig_set_logged();
+DROP TABLE rewrite_referencing;
+DROP TABLE rewrite_to_unlogged;
+-- Case: DDL executed by a DEFAULT expression evaluated during rewrite,
+-- with no event trigger involved.
+CREATE TABLE rewrite_default_target (a int);
+INSERT INTO rewrite_default_target VALUES (1);
+SET client_min_messages = 'ERROR';
+CREATE PUBLICATION rewrite_pub2;
+RESET client_min_messages;
+CREATE FUNCTION test_default_add_table() RETURNS int
+LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+  EXECUTE 'ALTER PUBLICATION rewrite_pub2 ADD TABLE rewrite_default_target';
+  RETURN 1;
+END;
+$$;
+-- Should fail
+ALTER TABLE rewrite_default_target
+  SET UNLOGGED,
+  ADD COLUMN b int DEFAULT test_default_add_table();
+ERROR:  cannot change table "rewrite_default_target" to unlogged because it is referenced by a publication
+DETAIL:  Unlogged relations cannot be published or excluded via an EXCEPT clause.
+HINT:  Drop the table from the publication, or remove it from the publication's EXCEPT clause, first.
+-- Cleanup
+DROP FUNCTION test_default_add_table();
+DROP PUBLICATION rewrite_pub2;
+DROP TABLE rewrite_default_target;
 -- Tests for REINDEX
 CREATE OR REPLACE FUNCTION reindex_start_command()
 RETURNS event_trigger AS $$
