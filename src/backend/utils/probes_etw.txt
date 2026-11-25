@@ -1,0 +1,103 @@
+#
+# probes_etw.txt
+#      ETW keyword, level and field names for the static probes
+#
+# Copyright (c) 2026, PostgreSQL Global Development Group
+#
+# probes.d has the argument types of each probe but nothing ETW-specific.
+# This file gives, for each probe, the keyword and level its event is
+# written under and a name for each argument.  The arguments are written
+# as in a C prototype, with their types, and Gen_etw_probes.pl fails if
+# the probe set or any argument's type differs from probes.d, so a change
+# to probes.d needs a matching change here.  The field names are taken
+# from the argument descriptions in doc/src/sgml/monitoring.sgml.
+#
+# Each non-comment line has these whitespace-separated fields:
+#
+#   <probe-name>  <keyword>  <level>  [type field-name, ...]
+#
+#   probe-name   as in probes.d, double underscores and all
+#   keyword      QUERY, TRANSACTION, LOCK, BUFFER, STORAGE, WAL, CHECKPOINT
+#                or SORT (the PG_KW_* bits in pg_trace_etw.h)
+#   level        INFO or VERBOSE
+#   arguments    one "type field-name" per argument, in probes.d order and
+#                comma-separated; omitted for probes with no arguments
+
+# Transaction
+transaction__start                  TRANSACTION  INFO     LocalTransactionId lxid
+transaction__commit                 TRANSACTION  INFO     LocalTransactionId lxid
+transaction__abort                  TRANSACTION  INFO     LocalTransactionId lxid
+
+# Lightweight locks (high volume)
+lwlock__acquire                     LOCK         VERBOSE  const char *tranche, LWLockMode mode
+lwlock__release                     LOCK         VERBOSE  const char *tranche
+lwlock__wait__start                 LOCK         VERBOSE  const char *tranche, LWLockMode mode
+lwlock__wait__done                  LOCK         VERBOSE  const char *tranche, LWLockMode mode
+lwlock__condacquire                 LOCK         VERBOSE  const char *tranche, LWLockMode mode
+lwlock__condacquire__fail           LOCK         VERBOSE  const char *tranche, LWLockMode mode
+lwlock__acquire__or__wait           LOCK         VERBOSE  const char *tranche, LWLockMode mode
+lwlock__acquire__or__wait__fail     LOCK         VERBOSE  const char *tranche, LWLockMode mode
+
+# Heavyweight locks (rare, high interest)
+lock__wait__start                   LOCK         INFO     unsigned int locktag_field1, unsigned int locktag_field2, unsigned int locktag_field3, unsigned int locktag_field4, unsigned int locktag_type, LOCKMODE mode
+lock__wait__done                    LOCK         INFO     unsigned int locktag_field1, unsigned int locktag_field2, unsigned int locktag_field3, unsigned int locktag_field4, unsigned int locktag_type, LOCKMODE mode
+
+# Query processing
+query__parse__start                 QUERY        INFO     const char *query
+query__parse__done                  QUERY        INFO     const char *query
+query__rewrite__start               QUERY        INFO     const char *query
+query__rewrite__done                QUERY        INFO     const char *query
+query__plan__start                  QUERY        INFO
+query__plan__done                   QUERY        INFO
+query__execute__start               QUERY        INFO
+query__execute__done                QUERY        INFO
+query__start                        QUERY        INFO     const char *query
+query__done                         QUERY        INFO     const char *query
+statement__status                   QUERY        INFO     const char *status
+
+# Sort
+sort__start                         SORT         VERBOSE  int sort_type, bool unique, int num_keys, int workmem_kb, bool random_access, int parallel_kind
+sort__done                          SORT         VERBOSE  bool is_external, long space_used
+
+# Buffer manager: per-buffer I/O (high volume)
+buffer__read__start                 BUFFER       VERBOSE  ForkNumber forknum, BlockNumber blocknum, Oid spcoid, Oid dboid, Oid reloid, int creator_procno
+buffer__read__done                  BUFFER       VERBOSE  ForkNumber forknum, BlockNumber blocknum, Oid spcoid, Oid dboid, Oid reloid, int creator_procno, bool found
+buffer__flush__start                BUFFER       VERBOSE  ForkNumber forknum, BlockNumber blocknum, Oid spcoid, Oid dboid, Oid reloid
+buffer__flush__done                 BUFFER       VERBOSE  ForkNumber forknum, BlockNumber blocknum, Oid spcoid, Oid dboid, Oid reloid
+buffer__extend__start               BUFFER       VERBOSE  ForkNumber forknum, Oid spcoid, Oid dboid, Oid reloid, int creator_procno, unsigned int extend_by
+buffer__extend__done                BUFFER       VERBOSE  ForkNumber forknum, Oid spcoid, Oid dboid, Oid reloid, int creator_procno, unsigned int extend_by, BlockNumber first_block
+
+# Buffer manager: checkpoint phases (per-checkpoint, low volume)
+buffer__checkpoint__start           BUFFER       INFO     int flags
+buffer__checkpoint__sync__start     BUFFER       INFO
+buffer__checkpoint__done            BUFFER       INFO
+buffer__sync__start                 BUFFER       INFO     int num_buffers, int num_dirty
+buffer__sync__written               BUFFER       VERBOSE  int buffer_id
+buffer__sync__done                  BUFFER       INFO     int num_buffers, int num_written, int num_expected
+
+# Deadlock
+deadlock__found                     LOCK         INFO
+
+# Checkpoint
+checkpoint__start                   CHECKPOINT   INFO     int flags
+checkpoint__done                    CHECKPOINT   INFO     int num_buffers, int num_total, int wal_added, int wal_removed, int wal_recycled
+clog__checkpoint__start             CHECKPOINT   INFO     bool is_normal
+clog__checkpoint__done              CHECKPOINT   INFO     bool is_normal
+subtrans__checkpoint__start         CHECKPOINT   INFO     bool is_normal
+subtrans__checkpoint__done          CHECKPOINT   INFO     bool is_normal
+multixact__checkpoint__start        CHECKPOINT   INFO     bool is_normal
+multixact__checkpoint__done         CHECKPOINT   INFO     bool is_normal
+twophase__checkpoint__start         CHECKPOINT   INFO
+twophase__checkpoint__done          CHECKPOINT   INFO
+
+# Storage manager (md): per-block disk I/O (high volume)
+smgr__md__read__start               STORAGE      VERBOSE  ForkNumber forknum, BlockNumber blocknum, Oid spcoid, Oid dboid, Oid reloid, int creator_procno
+smgr__md__read__done                STORAGE      VERBOSE  ForkNumber forknum, BlockNumber blocknum, Oid spcoid, Oid dboid, Oid reloid, int creator_procno, ssize_t bytes_read, size_t bytes_requested
+smgr__md__write__start              STORAGE      VERBOSE  ForkNumber forknum, BlockNumber blocknum, Oid spcoid, Oid dboid, Oid reloid, int creator_procno
+smgr__md__write__done               STORAGE      VERBOSE  ForkNumber forknum, BlockNumber blocknum, Oid spcoid, Oid dboid, Oid reloid, int creator_procno, ssize_t bytes_written, size_t bytes_requested
+
+# WAL
+wal__insert                         WAL          VERBOSE  unsigned char rmid, unsigned char info
+wal__switch                         WAL          INFO
+wal__buffer__write__dirty__start    WAL          VERBOSE
+wal__buffer__write__dirty__done     WAL          VERBOSE

@@ -17,3 +17,8 @@ subdir('mmgr')
 subdir('resowner')
 subdir('sort')
 subdir('time')
+
+# ETW provider definition and lifecycle, only built with ETW support
+if etw.found()
+  backend_sources += files('pg_trace_etw.c')
+endif

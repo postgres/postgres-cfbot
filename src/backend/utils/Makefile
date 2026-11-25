@@ -64,16 +64,20 @@ wait_event_funcs_data.c: wait_event_types.h
 wait_event_types.h: $(top_srcdir)/src/backend/utils/activity/wait_event_names.txt $(top_srcdir)/src/backend/utils/activity/generate-wait_event_types.pl
 	$(PERL) $(top_srcdir)/src/backend/utils/activity/generate-wait_event_types.pl --code $<
 
+# Both branches also check probes_etw.txt against probes.d; see
+# Gen_etw_probes.pl.
 ifeq ($(enable_dtrace), yes)
 probes.h: postprocess_dtrace.sed probes.h.tmp
 	sed -f $^ >$@
 	rm probes.h.tmp
 
-probes.h.tmp: probes.d
+probes.h.tmp: probes.d Gen_etw_probes.pl probes_etw.txt
+	$(PERL) $(srcdir)/Gen_etw_probes.pl --check $(srcdir)/probes.d $(srcdir)/probes_etw.txt
 	$(DTRACE) -C -h -s $< -o $@
 else
-probes.h: Gen_dummy_probes.pl probes.d
-	$(PERL) -n $^ >$@
+probes.h: Gen_dummy_probes.pl probes.d Gen_etw_probes.pl probes_etw.txt
+	$(PERL) $(srcdir)/Gen_etw_probes.pl --check $(srcdir)/probes.d $(srcdir)/probes_etw.txt
+	$(PERL) -n $(srcdir)/Gen_dummy_probes.pl $(srcdir)/probes.d >$@
 endif
 
 # These generated headers must be symlinked into src/include/.
