@@ -3401,3 +3401,399 @@ alter table alter1.t1 set schema alter2;
 drop publication pub1;
 drop schema alter1 cascade;
 drop schema alter2 cascade;
+
+-- Tests for ALTER COLUMN ... ADD GENERATED USING CONSTRAINT name STORED
+-- turning a regular column into a stored generated column without a rewrite
+create schema tgen;
+
+create table tgen.t1 (a int, b int);
+insert into tgen.t1 (a, b)
+  select x, x * 2 from generate_series(1, 5) x;
+
+begin;
+alter table tgen.t1 add constraint chk_gen check (pg_datum_image_equal(b, a * 2));
+alter table tgen.t1 alter column b
+  add generated using constraint chk_gen stored;
+\d tgen.t1
+insert into tgen.t1 (a, b) values (10, 20);
+rollback;
+
+-- test that we accept the constraint with the operands swapped, too
+begin;
+alter table tgen.t1 add constraint chk_gen check (pg_datum_image_equal(a * 2, b));
+alter table tgen.t1 alter column b
+    add generated using constraint chk_gen stored;
+\d tgen.t1
+insert into tgen.t1 (a, b) values (10, 20);
+rollback;
+begin;
+update tgen.t1 set b = a;
+alter table tgen.t1 add constraint chk_gen check (pg_datum_image_equal(a, b));
+alter table tgen.t1 alter column b
+    add generated using constraint chk_gen stored;
+\d tgen.t1
+insert into tgen.t1 (a, b) values (10, 10);
+rollback;
+
+-- check that neither the table nor indexes are rewritten
+begin;
+alter table tgen.t1
+    add constraint chk_gen check (pg_datum_image_equal(b, a * 2));
+create index t1_a_idx on tgen.t1 (a);
+select pg_relation_filenode('tgen.t1') as t1_filenode_before \gset
+select pg_relation_filenode('tgen.t1_a_idx') as t1_idx_filenode_before \gset
+alter table tgen.t1 alter column b
+  add generated using constraint chk_gen stored;
+select pg_relation_filenode('tgen.t1') as t1_filenode_after \gset
+select pg_relation_filenode('tgen.t1_a_idx') as t1_idx_filenode_after \gset
+select :t1_filenode_before = :t1_filenode_after as did_skip_table_rewrite,
+       :t1_idx_filenode_before = :t1_idx_filenode_after as did_skip_idx_rewrite;
+rollback;
+
+-- test the whole process for adding a stored generated column without
+-- long-lived exclusive locks. The t_migration database is intentionally
+-- left behind for pg_dump/pg_restore tests.
+create table tgen.t_migration (a int);
+select pg_relation_filenode('tgen.t_migration') as t_migration_filenode_before \gset
+insert into tgen.t_migration select x from generate_series(1, 5) x;
+-- test nulls, too
+insert into tgen.t_migration (a) values (null);
+alter table tgen.t_migration add column b int;
+-- take care of new and updated columns
+create function tgen.gen () returns trigger language plpgsql as $$
+begin
+  new.b = new.a * 2; return new;
+end
+$$;
+create trigger tgen_trig
+    before insert or update on tgen.t_migration
+    for each row execute function tgen.gen();
+-- add the constraint as not valid: enforced only for new and updated rows
+begin;
+alter table tgen.t_migration
+    add constraint chk_gen check (pg_datum_image_equal(b, a * 2)) not valid;
+select locktype, mode from pg_locks
+  where relation = 'tgen.t_migration'::regclass and granted;
+commit;
+insert into tgen.t_migration (a) values (100), (200), (300);
+-- backfill existing rows at the appropriate pace
+update tgen.t_migration set b = a * 2 where b is null;
+-- validate: this scans the table, but without an exclusive lock
+begin;
+alter table tgen.t_migration validate constraint chk_gen;
+select locktype, mode from pg_locks
+  where relation = 'tgen.t_migration'::regclass and granted;
+commit;
+-- now the schema update, which doesn't need to rewrite the table thanks to
+-- the constraint
+begin;
+alter table tgen.t_migration alter column b
+    add generated using constraint chk_gen stored;
+select locktype, mode from pg_locks
+where relation = 'tgen.t_migration'::regclass and granted;
+commit;
+select pg_relation_filenode('tgen.t_migration') as t_migration_filenode_after \gset
+select :t_migration_filenode_before = :t_migration_filenode_after as did_skip_rewrite;
+select * from tgen.t_migration;
+-- verify that it's still possible to insert rows (the trigger is still
+-- installed at this point)
+insert into tgen.t_migration (a) values (400);
+insert into tgen.t_migration (a) values (500);
+\d tgen.t_migration
+select * from tgen.t_migration order by a nulls first;
+
+-- test support for partitioned tables
+create table tgen.tpart (a int, b int) partition by hash (a);
+alter table tgen.tpart
+    add constraint chk_gen check (pg_datum_image_equal(b, a * 2));
+create table tgen.tpart_p1 partition of tgen.tpart
+    for values with (modulus 2, remainder 0);
+create table tgen.tpart_p2 partition of tgen.tpart
+    for values with (modulus 2, remainder 1);
+insert into tgen.tpart (a, b) select x, x * 2 from generate_series(1, 5) x;
+
+-- altering a single partition is not allowed
+alter table tgen.tpart_p1 alter column b
+    add generated using constraint chk_gen stored;
+
+-- altering only the parent table is not allowed
+alter table only tgen.tpart alter column b
+    add generated using constraint chk_gen stored;
+
+-- altering the parent table, recursing
+alter table tgen.tpart alter column b
+    add generated using constraint chk_gen stored;
+-- expected: all the partitions have been changed
+\d tgen.tpart
+\d tgen.tpart_p1
+\d tgen.tpart_p2
+
+-- tpart intentionally left behind for pg_dump/pg_restore tests
+
+-- test support for inheritance and subpartitions
+create table tgen.root (a int, b int, c int,
+    constraint chk_gen check ( pg_datum_image_equal(c, a+b) ));
+create table tgen.intermediate () inherits (tgen.root);
+create table tgen.leaf () inherits (tgen.intermediate);
+
+-- it's only allowed to change the whole hierarchy at once...
+begin;
+alter table tgen.root alter column c
+    add generated using constraint chk_gen stored;
+rollback;
+
+-- ... hence all these should result in an error
+alter table only tgen.root alter column c
+    add generated using constraint chk_gen stored;
+alter table tgen.intermediate alter column c
+    add generated using constraint chk_gen stored;
+alter table only tgen.intermediate alter column c
+    add generated using constraint chk_gen stored;
+alter table tgen.leaf alter column c
+    add generated using constraint chk_gen stored;
+alter table only tgen.leaf alter column c
+    add generated using constraint chk_gen stored;
+
+drop table tgen.root cascade;
+
+-- test multiple inheritance:
+-- we can't transform a whole hierarchy if some nodes in the graphs isn't an
+-- inheritor of the root node we're looking at
+create table tgen.root1 (a int);
+create table tgen.root2 (a int);
+create table tgen.intermediate1 () inherits (tgen.root1, tgen.root2);
+create table tgen.intermediate2 () inherits (tgen.root1);
+create table tgen.leaf1 () inherits (tgen.intermediate1, tgen.intermediate2);
+alter table tgen.root1 add constraint chk_gen check (pg_datum_image_equal(a, 1));
+alter table tgen.root1 alter a add generated using constraint chk_gen stored;
+drop table tgen.root1 cascade;
+drop table tgen.root2;
+
+-- supported if we can transform the whole hierarchy starting at the root node
+create table tgen.root1 (a int);
+create table tgen.intermediate1 () inherits (tgen.root1);
+create table tgen.intermediate2 () inherits (tgen.root1);
+create table tgen.leaf1 () inherits (tgen.intermediate1, tgen.intermediate2);
+alter table tgen.root1 add constraint chk_gen check (pg_datum_image_equal(a, 1));
+alter table tgen.root1 alter a add generated using constraint chk_gen stored;
+drop table tgen.root1 cascade;
+
+-- tests for invalid invocations
+-- invalid: only supports STORED. The following are syntax errors.
+alter table tgen.t1 alter column b add generated using constraint chk_gen;
+alter table tgen.t1 alter column b add generated using constraint chk_gen virtual;
+
+-- invalid: b is already a generated column
+begin;
+alter table tgen.t1 add constraint chk_gen check (pg_datum_image_equal(b, a * 2));
+alter table tgen.t1 alter b add generated using constraint chk_gen stored;
+alter table tgen.t1 alter b add generated using constraint chk_gen stored;
+rollback;
+
+-- invalid: b is already a generated column
+create table tgen.t2 (a int, b int not null generated always as (a * 2) stored);
+alter table tgen.t2 add constraint chk_gen check (pg_datum_image_equal(b, a * 2));
+alter table tgen.t2 alter column b add generated using constraint chk_gen stored;
+drop table tgen.t2;
+
+-- invalid: b is an identity column
+create table tgen.t2 (a int, b int generated always as identity);
+alter table tgen.t2 add constraint chk_gen check (pg_datum_image_equal(b, 1));
+alter table tgen.t2 alter column b add generated using constraint chk_gen stored;
+drop table tgen.t2;
+create table tgen.t2 (a int, b int generated by default as identity);
+alter table tgen.t2 add constraint chk_gen check (pg_datum_image_equal(b, 1));
+alter table tgen.t2 alter column b add generated using constraint chk_gen stored;
+drop table tgen.t2;
+
+-- invalid: b is a serial column
+create table tgen.t2 (a bigint, b bigserial);
+alter table tgen.t2 add constraint chk_gen check (pg_datum_image_equal(b, 1::bigint));
+alter table tgen.t2 alter column b add generated using constraint chk_gen stored;
+drop table tgen.t2;
+
+-- invalid: c is referenced by another generated column
+create table tgen.t2 (a int, b int generated always as (c + 1), c int);
+alter table tgen.t2 add constraint chk_gen check (pg_datum_image_equal(c, 1));
+alter table tgen.t2 alter column c add generated using constraint chk_gen stored;
+drop table tgen.t2;
+
+-- invalid: c references another generated column
+create table tgen.t2 (a int, b int generated always as (a + 1), c int);
+alter table tgen.t2 add constraint chk_gen check (pg_datum_image_equal(c, b + 1));
+alter table tgen.t2 alter column c add generated using constraint chk_gen stored;
+drop table tgen.t2;
+
+-- invalid: b is referenced in a partition key
+create table tgen.t2 (a int, b int not null) partition by hash (b);
+alter table tgen.t2 add constraint chk_gen check (pg_datum_image_equal(b, a + 1));
+alter table tgen.t2 alter b add generated using constraint chk_gen stored;
+drop table tgen.t2;
+-- test for a whole-row reference
+-- since it's not possible to reference schema.table in partition by range,
+-- temporarily hack the search_path
+-- the two tables are intentionally left behind for pg_dump/pg_restore tests
+show search_path \gset
+set search_path to tgen, public;
+create table t_wholerow_1 (a int, b int) partition by range ((t_wholerow_1));
+alter table tgen.t_wholerow_1 add constraint chk_gen check (pg_datum_image_equal(b, a + 1));
+alter table tgen.t_wholerow_1 alter b add generated using constraint chk_gen stored;
+create table t_wholerow_2 (a int, b int) partition by range ((t_wholerow_2 is null));
+alter table tgen.t_wholerow_2 add constraint chk_gen check (pg_datum_image_equal(b, a + 1));
+alter table tgen.t_wholerow_2 alter b add generated using constraint chk_gen stored;
+set search_path to :search_path;
+
+-- invalid: b is referenced in a triggers's WHEN (before, update or insert)
+begin;
+create function t_trigger_f() returns trigger as $$ begin return null; end $$ language plpgsql;
+create trigger t_trigger before insert or update on tgen.t1
+    for each row when (new.b is null) execute function t_trigger_f();
+alter table tgen.t1
+    add constraint chk_gen check (pg_datum_image_equal(b, a * 2));
+alter table tgen.t1 alter column b
+    add generated using constraint chk_gen stored;
+rollback;
+-- invalid: b is referenced in a triggers's WHEN through a whole-row var
+-- (before, update or insert)
+begin;
+create function t_trigger_f() returns trigger as $$ begin return null; end $$ language plpgsql;
+create trigger t_trigger before insert or update on tgen.t1
+    for each row when (new is null) execute function t_trigger_f();
+alter table tgen.t1
+    add constraint chk_gen check (pg_datum_image_equal(b, a * 2));
+alter table tgen.t1 alter column b
+    add generated using constraint chk_gen stored;
+rollback;
+
+-- OK to have a reference in an after trigger
+begin;
+create function t_trigger_f() returns trigger as $$ begin return null; end $$ language plpgsql;
+create trigger t_trigger after insert or update on tgen.t1
+    for each row when (new.b is null) execute function t_trigger_f();
+alter table tgen.t1
+    add constraint chk_gen check (pg_datum_image_equal(b, a * 2));
+alter table tgen.t1 alter column b
+    add generated using constraint chk_gen stored;
+rollback;
+
+-- not allowed on a typed table
+create type tgen.ttype as (a int);
+create table tgen.ttab of tgen.ttype;
+alter table tgen.ttab add constraint chk_gen check (pg_datum_image_equal(a, 1));
+alter table tgen.ttab alter a add generated using constraint chk_gen stored;
+
+-- fails when the constraint does not exist
+alter table tgen.t1 alter column b
+    add generated using constraint chk_gen_does_not_exist stored;
+
+-- fails when the constraint is not valid
+begin;
+alter table tgen.t1
+    add constraint chk_gen check (pg_datum_image_equal(b, a * 2)) not valid;
+alter table tgen.t1 alter column b
+    add generated using constraint chk_gen stored;
+rollback;
+
+-- fails when the constraint is not enforced
+begin;
+alter table tgen.t1
+    add constraint chk_gen check (pg_datum_image_equal(b, a * 2)) not enforced;
+alter table tgen.t1 alter column b
+    add generated using constraint chk_gen stored;
+rollback;
+
+-- fails when the constraint exists but doesn't have the expected shape
+begin;
+alter table tgen.t1 add constraint chk_gen check (b = a * 2);
+alter table tgen.t1 alter column b add generated using constraint chk_gen stored;
+rollback;
+begin;
+alter table tgen.t1 add constraint chk_gen check (b >= a * 2);
+alter table tgen.t1 alter column b add generated using constraint chk_gen stored;
+rollback;
+
+create table tgen.t2 (a int, b int);
+-- invalid: expr must be immutable
+alter table tgen.t2 add constraint chk_gen check (pg_datum_image_equal(b, (a + random())::int));
+alter table tgen.t2 alter column b
+    add generated using constraint chk_gen stored;
+drop table tgen.t2;
+
+drop table tgen.t1;
+
+-- invalid: the column is on the referencing side of a foreign key with
+-- on delete or on update actions
+create table tgen.tpkey (a int primary key);
+
+create table tgen.tfkey (a int primary key, b int references tgen.tpkey(a) on delete set null);
+alter table tgen.tfkey add constraint chk_gen check (pg_datum_image_equal(b, a + 1));
+alter table tgen.tfkey alter column b add generated using constraint chk_gen stored;
+drop table tgen.tfkey;
+
+create table tgen.tfkey (a int primary key, b int references tgen.tpkey(a) on update cascade);
+alter table tgen.tfkey add constraint chk_gen check (pg_datum_image_equal(b, a + 1));
+alter table tgen.tfkey alter column b add generated using constraint chk_gen stored;
+drop table tgen.tfkey;
+
+-- OK to have the stored generated column on the referenced side
+create table tgen.tfkey (a int primary key, b int references tgen.tpkey(a) on update cascade);
+alter table tgen.tpkey add constraint chk_gen check (pg_datum_image_equal(a, 1));
+alter table tgen.tpkey alter a add generated using constraint chk_gen stored;
+drop table tgen.tfkey;
+
+drop table tgen.tpkey;
+
+-- some GUCs affect how values are represented at deparse time: ensure we can
+-- reconstruct the generator expression properly when they're set.
+select setting as prev_extra_float_digits from pg_settings where name = 'extra_float_digits' \gset
+select setting as prev_datestyle from pg_settings where name = 'DateStyle' \gset
+set extra_float_digits = 1;
+set datestyle = ISO;
+create table tgen.t_roundtrip (a_float8 float8, a_ts timestamp);
+alter table tgen.t_roundtrip
+    add constraint c1 check (pg_datum_image_equal(a_float8, '3.141592653589793'::float8)),
+    add constraint c2 check (pg_datum_image_equal(a_ts, '2026-01-02 14:59:03.141529'::timestamp));
+set extra_float_digits = 0; -- loses one digit
+set datestyle = German, MDY; -- output as DD.MM, but read back as MM.DD
+alter table tgen.t_roundtrip alter a_float8 add generated using constraint c1 stored;
+alter table tgen.t_roundtrip alter a_ts add generated using constraint c2 stored;
+
+-- visually verify that the generator expression is correct
+set extra_float_digits = 1;
+set datestyle = ISO;
+select pg_get_expr(adbin, 'tgen.t_roundtrip'::regclass) from pg_attrdef
+  where adrelid = 'tgen.t_roundtrip'::regclass;
+
+-- if the conversion was wrong, we wouldn't be able to insert default values here
+insert into tgen.t_roundtrip (a_float8, a_ts) values
+  (default, default);
+set extra_float_digits = :prev_extra_float_digits;
+set datestyle = :prev_datestyle;
+drop table tgen.t_roundtrip;
+
+-- invalid: the column has atthasmissing
+-- intentionally left behind for pg_dump/pg_restore tests
+create table tgen.t_missingval (a int);
+insert into tgen.t_missingval select generate_series(1, 3);
+alter table tgen.t_missingval add column b int default 42;
+insert into tgen.t_missingval (a) values (4);
+alter table tgen.t_missingval add constraint chk_gen
+  check (pg_datum_image_equal(b, case when a < 5 then 42 else a * 2 end));
+insert into tgen.t_missingval (a, b) values (5, 10);
+alter table tgen.t_missingval alter b add generated using constraint chk_gen stored;
+
+-- intentionally left behind for pg_dump/pg_restore tests
+create table tgen.t_simple (a int, b int not null);
+insert into tgen.t_simple (a, b) values (1, 2), (2, 3);
+alter table tgen.t_simple add constraint chk_gen check (pg_datum_image_equal(b, a + 1));
+alter table tgen.t_simple alter b add generated using constraint chk_gen stored;
+\d tgen.t_simple
+
+-- intentionally left behind for pg_dump/pg_restore tests
+create table tgen.t_tsvect (a text, b text, c tsvector);
+insert into tgen.t_tsvect (a, b) values ('foo', 'bar'), ('bar', 'baz');
+update tgen.t_tsvect set c = to_tsvector('english', a || ' ' ||  b);
+alter table tgen.t_tsvect add constraint chk_gen
+    check ( pg_datum_image_equal(c, to_tsvector('english', a || ' ' ||  b)) );
+alter table tgen.t_tsvect alter c add generated using constraint chk_gen stored;
+\d tgen.t_tsvect

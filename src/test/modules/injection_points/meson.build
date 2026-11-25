@@ -65,6 +65,7 @@ tests += {
       'portal_bind',
       'reindex_conc',
       'vacuum',
+      'alter_table',
     ],
     'regress_args': ['--dlpath', meson.project_build_root() / 'src/test/regress'],
     # The injection points are cluster-wide, so disable installcheck

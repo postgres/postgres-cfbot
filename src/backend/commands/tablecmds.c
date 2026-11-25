@@ -102,6 +102,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -329,6 +330,17 @@ struct DropRelationCallbackState
 	char		actual_relkind;
 	char		actual_relpersistence;
 };
+
+/*
+ * Used by findUsableConstraintForAddGenStored to give a hint about why no
+ * constraint matched.
+ */
+typedef enum AddGenConstrError
+{
+	ADD_GEN_CONSTR_NOT_FOUND = 0,
+	ADD_GEN_CONSTR_NOT_VALID,
+	ADD_GEN_CONSTR_SHAPE_MISMATCH,
+} AddGenConstrError;
 
 /* Alter table target-type flags for ATSimplePermissions */
 #define		ATT_TABLE				0x0001
@@ -770,7 +782,22 @@ static List *GetParentedForeignKeyRefs(Relation partition);
 static void ATDetachCheckNoForeignKeyRefs(Relation partition);
 static char GetAttributeCompression(Oid atttypid, const char *compression);
 static char GetAttributeStorage(Oid atttypid, const char *storagemode);
-
+static void ATPrepAddGenStored(Relation rel, AlterTableCmd *cmd, bool recurse, bool recursing);
+static void checkDependenciesForAddGenStored(Relation rel,
+											 AttrNumber attnum,
+											 const char *colName);
+static char *checkTriggerQualForAddGenStored(Oid trigger_oid,
+											 int varno, AttrNumber attnum);
+static Node *findUsableConstraintForAddGenStored(Relation rel,
+												 AttrNumber attnum,
+												 const char *conname,
+												 AddGenConstrError *reason);
+static Node *matchDatumImageEqualOnVar(Node *expr, AttrNumber attnum);
+static Node *reconstructRawExpr(Relation rel, Node *cookedExpr);
+static ObjectAddress ATExecAddGeneratedStored(AlteredTableInfo *tab,
+											  Relation rel,
+											  const char *colName,
+											  Constraint *def);
 
 /* ----------------------------------------------------------------
  *		DefineRelation
@@ -4784,6 +4811,7 @@ AlterTableGetLockLevel(List *cmds)
 			case AT_AddIdentity:
 			case AT_DropIdentity:
 			case AT_SetIdentity:
+			case AT_AddGeneratedStored:
 			case AT_SetExpression:
 			case AT_DropExpression:
 			case AT_SetCompression:
@@ -5102,6 +5130,14 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 								ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE);
 			ATSimpleRecursion(wqueue, rel, cmd, recurse, lockmode, context);
 			pass = AT_PASS_SET_EXPRESSION;
+			break;
+		case AT_AddGeneratedStored: /* ALTER COLUMN ADD GENERATED USING
+									 * CONSTRAINT */
+			ATSimplePermissions(cmd->subtype, rel,
+								ATT_TABLE | ATT_PARTITIONED_TABLE);
+			ATSimpleRecursion(wqueue, rel, cmd, recurse, lockmode, context);
+			ATPrepAddGenStored(rel, cmd, recurse, recursing);
+			pass = AT_PASS_ADD_OTHERCONSTR;
 			break;
 		case AT_DropExpression: /* ALTER COLUMN DROP EXPRESSION */
 			ATSimplePermissions(cmd->subtype, rel,
@@ -5502,6 +5538,12 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 			break;
 		case AT_SetExpression:
 			address = ATExecSetExpression(tab, rel, cmd->name, cmd->def, lockmode);
+			break;
+		case AT_AddGeneratedStored:
+			Assert(IsA(cmd->def, Constraint));
+			address = ATExecAddGeneratedStored(tab, rel,
+											   cmd->name,
+											   (Constraint *) cmd->def);
 			break;
 		case AT_DropExpression:
 			address = ATExecDropExpression(rel, cmd->name, cmd->missing_ok, lockmode);
@@ -6371,13 +6413,19 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap)
 		}
 
 		if (newrel)
+		{
 			ereport(DEBUG1,
 					(errmsg_internal("rewriting table \"%s\"",
 									 RelationGetRelationName(oldrel))));
+			INJECTION_POINT("alter-table-phase-3-rewrite", NULL);
+		}
 		else
+		{
 			ereport(DEBUG1,
 					(errmsg_internal("verifying table \"%s\"",
 									 RelationGetRelationName(oldrel))));
+			INJECTION_POINT("alter-table-phase-3-verify", NULL);
+		}
 
 		if (newrel)
 		{
@@ -6697,6 +6745,8 @@ alter_table_type_to_string(AlterTableType cmdtype)
 			return "ALTER COLUMN ... SET NOT NULL";
 		case AT_SetExpression:
 			return "ALTER COLUMN ... SET EXPRESSION";
+		case AT_AddGeneratedStored:
+			return "ALTER COLUMN ... ADD GENERATED STORED";
 		case AT_DropExpression:
 			return "ALTER COLUMN ... DROP EXPRESSION";
 		case AT_SetStatistics:
@@ -9400,6 +9450,695 @@ ATExecSetExpression(AlteredTableInfo *tab, Relation rel, const char *colName,
 
 	/* Drop any pg_statistic entry for the column */
 	RemoveStatistics(RelationGetRelid(rel), attnum);
+
+	InvokeObjectPostAlterHook(RelationRelationId,
+							  RelationGetRelid(rel), attnum);
+
+	ObjectAddressSubSet(address, RelationRelationId,
+						RelationGetRelid(rel), attnum);
+	return address;
+}
+
+/*
+ * Preparation phase for
+ *
+ * ALTER COLUMN col ADD GENERATED USING CONSTRAINT name STORED
+ *
+ * In an inheritance hierarchy, it is only valid to alter the type of the
+ * whole hierarchy at once.
+ */
+static void
+ATPrepAddGenStored(Relation rel, AlterTableCmd *cmd, bool recurse, bool recursing)
+{
+	/*
+	 * This routine is called on the top table directly with recursing=false,
+	 * and on all children tables via ATSimpleRecursion with recursing=true.
+	 *
+	 * At the top level, forbid ONLY (i.e. recurse=false) if there are child
+	 * tables. We only check this at the top level, otherwise we would prevent
+	 * this operation from being applied to hierarchies with depth > 2.
+	 *
+	 * The caller already holds an AccessExclusiveLock on the rel, so taking
+	 * locks in find_inheritance_children is not necessary.
+	 */
+	if (!recursing && !recurse &&
+		find_inheritance_children(RelationGetRelid(rel), NoLock))
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("cannot convert column \"%s\" to generated", cmd->name),
+				errdetail("Converting only part of a partitioning or inheritance hierarchy is not supported."),
+				errhint("Use this command on the root table without specifying ONLY."));
+
+	/*
+	 * Don't allow this operation to be applied to inherited columns directly.
+	 */
+	if (!recursing)
+	{
+		HeapTuple	tuple;
+		Form_pg_attribute attTup;
+
+		tuple = SearchSysCacheCopyAttName(RelationGetRelid(rel), cmd->name);
+		if (!HeapTupleIsValid(tuple))
+			ereport(ERROR,
+					errcode(ERRCODE_UNDEFINED_COLUMN),
+					errmsg("column \"%s\" of relation \"%s\" does not exist",
+						   cmd->name, RelationGetRelationName(rel)));
+
+		attTup = (Form_pg_attribute) GETSTRUCT(tuple);
+
+		if (attTup->attinhcount > 0)
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot convert column \"%s\" to generated", cmd->name),
+					errdetail("Converting only part of a partitioning or inheritance hierarchy is not supported."),
+					errhint("Use this command on the root table without specifying ONLY."));
+	}
+
+	/*
+	 * Prevent this command from being applied to an inheritance hierarchy
+	 * where any of the children has a parent *outside* of the hierarchy we're
+	 * trying to transform. Only check this at the top level.
+	 */
+	if (!recursing && recurse)
+	{
+		List	   *child_oids;
+		List	   *child_nparents = NULL;
+		ListCell   *l_oid,
+				   *l_nparents;
+
+		child_oids = find_all_inheritors(RelationGetRelid(rel), NoLock,
+										 &child_nparents);
+
+		forboth(l_oid, child_oids, l_nparents, child_nparents)
+		{
+			HeapTuple	tuple;
+			Form_pg_attribute attTup;
+			Oid			childrelid = lfirst_oid(l_oid);
+			int			nparents = lfirst_int(l_nparents);
+
+			if (childrelid == RelationGetRelid(rel))
+				continue;
+
+			tuple = SearchSysCacheAttName(childrelid, cmd->name);
+			if (!HeapTupleIsValid(tuple))
+				ereport(ERROR,
+						errcode(ERRCODE_UNDEFINED_COLUMN),
+						errmsg("column \"%s\" of relation \"%s\" does not exist",
+							   cmd->name, RelationGetRelationName(rel)));
+
+			attTup = (Form_pg_attribute) GETSTRUCT(tuple);
+
+			if (attTup->attinhcount > nparents)
+				ereport(ERROR,
+						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("cannot convert column \"%s\" to generated", cmd->name),
+						errdetail("Converting only part of a multiple-inheritance hierarchy is not supported."),
+						errhint("Run this command on a root node which covers the whole hierarchy, if there is one."));
+
+			ReleaseSysCache(tuple);
+		}
+	}
+}
+
+/*
+ * Detect dependencies which should stop us from turning a regular column
+ * into a stored generated column.
+ */
+static void
+checkDependenciesForAddGenStored(Relation rel,
+								 AttrNumber attnum,
+								 const char *colName)
+{
+	Relation	pg_depend;
+	ScanKeyData key[3];
+	SysScanDesc scan;
+	HeapTuple	depTup;
+
+	pg_depend = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationGetRelid(rel)));
+	ScanKeyInit(&key[2],
+				Anum_pg_depend_refobjsubid,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum(attnum));
+
+	scan = systable_beginscan(pg_depend, DependReferenceIndexId, true,
+							  NULL, 3, key);
+
+	while (HeapTupleIsValid(depTup = systable_getnext(scan)))
+	{
+		Form_pg_depend dep = GETSTRUCT(depTup);
+		ObjectAddress foundObject;
+
+		foundObject.classId = dep->classid;
+		foundObject.objectId = dep->objid;
+		foundObject.objectSubId = dep->objsubid;
+
+		switch (foundObject.classId)
+		{
+			case RelationRelationId:
+				{
+					char		relKind = get_rel_relkind(foundObject.objectId);
+
+					/*
+					 * While it is possible to alter any sequence to be owned
+					 * by an arbitrary column, the most likely legitimate use
+					 * is for a serial column. Let's assume this is the case
+					 * for the sake of a more helpful error message.
+					 */
+					if (relKind == RELKIND_SEQUENCE)
+						ereport(ERROR,
+								(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+								 errmsg("cannot convert column \"%s\" to generated", colName),
+								 errdetail("Column \"%s\" of relation \"%s\" is a serial column (depends on \"%s\").",
+										   colName, RelationGetRelationName(rel),
+										   getObjectDescription(&foundObject, false))));
+					break;
+				}
+			case AttrDefaultRelationId:
+				{
+					ObjectAddress col = GetAttrDefaultColumnAddress(foundObject.objectId);
+
+					if (col.objectId == RelationGetRelid(rel) &&
+						col.objectSubId == attnum)
+					{
+						/*
+						 * Ignore the column's own default expression. We
+						 * handle sequences above, and for a column which is
+						 * already a generated column we should never get
+						 * here.
+						 */
+					}
+					else
+					{
+						ereport(ERROR,
+								(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+								 errmsg("cannot convert column \"%s\" to generated", colName),
+								 errdetail("Column \"%s\" is referenced by generated column \"%s\".",
+										   colName,
+										   get_attname(col.objectId, col.objectSubId, false))));
+					}
+					break;
+				}
+			case ConstraintRelationId:
+				{
+					HeapTuple	conTup;
+					Form_pg_constraint con;
+
+					conTup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(foundObject.objectId));
+					if (!HeapTupleIsValid(conTup))
+						elog(ERROR, "cache lookup failed for constraint %u", foundObject.objectId);
+					con = (Form_pg_constraint) GETSTRUCT(conTup);
+
+					if (con->conrelid == RelationGetRelid(rel) &&
+						con->contype == CONSTRAINT_FOREIGN &&
+						(con->confupdtype == FKCONSTR_ACTION_SETNULL ||
+						 con->confupdtype == FKCONSTR_ACTION_SETDEFAULT ||
+						 con->confupdtype == FKCONSTR_ACTION_CASCADE ||
+						 con->confdeltype == FKCONSTR_ACTION_SETNULL ||
+						 con->confdeltype == FKCONSTR_ACTION_SETDEFAULT))
+						ereport(ERROR,
+								errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+								errmsg("cannot convert column \"%s\" to generated", colName),
+								errdetail("Column \"%s\" is part of a foreign key with a restricted ON DELETE / ON UPDATE action.",
+										  colName));
+
+					ReleaseSysCache(conTup);
+					break;
+				}
+			case TriggerRelationId:
+				{
+					char	   *invalidTrg;
+
+					invalidTrg = checkTriggerQualForAddGenStored(foundObject.objectId,
+																 PRS2_NEW_VARNO,
+																 attnum);
+
+					if (invalidTrg != NULL)
+						ereport(ERROR,
+								errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+								errmsg("cannot convert column \"%s\" to generated", colName),
+								errdetail("Column NEW.\"%s\" is referenced by the WHEN clause of trigger \"%s\".",
+										  colName, invalidTrg));
+
+					break;
+				}
+			default:
+				/* Other dependencies aren't a problem. */
+				break;
+		}
+	}
+
+	systable_endscan(scan);
+
+	/*
+	 * Now scan again for dependencies on the whole row.
+	 */
+	ScanKeyInit(&key[2],
+				Anum_pg_depend_refobjsubid,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum(InvalidAttrNumber));
+
+	scan = systable_beginscan(pg_depend, DependReferenceIndexId, true,
+							  NULL, 3, key);
+
+	while (HeapTupleIsValid(depTup = systable_getnext(scan)))
+	{
+		Form_pg_depend dep = GETSTRUCT(depTup);
+		ObjectAddress foundObject;
+
+		foundObject.classId = dep->classid;
+		foundObject.objectId = dep->objid;
+		foundObject.objectSubId = dep->objsubid;
+
+		switch (foundObject.classId)
+		{
+			case TriggerRelationId:
+				{
+					char	   *invalidTrg;
+
+					invalidTrg = checkTriggerQualForAddGenStored(foundObject.objectId,
+																 PRS2_NEW_VARNO,
+																 InvalidAttrNumber);
+
+					if (invalidTrg != NULL)
+						ereport(ERROR,
+								errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+								errmsg("cannot convert column \"%s\" to generated", colName),
+								errdetail("The WHEN clause of trigger \"%s\" references a row which encompasses NEW.\"%s\".",
+										  invalidTrg, colName));
+
+					break;
+				}
+			default:
+				/* Other dependencies aren't a problem. */
+				break;
+		}
+	}
+
+	systable_endscan(scan);
+	table_close(pg_depend, AccessShareLock);
+}
+
+/*
+ * An update/insert before trigger's qual cannot reference a stored generated
+ * column. If the trigger is update/insert and a reference to the given
+ * varno/varattno is found in its qual expression, this returns the name of the
+ * trigger (so the caller can use it in the error message), NULL otherwise.
+ */
+static char *
+checkTriggerQualForAddGenStored(Oid trigger_oid, int varno, AttrNumber attnum)
+{
+	Relation	pg_trigger;
+	HeapTuple	tup;
+	Form_pg_trigger trg;
+	char	   *result = NULL;
+
+	pg_trigger = table_open(TriggerRelationId, AccessShareLock);
+
+	tup = get_catalog_object_by_oid(pg_trigger,
+									Anum_pg_trigger_oid, trigger_oid);
+	if (tup == NULL)
+		ereport(ERROR,
+				errmsg_internal("could not find trigger %u", trigger_oid));
+
+	trg = (Form_pg_trigger) GETSTRUCT(tup);
+
+	if (TRIGGER_FOR_BEFORE(trg->tgtype) &&
+		(TRIGGER_FOR_UPDATE(trg->tgtype) ||
+		 TRIGGER_FOR_INSERT(trg->tgtype)))
+	{
+		Datum		tgqual;
+		bool		tgqual_is_null;
+
+		tgqual = heap_getattr(tup, Anum_pg_trigger_tgqual,
+							  RelationGetDescr(pg_trigger),
+							  &tgqual_is_null);
+
+		if (!tgqual_is_null)
+		{
+			char	   *expr_str;
+			Node	   *expr;
+			Bitmapset  *refs = NULL;
+
+			expr_str = TextDatumGetCString(tgqual);
+			expr = stringToNode(expr_str);
+
+			pull_varattnos(expr, varno, &refs);
+
+			if (bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, refs))
+			{
+				result = pstrdup(NameStr(trg->tgname));
+			}
+		}
+	}
+
+	heap_freetuple(tup);
+	table_close(pg_trigger, AccessShareLock);
+
+	return result;
+}
+
+/*
+ * Subroutine for ATExecAddGeneratedStored, used to determine whether the given
+ * constraint proves that the values are equal to some expression.
+ *
+ * Given a rel, a column and a constraint name, we look up a valid CHECK
+ * constraint on the rel, with the given name, with a specific shape:
+ *
+ *   CHECK ( pg_datum_image_equal(column, expr) )
+ *
+ * If a valid constraint is found, this returns the expr node, otherwise
+ * it returns null and sets an error code in *reason, allowing the caller to
+ * provide an appropriate error message.
+ */
+static Node *
+findUsableConstraintForAddGenStored(Relation rel, AttrNumber attnum,
+									const char *conname,
+									AddGenConstrError *reason)
+{
+	Relation	pg_constraint;
+	HeapTuple	conTup;
+	SysScanDesc scan;
+	ScanKeyData key[3];
+	Node	   *foundExpr;
+
+	pg_constraint = table_open(ConstraintRelationId, AccessShareLock);
+	ScanKeyInit(&key[0],
+				Anum_pg_constraint_conrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(rel->rd_id));
+	ScanKeyInit(&key[1],
+				Anum_pg_constraint_contypid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(InvalidOid));
+	ScanKeyInit(&key[2],
+				Anum_pg_constraint_conname,
+				BTEqualStrategyNumber, F_NAMEEQ,
+				CStringGetDatum(conname));
+	scan = systable_beginscan(pg_constraint, ConstraintRelidTypidNameIndexId,
+							  true, NULL, 3, key);
+
+	foundExpr = NULL;
+	*reason = ADD_GEN_CONSTR_NOT_FOUND;
+
+	if (HeapTupleIsValid(conTup = systable_getnext(scan)))
+	{
+		Form_pg_constraint con = GETSTRUCT(conTup);
+
+		if (con->contype == CONSTRAINT_CHECK)
+		{
+			/* !conenforced implies !convalidated, but let's be explicit */
+			if (!con->convalidated || !con->conenforced)
+			{
+				*reason = ADD_GEN_CONSTR_NOT_VALID;
+			}
+			else
+			{
+				Datum		val;
+				char	   *conbin;
+				Node	   *conexpr;
+
+				val = SysCacheGetAttrNotNull(CONSTROID, conTup,
+											 Anum_pg_constraint_conbin);
+				conbin = TextDatumGetCString(val);
+				conexpr = stringToNode(conbin);
+
+				foundExpr = matchDatumImageEqualOnVar(conexpr, attnum);
+				if (foundExpr == NULL)
+					*reason = ADD_GEN_CONSTR_SHAPE_MISMATCH;
+			}
+		}
+	}
+
+	systable_endscan(scan);
+	table_close(pg_constraint, AccessShareLock);
+
+	return foundExpr;
+}
+
+/*
+ * Given an expression tree and an attnum, this tries to match
+ *
+ *   pg_datum_image_equal(arg1, arg2)
+ *
+ * where either arg1 or arg2 is a Var referencing the given attno, returning
+ * the other argument.
+ */
+static Node *
+matchDatumImageEqualOnVar(Node *expr, AttrNumber attnum)
+{
+	if (IsA(expr, FuncExpr))
+	{
+		FuncExpr   *fexpr = (FuncExpr *) expr;
+
+		if (fexpr->funcid == F_PG_DATUM_IMAGE_EQUAL &&
+			list_length(fexpr->args) == 2)
+		{
+			Node	   *left = linitial(fexpr->args),
+					   *right = lsecond(fexpr->args);
+
+			/* Support both orders of the operands */
+			if (IsA(left, Var) && ((Var *) left)->varattno == attnum)
+			{
+				Assert(((Var *) left)->vartype == exprType(right));
+				return right;
+			}
+			if (IsA(right, Var) && ((Var *) right)->varattno == attnum)
+			{
+				Assert(((Var *) right)->vartype == exprType(left));
+				return left;
+			}
+		}
+	}
+
+	return NULL;
+}
+
+/*
+ * Reconstruct a raw expression from a given cooked expression by deparsing it
+ * and running it through raw_parser().
+ */
+static Node *
+reconstructRawExpr(Relation rel, Node *cookedExpr)
+{
+	char	   *deparsedExpr;
+	List	   *ctx,
+			   *parseResult;
+	int			nestLevel;
+
+	/*
+	 * Some GUCs affect how values are represented in the deparsed tree. Make
+	 * sure they're set such that we don't lose information in the round-trip
+	 * through deparse_expression / raw_parser.
+	 */
+	nestLevel = NewGUCNestLevel();
+
+	(void) set_config_option("datestyle", "ISO",
+							 PGC_USERSET, PGC_S_SESSION,
+							 GUC_ACTION_SAVE, true, 0, false);
+	(void) set_config_option("extra_float_digits", "3",
+							 PGC_USERSET, PGC_S_SESSION,
+							 GUC_ACTION_SAVE, true, 0, false);
+
+	ctx = deparse_context_for(RelationGetRelationName(rel),
+							  RelationGetRelid(rel));
+
+	deparsedExpr = deparse_expression(cookedExpr, ctx, false, false);
+
+	parseResult = raw_parser(deparsedExpr, RAW_PARSE_PLPGSQL_EXPR);
+	if (list_length(parseResult) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg_internal("cannot re-parse constraint expr into a raw expression")));
+
+	if (IsA(linitial(parseResult), RawStmt))
+	{
+		RawStmt    *stmt = linitial(parseResult);
+
+		if (IsA(stmt->stmt, SelectStmt))
+		{
+			SelectStmt *select = (SelectStmt *) stmt->stmt;
+
+			if (list_length(select->targetList) == 1 &&
+				IsA(linitial(select->targetList), ResTarget))
+			{
+				ResTarget  *resTarget = linitial(select->targetList);
+
+				AtEOXact_GUC(true, nestLevel);
+				return resTarget->val;
+			}
+		}
+	}
+
+	ereport(ERROR,
+			errcode(ERRCODE_INTERNAL_ERROR),
+			errmsg_internal("re-parsed expr does not match the expected structure"));
+}
+
+/*
+ * ALTER COLUMN col ADD GENERATED USING CONSTRAINT name STORED
+ *
+ * Change a regular column into a stored generated column without a table
+ * rewrite, using the expression contained in the given constraint.
+ *
+ * The constraint must be a CHECK constraint proving that the expression is
+ * already satisfied by all the values in the column (see
+ * findUsableConstraintForAddGenStored).
+ */
+static ObjectAddress
+ATExecAddGeneratedStored(AlteredTableInfo *tab,
+						 Relation rel,
+						 const char *colName,
+						 Constraint *def)
+{
+	Form_pg_class relTup;
+	HeapTuple	tuple;
+	Form_pg_attribute attTup;
+	AttrNumber	attnum;
+	Bitmapset  *colRefs;
+	bool		is_expr;
+	ObjectAddress address;
+	Relation	pg_attribute;
+	Node	   *foundConstraintExpr;
+	AddGenConstrError reason;
+	Node	   *newRawDefExpr;
+	RawColumnDefault *rawDefault;
+	List	   *cookedResult;
+
+	Assert(def->raw_expr == NULL);
+	Assert(def->cooked_expr == NULL);
+	Assert(def->conname != NULL);
+	Assert(def->generated_when == ATTRIBUTE_IDENTITY_ALWAYS);
+	Assert(def->generated_kind == ATTRIBUTE_GENERATED_STORED);
+
+	relTup = RelationGetForm(rel);
+	if (relTup->reloftype != InvalidOid)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("generated columns are not supported on typed tables"));
+
+	tuple = SearchSysCacheCopyAttName(RelationGetRelid(rel), colName);
+	if (!HeapTupleIsValid(tuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_COLUMN),
+				 errmsg("column \"%s\" of relation \"%s\" does not exist",
+						colName, RelationGetRelationName(rel))));
+
+	attTup = (Form_pg_attribute) GETSTRUCT(tuple);
+
+	attnum = attTup->attnum;
+	if (attnum <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot alter system column \"%s\"",
+						colName)));
+
+	if (attTup->attidentity)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot convert column \"%s\" to generated", colName),
+				 errdetail("Column \"%s\" of relation \"%s\" is an identity column.",
+						   colName, RelationGetRelationName(rel))));
+
+	if (attTup->attgenerated)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot convert column \"%s\" to generated", colName),
+				 errdetail("Column \"%s\" of relation \"%s\" is already a generated column.",
+						   colName, RelationGetRelationName(rel))));
+
+	if (attTup->atthasmissing)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot convert column \"%s\" to generated", colName),
+				 errdetail("Cannot ensure that column \"%s\" of relation \"%s\" has been completely backfilled.",
+						   colName, RelationGetRelationName(rel)),
+				 errhint("Drop the column and create it again without a DEFAULT value.")));
+
+	/*
+	 * This column might be referenced directly in a partition key, or through
+	 * a whole-row expression.
+	 */
+	colRefs = bms_make_singleton(attnum - FirstLowInvalidHeapAttributeNumber);
+	colRefs = bms_add_member(colRefs, 0 - FirstLowInvalidHeapAttributeNumber);
+	if (has_partition_attrs(rel, colRefs, &is_expr))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot convert column \"%s\" to generated", colName),
+				 errdetail("Column \"%s\" is referenced in the partition key of relation \"%s\".",
+						   colName, RelationGetRelationName(rel))));
+
+	checkDependenciesForAddGenStored(rel, attnum, colName);
+
+	/*
+	 * Now, try to find the constraint by name, and see if it has the
+	 * necessary structure to prove that the values are consistent.
+	 */
+	foundConstraintExpr = findUsableConstraintForAddGenStored(rel, attnum,
+															  def->conname, &reason);
+	if (foundConstraintExpr == NULL)
+	{
+		if (reason == ADD_GEN_CONSTR_NOT_VALID)
+			ereport(ERROR,
+					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					errmsg("cannot convert column \"%s\" to generated", colName),
+					errdetail("The constraint \"%s\" is not valid.", def->conname));
+		if (reason == ADD_GEN_CONSTR_SHAPE_MISMATCH)
+			ereport(ERROR,
+					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					errmsg("cannot convert column \"%s\" to generated", colName),
+					errdetail("The constraint \"%s\" is not of the form CHECK ( pg_datum_image_equal(\"%s\", expr) ).",
+							  def->conname, colName));
+		ereport(ERROR,
+				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg("cannot convert column \"%s\" to generated", colName),
+				errdetail("Could not find CHECK constraint \"%s\".", def->conname));
+	}
+
+	/* Mark as generated stored in pg_attribute */
+	pg_attribute = table_open(AttributeRelationId, RowExclusiveLock);
+	attTup->attgenerated = ATTRIBUTE_GENERATED_STORED;
+	CatalogTupleUpdate(pg_attribute, &tuple->t_self, tuple);
+	table_close(pg_attribute, RowExclusiveLock);
+
+	heap_freetuple(tuple);
+
+	/* Make above changes visible */
+	CommandCounterIncrement();
+
+	/* Recover a raw parse tree for the expression found in the constraint */
+	newRawDefExpr = reconstructRawExpr(rel, foundConstraintExpr);
+
+	/*
+	 * Remove previous default value, if any, and store the new generator
+	 * expression.
+	 */
+	RemoveAttrDefault(RelationGetRelid(rel), attnum, DROP_RESTRICT,
+					  false, false);
+
+	rawDefault = palloc0_object(RawColumnDefault);
+	rawDefault->attnum = attnum;
+	rawDefault->raw_default = newRawDefExpr;
+	rawDefault->generated = ATTRIBUTE_GENERATED_STORED;
+
+	cookedResult = AddRelationNewConstraints(rel, list_make1(rawDefault), NIL,
+											 false /* allow_merge */ ,
+											 true /* is_local */ ,
+											 false /* is_internal */ ,
+											 NULL /* queryString */ );
+
+	if (list_length(cookedResult) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg_internal("cannot store constraint as default value")));
 
 	InvokeObjectPostAlterHook(RelationRelationId,
 							  RelationGetRelid(rel), attnum);
