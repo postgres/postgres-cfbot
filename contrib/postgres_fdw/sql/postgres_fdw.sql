@@ -281,6 +281,12 @@ SELECT local_project(c2), count(*) FROM ft1 GROUP BY c2 ORDER BY c2;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT c2, count(*) FROM ft1 GROUP BY c2 HAVING local_filter(count(*)::int)
 ORDER BY c2;
+-- A local qual also means that a local sort has fewer rows to sort than a
+-- remote one, which has to sort all rows that we retrieve.  With a cheap
+-- qual, where the sort is done is decided by the cost of the sort itself.
+ALTER FUNCTION local_filter(int) COST 1;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c1 FROM ft1 WHERE local_filter(c1) ORDER BY c1;
 DROP FUNCTION local_filter(int);
 DROP FUNCTION local_project(int);
 

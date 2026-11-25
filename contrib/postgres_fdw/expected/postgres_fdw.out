@@ -324,6 +324,20 @@ ORDER BY c2;
    Remote SQL: SELECT c2, count(*) FROM "S 1"."T 1" GROUP BY 1 ORDER BY c2 ASC NULLS LAST
 (5 rows)
 
+-- A local qual also means that a local sort has fewer rows to sort than a
+-- remote one, which has to sort all rows that we retrieve.  With a cheap
+-- qual, where the sort is done is decided by the cost of the sort itself.
+ALTER FUNCTION local_filter(int) COST 1;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c1 FROM ft1 WHERE local_filter(c1) ORDER BY c1;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Foreign Scan on public.ft1
+   Output: c1
+   Filter: local_filter(ft1.c1)
+   Remote SQL: SELECT "C 1" FROM "S 1"."T 1" ORDER BY "C 1" ASC NULLS LAST
+(4 rows)
+
 DROP FUNCTION local_filter(int);
 DROP FUNCTION local_project(int);
 -- Without remote estimates we don't know what join strategy the foreign
