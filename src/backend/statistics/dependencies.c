@@ -734,8 +734,14 @@ dependency_is_compatible_clause(Node *clause, Index relid, AttrNumber *attnum)
 		if (rinfo->pseudoconstant)
 			return false;
 
-		/* Clauses referencing multiple, or no, varnos are incompatible */
-		if (bms_membership(rinfo->clause_relids) != BMS_SINGLETON)
+		/*
+		 * Clauses referencing more than two, or no, varnos are incompatible.
+		 * A second varno is allowed because we also accept "relid's Var =
+		 * other relation's Var" below, e.g. a parameterized index qual like
+		 * "t1.a = t2.b" while costing an index scan on t1.
+		 */
+		if (bms_num_members(rinfo->clause_relids) > 2 ||
+			bms_num_members(rinfo->clause_relids) == 0)
 			return false;
 
 		clause = (Node *) rinfo->clause;
@@ -756,7 +762,30 @@ dependency_is_compatible_clause(Node *clause, Index relid, AttrNumber *attnum)
 		else if (is_pseudo_constant_clause(linitial(expr->args)))
 			clause_expr = lsecond(expr->args);
 		else
-			return false;
+		{
+			/*
+			 * Neither argument is a pseudoconstant, but this can still be a
+			 * usable equality clause when costing a parameterized path: one
+			 * argument is a Var of "relid" and the other is a Var of some
+			 * other single relation, which is fixed for the duration of one
+			 * parameterized scan and can be treated like a constant.
+			 */
+			Bitmapset  *largrelids = pull_varnos(NULL, linitial(expr->args));
+			Bitmapset  *rargrelids = pull_varnos(NULL, lsecond(expr->args));
+
+			if (bms_membership(largrelids) == BMS_SINGLETON &&
+				bms_singleton_member(largrelids) == relid &&
+				bms_membership(rargrelids) == BMS_SINGLETON &&
+				bms_singleton_member(rargrelids) != relid)
+				clause_expr = linitial(expr->args);
+			else if (bms_membership(rargrelids) == BMS_SINGLETON &&
+					 bms_singleton_member(rargrelids) == relid &&
+					 bms_membership(largrelids) == BMS_SINGLETON &&
+					 bms_singleton_member(largrelids) != relid)
+				clause_expr = lsecond(expr->args);
+			else
+				return false;
+		}
 
 		/*
 		 * If it's not an "=" operator, just ignore the clause, as it's not
