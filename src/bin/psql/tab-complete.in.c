@@ -4542,6 +4542,14 @@ match_previous_words(int pattern_id,
  * GRANT and REVOKE are allowed inside CREATE SCHEMA and
  * ALTER DEFAULT PRIVILEGES, so use TailMatches
  */
+	/* Complete top-level GRANT OPTION phrases before the generic rules. */
+	else if (Matches("GRANT", MatchAnyN, "WITH", "GRANT"))
+		COMPLETE_WITH("OPTION");
+	else if (Matches("REVOKE", "GRANT"))
+		COMPLETE_WITH("OPTION FOR");
+	else if (Matches("REVOKE", "GRANT", "OPTION"))
+		COMPLETE_WITH("FOR");
+
 	/* Complete GRANT/REVOKE with a list of roles and privileges */
 	else if (TailMatches("GRANT|REVOKE") ||
 			 TailMatches("REVOKE", "ADMIN|GRANT|INHERIT|SET", "OPTION", "FOR"))
@@ -4606,6 +4614,10 @@ match_previous_words(int pattern_id,
 			 TailMatches("REVOKE", "GRANT", "OPTION", "FOR", MatchAny, "ON", "PARAMETER", MatchAny) ||
 			 TailMatches("REVOKE", "GRANT", "OPTION", "FOR", MatchAny, MatchAny, "ON", "PARAMETER", MatchAny))
 		COMPLETE_WITH("FROM");
+
+	/* Match WITH GRANT OPTION before the generic GRANT <word> rule. */
+	else if (Matches("GRANT", MatchAnyN, "WITH", "GRANT", "OPTION"))
+		COMPLETE_WITH("GRANTED BY");
 
 	/*
 	 * Complete GRANT/REVOKE <privilege> with "ON", GRANT/REVOKE <role> with
@@ -4740,11 +4752,25 @@ match_previous_words(int pattern_id,
 					  "GRANT OPTION");
 	else if (Matches("GRANT", MatchAnyN, "TO", MatchAny, "WITH", "ADMIN|INHERIT|SET"))
 		COMPLETE_WITH("OPTION", "TRUE", "FALSE");
-	else if (Matches("GRANT", MatchAnyN, "TO", MatchAny, "WITH", MatchAny, "OPTION"))
+	/* Role membership option names can be quoted. */
+	else if (Matches("GRANT", MatchAnyN, "WITH",
+					 MatchAnyExcept("GRANT"), "OPTION|TRUE|FALSE"))
 		COMPLETE_WITH("GRANTED BY");
-	else if (Matches("GRANT", MatchAnyN, "TO", MatchAny, "WITH", MatchAny, "OPTION", "GRANTED", "BY"))
+	else if (Matches("REVOKE", MatchAnyN, "FROM", MatchAnyExcept("GROUP|*,|*,GROUP")))
+		COMPLETE_WITH("GRANTED BY", "CASCADE", "RESTRICT");
+
+	/* GRANTED can also be a grantee name after GROUP or a comma. */
+	else if (Matches("GRANT", MatchAnyN, "TO", MatchAnyExcept("GROUP|*,|*,GROUP"), "GRANTED") ||
+			 Matches("REVOKE", MatchAnyN, "FROM", MatchAnyExcept("GROUP|*,|*,GROUP"), "GRANTED") ||
+			 Matches("GRANT", MatchAnyN, "WITH", "GRANT", "OPTION", "GRANTED") ||
+			 Matches("GRANT", MatchAnyN, "WITH",
+					 MatchAnyExcept("GRANT"), "OPTION|TRUE|FALSE", "GRANTED"))
+		COMPLETE_WITH("BY");
+	else if (Matches("GRANT|REVOKE", MatchAnyN, "GRANTED", "BY"))
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_roles,
-								 Keywords_for_list_of_grant_roles);
+								 Keywords_for_list_of_owner_roles);
+	else if (Matches("REVOKE", MatchAnyN, "GRANTED", "BY", MatchAny))
+		COMPLETE_WITH("CASCADE", "RESTRICT");
 	/* Complete "ALTER DEFAULT PRIVILEGES ... GRANT/REVOKE ... TO/FROM */
 	else if (Matches("ALTER", "DEFAULT", "PRIVILEGES", MatchAnyN, "TO|FROM"))
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_roles,
