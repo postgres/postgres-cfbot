@@ -596,6 +596,45 @@ SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM ndistinct GROUP BY a, (
 DROP STATISTICS s11;
 DROP STATISTICS s12;
 
+-- grouping sets where an expression on a column is nullable by grouping but
+-- the plain column is not, so the column's Var gets different nullingrels
+CREATE STATISTICS s11 (ndistinct) ON a, b FROM ndistinct;
+
+ANALYZE ndistinct;
+
+SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM ndistinct GROUP BY a, ROLLUP ((a+1))');
+
+SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM ndistinct GROUP BY GROUPING SETS ((a, (a+1)), (a))');
+
+DROP STATISTICS s11;
+
+-- same, with statistics on the expression
+CREATE STATISTICS s11 (ndistinct) ON a, (a+1) FROM ndistinct;
+
+ANALYZE ndistinct;
+
+SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM ndistinct GROUP BY a, ROLLUP ((a+1))');
+
+DROP STATISTICS s11;
+
+-- a grouping expression that is nullable by grouping should still be
+-- matched to expression statistics and expression indexes
+CREATE STATISTICS s11 ON (d % 2) FROM ndistinct;
+
+ANALYZE ndistinct;
+
+SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM ndistinct GROUP BY ROLLUP ((d % 2))');
+
+DROP STATISTICS s11;
+
+CREATE INDEX ndistinct_d_mod_idx ON ndistinct ((d % 2));
+
+ANALYZE ndistinct;
+
+SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM ndistinct GROUP BY ROLLUP ((d % 2))');
+
+DROP INDEX ndistinct_d_mod_idx;
+
 -- functional dependencies tests
 CREATE TABLE functional_dependencies (
     filler1 TEXT,
