@@ -1423,7 +1423,6 @@ DefineIndex(ParseState *pstate,
 				int			child_save_sec_context;
 				int			child_save_nestlevel;
 				List	   *childidxs;
-				ListCell   *cell;
 				AttrMap    *attmap;
 				bool		found = false;
 
@@ -1458,23 +1457,30 @@ DefineIndex(ParseState *pstate,
 					continue;
 				}
 
+				/* Get index list; lock them all now to avoid deadlock */
 				childidxs = RelationGetIndexList(childrel);
+				foreach_oid(cldidxid, childidxs)
+					LockRelationOid(cldidxid, lockmode);
+
 				attmap =
 					build_attrmap_by_name(RelationGetDescr(childrel),
 										  parentDesc,
 										  false);
 
-				foreach(cell, childidxs)
+				foreach_oid(cldidxid, childidxs)
 				{
-					Oid			cldidxid = lfirst_oid(cell);
 					Relation	cldidx;
 					IndexInfo  *cldIdxInfo;
 
 					/* this index is already partition of another one */
 					if (has_superclass(cldidxid))
+					{
+						UnlockRelationOid(cldidxid, lockmode);
 						continue;
+					}
 
-					cldidx = index_open(cldidxid, lockmode);
+					cldidx = index_open(cldidxid, NoLock);
+
 					cldIdxInfo = BuildIndexInfo(cldidx);
 					if (CompareIndexInfo(cldIdxInfo, indexInfo,
 										 cldidx->rd_indcollation,
