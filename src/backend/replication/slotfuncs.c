@@ -802,15 +802,18 @@ copy_replication_slot(FunctionCallInfo fcinfo, bool logical_slot)
 
 		/*
 		 * Check if the source slot still exists and is valid. We regard it as
-		 * invalid if the type of replication slot or name has been changed,
-		 * or the restart_lsn either is invalid or has gone backward. (The
-		 * restart_lsn could go backwards if the source slot is dropped and
-		 * copied from an older slot during installation.)
+		 * invalid if the slot has been dropped (either still unused or reused
+		 * by the destination slot itself), the type of replication slot or
+		 * name has been changed, or the restart_lsn either is invalid or has
+		 * gone backward. (The restart_lsn could go backwards if the source
+		 * slot is dropped and copied from an older slot during installation.)
 		 *
 		 * Since erroring out will release and drop the destination slot we
 		 * don't need to release it here.
 		 */
-		if (copy_restart_lsn < src_restart_lsn ||
+		if (!second_slot_contents.in_use ||
+			src == MyReplicationSlot ||
+			copy_restart_lsn < src_restart_lsn ||
 			src_islogical != copy_islogical ||
 			strcmp(copy_name, NameStr(*src_name)) != 0)
 			ereport(ERROR,

@@ -41,6 +41,7 @@ injection_points_isolation = [
   'repack_toast',
   'ri_fastpath_reindex',
   'ri_fastpath_snapshot',
+  'slot_copy_drop',
   'syscache-update-pruned',
   'heap_lock_update',
   'on_conflict_probe_window',
