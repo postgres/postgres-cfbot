@@ -295,6 +295,54 @@ SELECT JSON_OBJECT();
  {}
 (1 row)
 
+SELECT JSON_OBJECT(NULL ON NULL);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(ABSENT ON NULL);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(WITH UNIQUE KEYS);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(WITH UNIQUE RETURNING jsonb);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(WITHOUT UNIQUE);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(WITHOUT UNIQUE KEYS);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(NULL ON NULL WITH UNIQUE KEYS);
+ json_object 
+-------------
+ {}
+(1 row)
+
+SELECT JSON_OBJECT(ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb);
+ json_object 
+-------------
+ {}
+(1 row)
+
 SELECT JSON_OBJECT(RETURNING json);
  json_object 
 -------------
@@ -615,6 +663,37 @@ SELECT JSON_ARRAY();
  json_array 
 ------------
  []
+(1 row)
+
+SELECT JSON_ARRAY(NULL ON NULL);
+ json_array 
+------------
+ []
+(1 row)
+
+SELECT JSON_ARRAY(ABSENT ON NULL);
+ json_array 
+------------
+ []
+(1 row)
+
+SELECT JSON_ARRAY(NULL ON NULL RETURNING jsonb);
+ json_array 
+------------
+ []
+(1 row)
+
+SELECT JSON_ARRAY(ABSENT ON NULL RETURNING jsonb);
+ json_array 
+------------
+ []
+(1 row)
+
+SELECT JSON_OBJECT(absent: 1), JSON_OBJECT(without: 2), JSON_ARRAY(absent)
+FROM (VALUES ('a', 'b')) t(absent, without);
+ json_object | json_object | json_array 
+-------------+-------------+------------
+ {"a" : 1}   | {"b" : 2}   | ["a"]
 (1 row)
 
 SELECT JSON_ARRAY(RETURNING json);
@@ -1033,6 +1112,20 @@ SELECT JSON_OBJECT('foo' : '1' FORMAT JSON, 'bar' : 'baz' RETURNING json);
 CREATE OR REPLACE VIEW public.json_object_view AS
  SELECT JSON_OBJECT('foo' : '1'::text FORMAT JSON, 'bar' : 'baz'::text RETURNING json) AS "json_object"
 DROP VIEW json_object_view;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT JSON_OBJECT(ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb);
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Result
+   Output: JSON_OBJECT( ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb)
+(2 rows)
+
+CREATE VIEW json_object_view AS
+SELECT JSON_OBJECT(ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb);
+\sv json_object_view
+CREATE OR REPLACE VIEW public.json_object_view AS
+ SELECT JSON_OBJECT( ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb) AS "json_object"
+DROP VIEW json_object_view;
 SELECT to_json(a) AS a, JSON_OBJECTAGG(k : v WITH UNIQUE KEYS) OVER (ORDER BY k)
 FROM (VALUES (1,1), (2,2)) a(k,v);
        a       |    json_objectagg    
@@ -1082,6 +1175,20 @@ SELECT JSON_ARRAY('1' FORMAT JSON, 2 RETURNING json);
 \sv json_array_view
 CREATE OR REPLACE VIEW public.json_array_view AS
  SELECT JSON_ARRAY('1'::text FORMAT JSON, 2 RETURNING json) AS "json_array"
+DROP VIEW json_array_view;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT JSON_ARRAY(NULL ON NULL RETURNING jsonb);
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Result
+   Output: JSON_ARRAY( NULL ON NULL RETURNING jsonb)
+(2 rows)
+
+CREATE VIEW json_array_view AS
+SELECT JSON_ARRAY(NULL ON NULL RETURNING jsonb);
+\sv json_array_view
+CREATE OR REPLACE VIEW public.json_array_view AS
+ SELECT JSON_ARRAY( NULL ON NULL RETURNING jsonb) AS "json_array"
 DROP VIEW json_array_view;
 -- Test JSON_OBJECTAGG deparsing
 EXPLAIN (VERBOSE, COSTS OFF)
