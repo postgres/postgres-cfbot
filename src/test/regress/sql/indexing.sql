@@ -909,10 +909,10 @@ select indexrelid::regclass, indisvalid,
   order by indexrelid::regclass::text collate "C";
 drop table parted_inval_tab;
 
--- Check setup of indisvalid across a complex partition tree on index
--- creation.  If one index in a partition index is invalid, so should its
--- partitioned index.
-create table parted_isvalid_tab (a int, b int) partition by range (a);
+-- Check that invalid leaf indexes are not selected when creating an index on
+-- a partitioned table, while partitioned indexes created with ON ONLY on
+-- sub-partitioned tables are still attached (marking the parent invalid).
+create table parted_isvalid_tab (a int not null, b int) partition by range (a);
 create table parted_isvalid_tab_1 partition of parted_isvalid_tab
   for values from (1) to (10) partition by range (a);
 create table parted_isvalid_tab_2 partition of parted_isvalid_tab
@@ -921,12 +921,22 @@ create table parted_isvalid_tab_11 partition of parted_isvalid_tab_1
   for values from (1) to (5);
 create table parted_isvalid_tab_12 partition of parted_isvalid_tab_1
   for values from (5) to (10);
--- create an invalid index on one of the partitions.
-insert into parted_isvalid_tab_11 values (1, 0);
-create index concurrently parted_isvalid_idx_11 on parted_isvalid_tab_11 ((a/b));
--- The previous invalid index is selected, invalidating all the indexes up to
--- the top-most parent.
-create index parted_isvalid_idx on parted_isvalid_tab ((a/b));
+-- create an invalid index on one of the leaf partitions.
+insert into parted_isvalid_tab_11 values (1, 1), (1, 1);
+create unique index concurrently parted_isvalid_idx_11 on parted_isvalid_tab_11 (a);
+-- The previous invalid index is skipped, so attempting to build a new index
+-- on the partitioned table fails on the duplicate rows.
+create unique index parted_isvalid_idx on parted_isvalid_tab (a);
+delete from parted_isvalid_tab_11;
+-- Now creating the index on the partitioned table succeeds and creates new
+-- valid indexes, discarding the invalid index created previously.
+create unique index parted_isvalid_idx on parted_isvalid_tab (a);
+-- Uniqueness is enforced on the partition:
+insert into parted_isvalid_tab values (1, 1), (1, 2);
+-- A partitioned index created with ON ONLY on a sub-partitioned table is
+-- attached and invalidates the parent index until its partitions are attached.
+alter table only parted_isvalid_tab_1 add primary key (a);
+alter table parted_isvalid_tab add primary key (a);
 select indexrelid::regclass, indisvalid,
        indrelid::regclass, inhparent::regclass
   from pg_index idx left join
