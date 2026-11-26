@@ -125,6 +125,7 @@ int			XLOGbuffers = -1;
 int			XLogArchiveTimeout = 0;
 int			XLogArchiveMode = ARCHIVE_MODE_OFF;
 char	   *XLogArchiveCommand = NULL;
+int			XLogArchiveCommandJobs = 1;
 bool		EnableHotStandby = false;
 bool		fullPageWrites = true;
 bool		wal_log_hints = false;
@@ -5444,6 +5445,20 @@ show_archive_command(void)
 		return XLogArchiveCommand;
 	else
 		return "(disabled)";
+}
+
+bool
+check_archive_command_jobs(int *newval, void **extra, GucSource source)
+{
+#ifdef WIN32
+	if (*newval > 1)
+	{
+		GUC_check_errcode(ERRCODE_FEATURE_NOT_SUPPORTED);
+		GUC_check_errmsg("\"archive_command_jobs\" greater than 1 is not supported on Windows");
+		return false;
+	}
+#endif
+	return true;
 }
 
 /*

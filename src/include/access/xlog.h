@@ -44,6 +44,7 @@ extern PGDLLIMPORT int XLOGbuffers;
 extern PGDLLIMPORT int XLogArchiveTimeout;
 extern PGDLLIMPORT int wal_retrieve_retry_interval;
 extern PGDLLIMPORT char *XLogArchiveCommand;
+extern PGDLLIMPORT int XLogArchiveCommandJobs;
 extern PGDLLIMPORT bool EnableHotStandby;
 extern PGDLLIMPORT bool fullPageWrites;
 extern PGDLLIMPORT bool wal_log_hints;

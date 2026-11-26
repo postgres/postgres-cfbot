@@ -301,6 +301,7 @@
                                 # placeholders: %p = path of file to archive
                                 #               %f = file name only
                                 # e.g. 'test ! -f "/mnt/server/archivedir/%f" && cp "%p" "/mnt/server/archivedir/%f"'
+#archive_command_jobs = 1       # max concurrent archive_command processes (Unix)
 #archive_timeout = 0            # force a WAL file switch after this
                                 # number of seconds; 0 disables
 
