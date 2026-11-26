@@ -5,14 +5,14 @@
 *
 * Copyright (c) 2004-2026, PostgreSQL Global Development Group
 * IDENTIFICATION
-*	src/interfaces/libpq/pthread-win32.c
+*	src/port/pthread-win32.c
 *
 *-------------------------------------------------------------------------
 */
 
-#include "postgres_fe.h"
+#include "c.h"
 
-#include "pthread-win32.h"
+#include "port/pthread-win32.h"
 
 DWORD
 pthread_self(void)

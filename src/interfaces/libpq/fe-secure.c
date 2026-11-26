@@ -36,7 +36,7 @@
 #include <sys/stat.h>
 
 #ifdef WIN32
-#include "pthread-win32.h"
+#include "port/pthread-win32.h"
 #else
 #include <pthread.h>
 #endif

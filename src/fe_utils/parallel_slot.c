@@ -19,6 +19,10 @@
 #include "postgres_fe.h"
 
 #include <sys/select.h>
+#ifndef WIN32
+#include <pthread.h>
+#include <signal.h>
+#endif
 
 #include "common/logging.h"
 #include "fe_utils/cancel.h"
@@ -50,27 +54,6 @@ processQueryResult(ParallelSlot *slot, PGresult *result)
 }
 
 /*
- * Consume all the results generated for the given connection until
- * nothing remains.  If at least one error is encountered, return false.
- * Note that this will block if the connection is busy.
- */
-static bool
-consumeQueryResult(ParallelSlot *slot)
-{
-	bool		ok = true;
-	PGresult   *result;
-
-	SetCancelConn(slot->connection);
-	while ((result = PQgetResult(slot->connection)) != NULL)
-	{
-		if (!processQueryResult(slot, result))
-			ok = false;
-	}
-	ResetCancelConn();
-	return ok;
-}
-
-/*
  * Wait until a file descriptor from the given set becomes readable.
  *
  * Returns the number of ready descriptors, or -1 on failure (including
@@ -82,26 +65,44 @@ select_loop(int maxFd, fd_set *workerset)
 	int			i;
 	fd_set		saveSet = *workerset;
 
-	if (CancelRequested)
-		return -1;
+#ifndef WIN32
+
+	/*
+	 * Keep SIGINT blocked except while waiting in pselect().  Otherwise a
+	 * SIGINT arriving between the CancelRequested check and the start of the
+	 * wait would go unnoticed until a socket becomes readable, which for a
+	 * stuck server might be never.
+	 */
+	sigset_t	origmask;
+	sigset_t	blockmask;
+
+	sigemptyset(&blockmask);
+	sigaddset(&blockmask, SIGINT);
+	pthread_sigmask(SIG_BLOCK, &blockmask, &origmask);
+#endif
 
 	for (;;)
 	{
 		/*
 		 * On Windows, we need to check once in a while for cancel requests;
-		 * on other platforms we rely on select() returning when interrupted.
+		 * on other platforms we rely on pselect() returning when interrupted.
 		 */
-		struct timeval *tvp;
 #ifdef WIN32
-		struct timeval tv = {0, 1000000};
-
-		tvp = &tv;
-#else
-		tvp = NULL;
+		struct timeval tv = {1, 0};
 #endif
 
+		if (CancelRequested)
+		{
+			i = -1;
+			break;
+		}
+
 		*workerset = saveSet;
-		i = select(maxFd + 1, workerset, NULL, NULL, tvp);
+#ifdef WIN32
+		i = select(maxFd + 1, workerset, NULL, NULL, &tv);
+#else
+		i = pselect(maxFd + 1, workerset, NULL, NULL, NULL, &origmask);
+#endif
 
 #ifdef WIN32
 		if (i == SOCKET_ERROR)
@@ -115,12 +116,14 @@ select_loop(int maxFd, fd_set *workerset)
 
 		if (i < 0 && errno == EINTR)
 			continue;			/* ignore this */
-		if (i < 0 || CancelRequested)
-			return -1;			/* but not this */
 		if (i == 0)
 			continue;			/* timeout (Win32 only) */
 		break;
 	}
+
+#ifndef WIN32
+	pthread_sigmask(SIG_SETMASK, &origmask, NULL);
+#endif
 
 	return i;
 }
@@ -190,15 +193,15 @@ find_any_idle_slot(const ParallelSlotArray *sa)
 /*
  * Wait for any slot's connection to have query results, consume the results,
  * and update the slot's status as appropriate.  Returns true on success,
- * false on cancellation, on error, or if no slots are connected.
+ * false on cancellation, on error, or if no slots are connected.  Slots
+ * without a connection are ignored.
  */
 static bool
 wait_on_slots(ParallelSlotArray *sa)
 {
 	int			i;
 	fd_set		slotset;
-	int			maxFd = 0;
-	PGconn	   *cancelconn = NULL;
+	int			maxFd = -1;
 
 	/* We must reconstruct the fd_set for each call to select_loop */
 	FD_ZERO(&slotset);
@@ -207,8 +210,8 @@ wait_on_slots(ParallelSlotArray *sa)
 	{
 		int			sock;
 
-		/* We shouldn't get here if we still have slots without connections */
-		Assert(sa->slots[i].connection != NULL);
+		if (sa->slots[i].connection == NULL)
+			continue;
 
 		sock = PQsocket(sa->slots[i].connection);
 
@@ -219,10 +222,6 @@ wait_on_slots(ParallelSlotArray *sa)
 		if (sock < 0)
 			continue;
 
-		/* Keep track of the first valid connection we see. */
-		if (cancelconn == NULL)
-			cancelconn = sa->slots[i].connection;
-
 		FD_SET(sock, &slotset);
 		if (sock > maxFd)
 			maxFd = sock;
@@ -232,12 +231,10 @@ wait_on_slots(ParallelSlotArray *sa)
 	 * If we get this far with no valid connections, processing cannot
 	 * continue.
 	 */
-	if (cancelconn == NULL)
+	if (maxFd < 0)
 		return false;
 
-	SetCancelConn(cancelconn);
 	i = select_loop(maxFd, &slotset);
-	ResetCancelConn();
 
 	/* failure? */
 	if (i < 0)
@@ -246,6 +243,9 @@ wait_on_slots(ParallelSlotArray *sa)
 	for (i = 0; i < sa->numslots; i++)
 	{
 		int			sock;
+
+		if (sa->slots[i].connection == NULL)
+			continue;
 
 		sock = PQsocket(sa->slots[i].connection);
 
@@ -478,6 +478,7 @@ void
 ParallelSlotsTerminate(ParallelSlotArray *sa)
 {
 	int			i;
+	int			ncanceled = 0;
 
 	for (i = 0; i < sa->numslots; i++)
 	{
@@ -486,8 +487,35 @@ ParallelSlotsTerminate(ParallelSlotArray *sa)
 		if (conn == NULL)
 			continue;
 
+		if (PQtransactionStatus(conn) == PQTRANS_ACTIVE)
+			ncanceled++;
+
 		disconnectDatabase(conn);
 	}
+
+	/*
+	 * Only report this if the user asked for the cancel, not when we cancel
+	 * the remaining queries because one of them failed.
+	 */
+	if (ncanceled > 0 && CancelRequested)
+		fprintf(stderr, ngettext("Cancel request sent\n",
+								 "Cancel requests sent\n",
+								 ncanceled));
+}
+
+/*
+ * Return whether any slot is still running a query.
+ */
+static bool
+any_slot_busy(const ParallelSlotArray *sa)
+{
+	for (int i = 0; i < sa->numslots; i++)
+	{
+		if (PQtransactionStatus(sa->slots[i].connection) == PQTRANS_ACTIVE)
+			return true;
+	}
+
+	return false;
 }
 
 /*
@@ -499,17 +527,19 @@ ParallelSlotsTerminate(ParallelSlotArray *sa)
 bool
 ParallelSlotsWaitCompletion(ParallelSlotArray *sa)
 {
-	int			i;
-
-	for (i = 0; i < sa->numslots; i++)
+	while (any_slot_busy(sa))
 	{
-		if (sa->slots[i].connection == NULL)
-			continue;
-		if (!consumeQueryResult(&sa->slots[i]))
+		if (!wait_on_slots(sa))
 			return false;
-		/* Mark connection as idle */
-		ParallelSlotSetIdle(&sa->slots[i]);
 	}
+
+	/*
+	 * wait_on_slots only marks a slot as idle once its query has finished.
+	 * That never happens for a slot that was handed out but on which sending
+	 * the query failed, so mark all of them as idle here.
+	 */
+	for (int i = 0; i < sa->numslots; i++)
+		ParallelSlotSetIdle(&sa->slots[i]);
 
 	return true;
 }

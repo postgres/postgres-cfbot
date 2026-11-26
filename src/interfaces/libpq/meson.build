@@ -20,7 +20,7 @@ libpq_sources = files(
 libpq_so_sources = [] # for shared lib, in addition to the above
 
 if host_system == 'windows'
-  libpq_sources += files('pthread-win32.c', 'win32.c')
+  libpq_sources += files('win32.c')
   libpq_so_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'libpq',
     '--FILEDESC', 'PostgreSQL Access Library',])
@@ -42,8 +42,7 @@ export_file = custom_target('libpq.exports',
   kwargs: gen_export_kwargs,
 )
 
-# port needs to be in include path due to pthread-win32.h
-libpq_inc = include_directories('.', '../../port')
+libpq_inc = include_directories('.')
 libpq_c_args = ['-DSO_MAJOR_VERSION=5']
 
 # The OAuth implementation differs depending on the type of library being built.
