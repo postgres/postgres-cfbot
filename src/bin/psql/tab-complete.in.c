@@ -3498,13 +3498,17 @@ match_previous_words(int pattern_id,
 
 	/* CREATE DOMAIN */
 	else if (Matches("CREATE", "DOMAIN", MatchAny))
-		COMPLETE_WITH("AS");
+		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_datatypes, "AS");
 	else if (Matches("CREATE", "DOMAIN", MatchAny, "AS"))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_datatypes);
-	else if (Matches("CREATE", "DOMAIN", MatchAny, "AS", MatchAny))
+	else if (Matches("CREATE", "DOMAIN", MatchAny, "AS", MatchAny) ||
+			 Matches("CREATE", "DOMAIN", MatchAny, MatchAnyExcept("AS")))
 		COMPLETE_WITH("COLLATE", "DEFAULT", "CONSTRAINT",
 					  "NOT NULL", "NULL", "CHECK (");
-	else if (Matches("CREATE", "DOMAIN", MatchAny, "COLLATE"))
+	else if (Matches("CREATE", "DOMAIN", MatchAny,
+					 "AS", MatchAny, "COLLATE") ||
+			 Matches("CREATE", "DOMAIN", MatchAny,
+					 MatchAnyExcept("AS"), "COLLATE"))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_collations);
 
 	/* CREATE EXTENSION */
