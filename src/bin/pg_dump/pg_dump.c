@@ -380,6 +380,8 @@ static void dumpPublication(Archive *fout, const PublicationInfo *pubinfo);
 static void dumpPublicationTable(Archive *fout, const PublicationRelInfo *pubrinfo);
 static void dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo);
 static void dumpSubscriptionTable(Archive *fout, const SubRelInfo *subrinfo);
+static bool is_superuser(Archive *fout);
+static bool subscriptions_are_dumped(Archive *fout);
 static void dumpDatabase(Archive *fout);
 static void dumpDatabaseConfig(Archive *AH, PQExpBuffer outbuf,
 							   const char *dbname, Oid dboid);
@@ -1999,6 +2001,41 @@ selectDumpableNamespace(NamespaceInfo *nsinfo, Archive *fout)
 		 */
 		nsinfo->dobj.dump_contains = nsinfo->dobj.dump = DUMP_COMPONENT_ACL;
 	}
+	else if (strcmp(nsinfo->dobj.name, "pg_conflict") == 0)
+	{
+		/*
+		 * The pg_conflict schema is created by initdb and holds the
+		 * subscriptions' conflict log tables.  Dump the ACLs of the schema,
+		 * as for pg_catalog.
+		 */
+		nsinfo->dobj.dump = DUMP_COMPONENT_ACL;
+
+		/*
+		 * Unless named explicitly with -t or -n, which override this
+		 * selection, conflict log tables are dumped only in binary-upgrade
+		 * mode, and only when their subscriptions are dumped, since the
+		 * subscription is what uses the table.  In binary-upgrade mode, the
+		 * tables are restored so that CREATE SUBSCRIPTION can reuse them.  In
+		 * other modes, CREATE SUBSCRIPTION creates them again, so nothing
+		 * about them is dumped, not even their ACLs, as that would refer to a
+		 * table that no longer exists.
+		 *
+		 * Also dump the privileges, comments, and security labels of the
+		 * tables.  For example, privileges may allow non-superusers to delete
+		 * conflicts.
+		 *
+		 * This selection leaves out the data of the tables.  pg_upgrade
+		 * carries the rows over with the table files, and the server rejects
+		 * inserting rows into a conflict log table, so a dump of the rows
+		 * could not be restored.
+		 */
+		if (fout->dopt->binary_upgrade && subscriptions_are_dumped(fout))
+			nsinfo->dobj.dump_contains = DUMP_COMPONENT_DEFINITION |
+				DUMP_COMPONENT_ACL | DUMP_COMPONENT_COMMENT |
+				DUMP_COMPONENT_SECLABEL;
+		else
+			nsinfo->dobj.dump_contains = DUMP_COMPONENT_NONE;
+	}
 	else if (strncmp(nsinfo->dobj.name, "pg_", 3) == 0 ||
 			 strcmp(nsinfo->dobj.name, "information_schema") == 0)
 	{
@@ -2047,6 +2084,50 @@ selectDumpableNamespace(NamespaceInfo *nsinfo, Archive *fout)
 	 * suppressed by it, otherwise not.)
 	 */
 	(void) checkExtensionMembership(&nsinfo->dobj, fout);
+}
+
+/*
+ * is_conflict_log_table: is this a subscription's conflict log table?
+ *
+ * Conflict log tables are the tables of the pg_conflict schema.
+ */
+static bool
+is_conflict_log_table(const TableInfo *tbinfo)
+{
+	return strcmp(tbinfo->dobj.namespace->dobj.name, "pg_conflict") == 0;
+}
+
+/*
+ * table_entry_owner: the owner to record in the archive entries of a table
+ *
+ * A conflict log table has none. Changing its owner is not allowed, so no
+ * "ALTER TABLE ... OWNER TO ..." is emitted for it. With
+ * --use-set-session-authorization, their archive entries must
+ * not be restored as the subscription owner, who does not own the table
+ * at that point. The table is initially created by the restore user, and
+ * CREATE SUBSCRIPTION assigns ownership to the subscription owner.
+ */
+static const char *
+table_entry_owner(const TableInfo *tbinfo)
+{
+	return is_conflict_log_table(tbinfo) ? NULL : tbinfo->rolname;
+}
+
+/*
+ * subscriptions_are_dumped: Are subscriptions included in the dump?
+ *
+ * This reflects the conditions used by getSubscriptions() and
+ * selectDumpableObject() to determine whether a subscription is
+ * dumpable. Subscriptions are dumped in the post-data section.
+ */
+static bool
+subscriptions_are_dumped(Archive *fout)
+{
+	DumpOptions *dopt = fout->dopt;
+
+	return dopt->include_everything && !dopt->no_subscriptions &&
+		is_superuser(fout) &&
+		(dopt->dumpSections & DUMP_POST_DATA);
 }
 
 /*
@@ -5142,6 +5223,7 @@ getSubscriptions(Archive *fout)
 	int			i_subfailover;
 	int			i_subretaindeadtuples;
 	int			i_submaxretention;
+	int			i_subconflictlogdest;
 	int			i,
 				ntups;
 
@@ -5240,9 +5322,16 @@ getSubscriptions(Archive *fout)
 							 " '-1' AS subwalrcvtimeout,\n");
 
 	if (fout->remoteVersion >= 190000)
-		appendPQExpBufferStr(query, " fs.srvname AS subservername\n");
+		appendPQExpBufferStr(query, " fs.srvname AS subservername,\n");
 	else
-		appendPQExpBufferStr(query, " NULL AS subservername\n");
+		appendPQExpBufferStr(query, " NULL AS subservername,\n");
+
+	if (fout->remoteVersion >= 200000)
+		appendPQExpBufferStr(query,
+							 " s.subconflictlogdest\n");
+	else
+		appendPQExpBufferStr(query,
+							 " NULL AS subconflictlogdest\n");
 
 	appendPQExpBufferStr(query,
 						 "FROM pg_subscription s\n");
@@ -5291,6 +5380,7 @@ getSubscriptions(Archive *fout)
 	i_subpublications = PQfnumber(res, "subpublications");
 	i_suborigin = PQfnumber(res, "suborigin");
 	i_suboriginremotelsn = PQfnumber(res, "suboriginremotelsn");
+	i_subconflictlogdest = PQfnumber(res, "subconflictlogdest");
 
 	subinfo = pg_malloc_array(SubscriptionInfo, ntups);
 
@@ -5348,6 +5438,12 @@ getSubscriptions(Archive *fout)
 		else
 			subinfo[i].suboriginremotelsn =
 				pg_strdup(PQgetvalue(res, i, i_suboriginremotelsn));
+
+		if (PQgetisnull(res, i, i_subconflictlogdest))
+			subinfo[i].subconflictlogdest = NULL;
+		else
+			subinfo[i].subconflictlogdest =
+				pg_strdup(PQgetvalue(res, i, i_subconflictlogdest));
 
 		/* Decide whether we want to dump it */
 		selectDumpableObject(&(subinfo[i].dobj), fout);
@@ -5541,6 +5637,14 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 	appendPQExpBuffer(delq, "DROP SUBSCRIPTION %s;\n",
 					  qsubname);
 
+	if (dopt->binary_upgrade)
+	{
+		appendPQExpBufferStr(query, "\n-- For binary upgrade, must preserve pg_subscription.oid\n");
+		appendPQExpBuffer(query,
+						  "SELECT pg_catalog.binary_upgrade_set_next_pg_subscription_oid('%u'::pg_catalog.oid);\n\n",
+						  subinfo->dobj.catId.oid);
+	}
+
 	appendPQExpBuffer(query, "CREATE SUBSCRIPTION %s ",
 					  qsubname);
 	if (subinfo->subservername)
@@ -5611,6 +5715,11 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 
 	if (pg_strcasecmp(subinfo->suborigin, LOGICALREP_ORIGIN_ANY) != 0)
 		appendPQExpBuffer(query, ", origin = %s", subinfo->suborigin);
+
+	if (subinfo->subconflictlogdest &&
+		pg_strcasecmp(subinfo->subconflictlogdest, "log") != 0)
+		appendPQExpBuffer(query, ", conflict_log_destination = %s",
+						  subinfo->subconflictlogdest);
 
 	appendPQExpBufferStr(query, ");\n");
 
@@ -11476,7 +11585,7 @@ dumpTableComment(Archive *fout, const TableInfo *tbinfo,
 			ArchiveEntry(fout, nilCatalogId, createDumpId(),
 						 ARCHIVE_OPTS(.tag = tag->data,
 									  .namespace = tbinfo->dobj.namespace->dobj.name,
-									  .owner = tbinfo->rolname,
+									  .owner = table_entry_owner(tbinfo),
 									  .description = "COMMENT",
 									  .section = SECTION_NONE,
 									  .createStmt = query->data,
@@ -11501,7 +11610,7 @@ dumpTableComment(Archive *fout, const TableInfo *tbinfo,
 			ArchiveEntry(fout, nilCatalogId, createDumpId(),
 						 ARCHIVE_OPTS(.tag = tag->data,
 									  .namespace = tbinfo->dobj.namespace->dobj.name,
-									  .owner = tbinfo->rolname,
+									  .owner = table_entry_owner(tbinfo),
 									  .description = "COMMENT",
 									  .section = SECTION_NONE,
 									  .createStmt = query->data,
@@ -16731,7 +16840,7 @@ dumpTableSecLabel(Archive *fout, const TableInfo *tbinfo, const char *reltypenam
 		ArchiveEntry(fout, nilCatalogId, createDumpId(),
 					 ARCHIVE_OPTS(.tag = target->data,
 								  .namespace = tbinfo->dobj.namespace->dobj.name,
-								  .owner = tbinfo->rolname,
+								  .owner = table_entry_owner(tbinfo),
 								  .description = "SECURITY LABEL",
 								  .section = SECTION_NONE,
 								  .createStmt = query->data,
@@ -17282,6 +17391,11 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 
 		appendPQExpBuffer(delq, "DROP %s %s;\n", reltypename, qualrelname);
 
+		/*
+		 * This also keeps the OIDs and filenodes of a conflict log table, so
+		 * that pg_upgrade finds its files and pg_subscription's
+		 * subconflictlogrelid stays the same.
+		 */
 		if (dopt->binary_upgrade)
 			binary_upgrade_set_pg_class_oids(fout, q,
 											 tbinfo->dobj.catId.oid);
@@ -18053,7 +18167,7 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 								  .tablespace = tablespace,
 								  .tableam = tableam,
 								  .relkind = tbinfo->relkind,
-								  .owner = tbinfo->rolname,
+								  .owner = table_entry_owner(tbinfo),
 								  .description = reltypename,
 								  .section = tbinfo->postponed_def ?
 								  SECTION_POST_DATA : SECTION_PRE_DATA,
@@ -20401,12 +20515,16 @@ getDependencies(Archive *fout)
 		 * Ordinarily, table rowtypes have implicit dependencies on their
 		 * tables.  However, for a composite type the implicit dependency goes
 		 * the other way in pg_depend; which is the right thing for DROP but
-		 * it doesn't produce the dependency ordering we need. So in that one
-		 * case, we reverse the direction of the dependency.
+		 * it doesn't produce the dependency ordering we need.  The same is
+		 * true for a subscription's conflict log table, which has an internal
+		 * dependency on its subscription for DROP, but must be dumped before
+		 * the subscription in binary-upgrade mode.  So in those cases, we
+		 * reverse the direction of the dependency.
 		 */
 		if (deptype == 'i' &&
 			dobj->objType == DO_TABLE &&
-			refdobj->objType == DO_TYPE)
+			(refdobj->objType == DO_TYPE ||
+			 refdobj->objType == DO_SUBSCRIPTION))
 			addObjectDependency(refdobj, dobj->dumpId);
 		else
 			/* normal case */
