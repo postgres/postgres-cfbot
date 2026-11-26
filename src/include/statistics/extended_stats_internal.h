@@ -73,7 +73,7 @@ extern MVNDistinct *statext_ndistinct_build(double totalrows, StatsBuildData *da
 extern bytea *statext_ndistinct_serialize(MVNDistinct *ndistinct);
 extern MVNDistinct *statext_ndistinct_deserialize(bytea *data);
 extern bool statext_ndistinct_validate(const MVNDistinct *ndistinct,
-									   const int2vector *stxkeys,
+									   const Bitmapset *keys,
 									   int numexprs, int elevel);
 extern void statext_ndistinct_free(MVNDistinct *ndistinct);
 
@@ -81,7 +81,7 @@ extern MVDependencies *statext_dependencies_build(StatsBuildData *data);
 extern bytea *statext_dependencies_serialize(MVDependencies *dependencies);
 extern MVDependencies *statext_dependencies_deserialize(bytea *data);
 extern bool statext_dependencies_validate(const MVDependencies *dependencies,
-										  const int2vector *stxkeys,
+										  const Bitmapset *keys,
 										  int numexprs, int elevel);
 extern void statext_dependencies_free(MVDependencies *dependencies);
 
@@ -106,8 +106,7 @@ extern int	multi_sort_compare_dims(int start, int end, const SortItem *a,
 									const SortItem *b, MultiSortSupport mss);
 extern int	compare_scalars_simple(const void *a, const void *b, void *arg);
 extern int	compare_datums_simple(Datum a, Datum b, SortSupport ssup);
-
-extern AttrNumber *build_attnums_array(Bitmapset *attrs, int nexprs, int *numattrs);
+extern int	compare_attnums(const void *a, const void *b);
 
 extern SortItem *build_sorted_items(StatsBuildData *data, int *nitems,
 									MultiSortSupport mss,

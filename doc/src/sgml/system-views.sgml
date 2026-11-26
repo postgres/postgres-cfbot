@@ -4739,20 +4739,11 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>attnames</structfield> <type>name[]</type>
-       (references <link linkend="catalog-pg-attribute"><structname>pg_attribute</structname></link>.<structfield>attname</structfield>)
-      </para>
-      <para>
-       Names of the columns included in the extended statistics object
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>exprs</structfield> <type>text[]</type>
       </para>
       <para>
-       Expressions included in the extended statistics object
+       The columns and expressions the statistics object is
+       defined on, in the order they were written
       </para></entry>
       </row>
 

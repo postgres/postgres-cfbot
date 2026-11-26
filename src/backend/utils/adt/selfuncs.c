@@ -4626,7 +4626,7 @@ estimate_multivariate_ndistinct(PlannerInfo *root, RelOptInfo *rel,
 				if (!AttrNumberIsForUserDefinedAttr(attnum))
 					continue;
 
-				if (bms_is_member(attnum, info->keys))
+				if (stat_covers_attnum(info, attnum))
 					nshared_vars++;
 
 				continue;
@@ -4691,14 +4691,15 @@ estimate_multivariate_ndistinct(PlannerInfo *root, RelOptInfo *rel,
 		ListCell   *lc2;
 		Bitmapset  *matched = NULL;
 		AttrNumber	attnum_offset;
+		int			nexprs = stat_num_expressions(matched_info);
 
 		/*
 		 * How much we need to offset the attnums? If there are no
 		 * expressions, no offset is needed. Otherwise offset enough to move
 		 * the lowest one (which is equal to number of expressions) to 1.
 		 */
-		if (matched_info->exprs)
-			attnum_offset = (list_length(matched_info->exprs) + 1);
+		if (nexprs > 0)
+			attnum_offset = nexprs + 1;
 		else
 			attnum_offset = 0;
 
@@ -4728,7 +4729,7 @@ estimate_multivariate_ndistinct(PlannerInfo *root, RelOptInfo *rel,
 					continue;
 
 				/* Is the variable covered by the statistics object? */
-				if (!bms_is_member(attnum, matched_info->keys))
+				if (!stat_covers_attnum(matched_info, attnum))
 					continue;
 
 				attnum = attnum + attnum_offset;
@@ -4754,6 +4755,13 @@ estimate_multivariate_ndistinct(PlannerInfo *root, RelOptInfo *rel,
 			foreach(lc3, matched_info->exprs)
 			{
 				Node	   *expr = (Node *) lfirst(lc3);
+
+				/*
+				 * columns have no per-expression stats, so count expressions
+				 * only
+				 */
+				if (bms_is_member(foreach_current_index(lc3), matched_info->columns))
+					continue;
 
 				if (equal(varinfo->var, expr))
 				{
@@ -5920,6 +5928,13 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 			foreach(expr_item, info->exprs)
 			{
 				Node	   *expr = (Node *) lfirst(expr_item);
+
+				/*
+				 * columns have no per-expression stats, so count expressions
+				 * only
+				 */
+				if (bms_is_member(foreach_current_index(expr_item), info->columns))
+					continue;
 
 				Assert(expr);
 

@@ -2996,6 +2996,7 @@ StartupStatusEnum
 StatApproxReadStreamPrivate
 StatEntry
 StatExtEntry
+StatExtExprsCacheEnt
 StateFileChunk
 StatisticExtInfo
 StatsBuildData

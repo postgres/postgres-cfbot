@@ -57,6 +57,7 @@
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteManip.h"
 #include "rewrite/rewriteSupport.h"
+#include "statistics/statistics.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -1650,6 +1651,81 @@ pg_get_statisticsobjdef_columns(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Deparse one column or expression of an extended statistics object into the
+ * text used in its CREATE STATISTICS command.
+ */
+static char *
+deparse_stat_entry(Node *expr, Oid relid, List *context)
+{
+	char	   *str;
+
+	if (IsA(expr, Var) && ((Var *) expr)->varattno > 0)
+		return pstrdup(quote_identifier(
+										get_attname(relid, ((Var *) expr)->varattno, false)));
+
+	str = deparse_expression_pretty(expr, context, false, false,
+									PRETTYFLAG_PAREN, 0);
+	if (looks_like_function(expr))
+		return str;
+	return psprintf("(%s)", str);
+}
+
+/*
+ * pg_get_statisticsobjdef_columns_array
+ *		Get columns and expressions for an extended statistics object, as
+ *		a text array
+ */
+Datum
+pg_get_statisticsobjdef_columns_array(PG_FUNCTION_ARGS)
+{
+	Oid			statextid = PG_GETARG_OID(0);
+	Form_pg_statistic_ext statextrec;
+	HeapTuple	statexttup;
+	Datum		datum;
+	List	   *allexprs = NIL;
+	char	   *tmp;
+	List	   *context;
+	ListCell   *lc;
+	ArrayBuildState *astate = NULL;
+
+	statexttup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statextid));
+
+	if (!HeapTupleIsValid(statexttup))
+		PG_RETURN_NULL();
+
+	statextrec = (Form_pg_statistic_ext) GETSTRUCT(statexttup);
+
+	datum = SysCacheGetAttrNotNull(STATEXTOID, statexttup,
+								   Anum_pg_statistic_ext_stxexprs);
+	tmp = TextDatumGetCString(datum);
+	allexprs = (List *) stringToNode(tmp);
+	pfree(tmp);
+
+	context = deparse_context_for(get_relation_name(statextrec->stxrelid),
+								  statextrec->stxrelid);
+
+	foreach(lc, allexprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		char	   *str;
+
+		str = deparse_stat_entry(expr, statextrec->stxrelid, context);
+		astate = accumArrayResult(astate,
+								  PointerGetDatum(cstring_to_text(str)),
+								  false,
+								  TEXTOID,
+								  CurrentMemoryContext);
+	}
+
+	ReleaseSysCache(statexttup);
+
+	if (astate == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_DATUM(makeArrayResult(astate, CurrentMemoryContext));
+}
+
+/*
  * Internal workhorse to decompile an extended statistics object.
  */
 static char *
@@ -1663,6 +1739,7 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 	ArrayType  *arr;
 	char	   *enabled;
 	Datum		datum;
+	char	   *exprsString;
 	bool		ndistinct_enabled;
 	bool		dependencies_enabled;
 	bool		mcv_enabled;
@@ -1670,7 +1747,6 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 	List	   *context;
 	ListCell   *lc;
 	List	   *exprs = NIL;
-	bool		has_exprs;
 	int			ncolumns;
 
 	statexttup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statextid));
@@ -1682,32 +1758,21 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 		elog(ERROR, "cache lookup failed for statistics object %u", statextid);
 	}
 
-	/* has the statistics expressions? */
-	has_exprs = !heap_attisnull(statexttup, Anum_pg_statistic_ext_stxexprs, NULL);
-
 	statextrec = (Form_pg_statistic_ext) GETSTRUCT(statexttup);
 
 	/*
-	 * Get the statistics expressions, if any.  (NOTE: we do not use the
-	 * relcache versions of the expressions, because we want to display
+	 * Get the statistics expressions.  (NOTE: we do not use the relcache
+	 * versions of the expressions, because we want to display
 	 * non-const-folded expressions.)
 	 */
-	if (has_exprs)
-	{
-		Datum		exprsDatum;
-		char	   *exprsString;
-
-		exprsDatum = SysCacheGetAttrNotNull(STATEXTOID, statexttup,
-											Anum_pg_statistic_ext_stxexprs);
-		exprsString = TextDatumGetCString(exprsDatum);
-		exprs = (List *) stringToNode(exprsString);
-		pfree(exprsString);
-	}
-	else
-		exprs = NIL;
+	datum = SysCacheGetAttrNotNull(STATEXTOID, statexttup,
+								   Anum_pg_statistic_ext_stxexprs);
+	exprsString = TextDatumGetCString(datum);
+	exprs = (List *) stringToNode(exprsString);
+	pfree(exprsString);
 
 	/* count the number of columns (attributes and expressions) */
-	ncolumns = statextrec->stxkeys.dim1 + list_length(exprs);
+	ncolumns = list_length(exprs);
 
 	initStringInfo(&buf);
 
@@ -1786,41 +1851,20 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 		appendStringInfoString(&buf, " ON ");
 	}
 
-	/* decode simple column references */
-	for (colno = 0; colno < statextrec->stxkeys.dim1; colno++)
-	{
-		AttrNumber	attnum = statextrec->stxkeys.values[colno];
-		char	   *attname;
-
-		if (colno > 0)
-			appendStringInfoString(&buf, ", ");
-
-		attname = get_attname(statextrec->stxrelid, attnum, false);
-
-		appendStringInfoString(&buf, quote_identifier(attname));
-	}
-
 	context = deparse_context_for(get_relation_name(statextrec->stxrelid),
 								  statextrec->stxrelid);
 
+	colno = 0;
 	foreach(lc, exprs)
 	{
 		Node	   *expr = (Node *) lfirst(lc);
-		char	   *str;
-		int			prettyFlags = PRETTYFLAG_PAREN;
-
-		str = deparse_expression_pretty(expr, context, false, false,
-										prettyFlags, 0);
 
 		if (colno > 0)
 			appendStringInfoString(&buf, ", ");
 
-		/* Need parens if it's not a bare function call */
-		if (looks_like_function(expr))
-			appendStringInfoString(&buf, str);
-		else
-			appendStringInfo(&buf, "(%s)", str);
-
+		appendStringInfoString(&buf,
+							   deparse_stat_entry(expr, statextrec->stxrelid,
+												  context));
 		colno++;
 	}
 
@@ -1843,10 +1887,11 @@ pg_get_statisticsobjdef_expressions(PG_FUNCTION_ARGS)
 	Form_pg_statistic_ext statextrec;
 	HeapTuple	statexttup;
 	Datum		datum;
+	Relation	rel;
 	List	   *context;
 	ListCell   *lc;
-	List	   *exprs = NIL;
-	bool		has_exprs;
+	List	   *rawexprs = NIL;
+	Bitmapset  *columns;
 	char	   *tmp;
 	ArrayBuildState *astate = NULL;
 
@@ -1855,37 +1900,41 @@ pg_get_statisticsobjdef_expressions(PG_FUNCTION_ARGS)
 	if (!HeapTupleIsValid(statexttup))
 		PG_RETURN_NULL();
 
-	/* Does the stats object have expressions? */
-	has_exprs = !heap_attisnull(statexttup, Anum_pg_statistic_ext_stxexprs, NULL);
-
-	/* no expressions? we're done */
-	if (!has_exprs)
-	{
-		ReleaseSysCache(statexttup);
-		PG_RETURN_NULL();
-	}
-
 	statextrec = (Form_pg_statistic_ext) GETSTRUCT(statexttup);
 
 	/*
-	 * Get the statistics expressions, and deparse them into text values.
+	 * Decode stxexprs as originally written; we deparse these, because we
+	 * want to display the expressions without const-folding.
 	 */
 	datum = SysCacheGetAttrNotNull(STATEXTOID, statexttup,
 								   Anum_pg_statistic_ext_stxexprs);
 	tmp = TextDatumGetCString(datum);
-	exprs = (List *) stringToNode(tmp);
+	rawexprs = (List *) stringToNode(tmp);
 	pfree(tmp);
+
+	/*
+	 * Skip the plain columns: their statistics are in pg_statistic, not in
+	 * pg_statistic_ext_data.stxdexpr.  What remains are the expressions, in
+	 * the same order as stxdexpr, which pg_stats_ext_exprs pairs this output
+	 * with.
+	 */
+	rel = table_open(statextrec->stxrelid, AccessShareLock);
+	columns = statext_column_entries(rawexprs, rel);
+	table_close(rel, AccessShareLock);
 
 	context = deparse_context_for(get_relation_name(statextrec->stxrelid),
 								  statextrec->stxrelid);
 
-	foreach(lc, exprs)
+	foreach(lc, rawexprs)
 	{
-		Node	   *expr = (Node *) lfirst(lc);
+		Node	   *rawexpr = (Node *) lfirst(lc);
 		char	   *str;
 		int			prettyFlags = PRETTYFLAG_INDENT;
 
-		str = deparse_expression_pretty(expr, context, false, false,
+		if (bms_is_member(foreach_current_index(lc), columns))
+			continue;
+
+		str = deparse_expression_pretty(rawexpr, context, false, false,
 										prettyFlags, 0);
 
 		astate = accumArrayResult(astate,
@@ -1896,6 +1945,9 @@ pg_get_statisticsobjdef_expressions(PG_FUNCTION_ARGS)
 	}
 
 	ReleaseSysCache(statexttup);
+
+	if (astate == NULL)
+		PG_RETURN_NULL();
 
 	PG_RETURN_DATUM(makeArrayResult(astate, CurrentMemoryContext));
 }

@@ -157,6 +157,10 @@ typedef struct RelationData
 	/* data managed by RelationGetStatExtList: */
 	List	   *rd_statlist;	/* list of OIDs of extended stats */
 
+	/* data managed by RelationGetStatExtExprs: */
+	List	   *rd_statexprs;	/* parsed entries of extended stats */
+	MemoryContext rd_statexprcxt;	/* private cxt for rd_statexprs, if any */
+
 	/* data managed by RelationGetIndexAttrBitmap: */
 	bool		rd_attrsvalid;	/* are bitmaps of attrs valid? */
 	Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */
