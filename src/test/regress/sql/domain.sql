@@ -496,6 +496,19 @@ insert into domcontest values (42);
 alter domain con drop constraint nonexistent;
 alter domain con drop constraint if exists nonexistent;
 
+-- a subtransaction after DROP CONSTRAINT must work
+create domain dsubxact as int constraint dsubxact_pos check (value > 0);
+begin;
+alter domain dsubxact drop constraint dsubxact_pos;
+savepoint s1;
+drop domain dsubxact;
+rollback;
+begin;
+alter domain dsubxact drop constraint if exists nonexistent;
+savepoint s1;
+drop domain dsubxact;
+commit;
+
 -- not-null constraints
 create domain connotnull integer;
 create table domconnotnulltest
