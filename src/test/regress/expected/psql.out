@@ -453,6 +453,7 @@ fieldsep_zero            off
 footer                   on
 format                   aligned
 linestyle                ascii
+n_decimals               all
 null                     ''
 numericlocale            off
 pager                    1
