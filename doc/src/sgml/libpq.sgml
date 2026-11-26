@@ -5437,6 +5437,36 @@ int PQsendQueryPrepared(PGconn *conn,
      </listitem>
     </varlistentry>
 
+    <varlistentry id="libpq-PQsendQueryPreparedPortal">
+     <term><function>PQsendQueryPreparedPortal</function><indexterm><primary>PQsendQueryPreparedPortal</primary></indexterm></term>
+
+     <listitem>
+      <para>
+       Submits a request to bind a prepared statement to a portal and execute it.
+<synopsis>
+int PQsendQueryPreparedPortal(PGconn *conn,
+                              const char *stmtName,
+                              const char *portalName,
+                              int nParams,
+                              const char * const *paramValues,
+                              const int *paramLengths,
+                              const int *paramFormats,
+                              int resultFormat);
+</synopsis>
+       This has the same behavior and return value as
+       <xref linkend="libpq-PQsendQueryPrepared"/>, with an additional
+       <parameter>portalName</parameter> argument.  Supply an empty string to
+       use the unnamed portal.  A null pointer is an error.
+      </para>
+
+      <para>
+       A named portal remains available until the transaction ends or the
+       portal is closed (see <xref linkend="libpq-PQsendClosePortal"/>).
+       Binding to an existing named portal produces a server error.
+      </para>
+     </listitem>
+    </varlistentry>
+
     <varlistentry id="libpq-PQsendDescribePrepared">
      <term><function>PQsendDescribePrepared</function><indexterm><primary>PQsendDescribePrepared</primary></indexterm></term>
 
@@ -5527,6 +5557,7 @@ int PQsendClosePortal(PGconn *conn, const char *portalName);
        <xref linkend="libpq-PQsendQueryParams"/>,
        <xref linkend="libpq-PQsendPrepare"/>,
        <xref linkend="libpq-PQsendQueryPrepared"/>,
+       <xref linkend="libpq-PQsendQueryPreparedPortal"/>,
        <xref linkend="libpq-PQsendDescribePrepared"/>,
        <xref linkend="libpq-PQsendDescribePortal"/>,
        <xref linkend="libpq-PQsendClosePrepared"/>,
@@ -5898,8 +5929,9 @@ int PQflush(PGconn *conn);
     <para>
      After entering pipeline mode, the application dispatches requests using
      <xref linkend="libpq-PQsendQueryParams"/>
-     or its prepared-query sibling
-     <xref linkend="libpq-PQsendQueryPrepared"/>.
+     or one of its prepared-query variants,
+     <xref linkend="libpq-PQsendQueryPrepared"/> and
+     <xref linkend="libpq-PQsendQueryPreparedPortal"/>.
      These requests are queued on the client-side until flushed to the server;
      this occurs when <xref linkend="libpq-PQpipelineSync"/> is used to
      establish a synchronization point in the pipeline,
