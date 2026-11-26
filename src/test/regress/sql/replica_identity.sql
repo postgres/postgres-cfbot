@@ -123,6 +123,9 @@ ALTER TABLE ONLY test_replica_identity4_1
 ALTER INDEX test_replica_identity4_pkey
   ATTACH PARTITION test_replica_identity4_1_pkey;
 \d+ test_replica_identity4
+-- \d+ shows a non-default replica identity of a partitioned table
+ALTER TABLE ONLY test_replica_identity4 REPLICA IDENTITY FULL;
+\d+ test_replica_identity4
 
 -- Dropping the primary key is not allowed if that would leave the replica
 -- identity as nullable
