@@ -2482,7 +2482,20 @@ BeginReportingGUCOptions(void)
 		struct config_generic *conf = hentry->gucvar;
 
 		if (conf->flags & GUC_REPORT)
+		{
+			/*
+			 * The value of this variable is sent to the client just below, so
+			 * remove it from the report queue.  Otherwise, if sending fails
+			 * here, ReportChangedGUCOptions() would try again and warn a
+			 * second time.
+			 */
+			if (conf->status & GUC_NEEDS_REPORT)
+			{
+				conf->status &= ~GUC_NEEDS_REPORT;
+				slist_delete(&guc_report_list, &conf->report_link);
+			}
 			ReportGUCOption(conf);
+		}
 	}
 }
 
@@ -2525,9 +2538,15 @@ ReportChangedGUCOptions(void)
 													  report_link, iter.cur);
 
 		Assert((conf->flags & GUC_REPORT) && (conf->status & GUC_NEEDS_REPORT));
-		ReportGUCOption(conf);
+
+		/*
+		 * Clear the report status before transmitting, so that if
+		 * ReportGUCOption() throws an error we don't retry the same variable
+		 * at the next ReadyForQuery.
+		 */
 		conf->status &= ~GUC_NEEDS_REPORT;
 		slist_delete_current(&iter);
+		ReportGUCOption(conf);
 	}
 }
 
@@ -2546,19 +2565,58 @@ ReportGUCOption(struct config_generic *record)
 		strcmp(val, record->last_reported) != 0)
 	{
 		StringInfoData msgbuf;
+		MemoryContext oldcontext = CurrentMemoryContext;
+		bool		sent = true;
 
-		pq_beginmessage(&msgbuf, PqMsg_ParameterStatus);
-		pq_sendstring(&msgbuf, record->name);
-		pq_sendstring(&msgbuf, val);
-		pq_endmessage(&msgbuf);
+		/*
+		 * Converting the value to the client encoding can fail, if the value
+		 * contains a character that doesn't exist in that encoding.  Since we
+		 * are not executing any command here, report that as a WARNING rather
+		 * than an ERROR, which would wrongly fail the preceding command and
+		 * abort any open transaction.  This is safe because nothing is
+		 * written to the output buffer until pq_endmessage().  Any other
+		 * error is re-thrown.
+		 */
+		PG_TRY();
+		{
+			pq_beginmessage(&msgbuf, PqMsg_ParameterStatus);
+			pq_sendstring(&msgbuf, record->name);
+			pq_sendstring(&msgbuf, val);
+			pq_endmessage(&msgbuf);
+		}
+		PG_CATCH();
+		{
+			ErrorData  *edata;
+
+			MemoryContextSwitchTo(oldcontext);
+			edata = CopyErrorData();
+			FlushErrorState();
+
+			if (edata->sqlerrcode != ERRCODE_UNTRANSLATABLE_CHARACTER)
+				ReThrowError(edata);
+
+			ereport(WARNING,
+					(errcode(edata->sqlerrcode),
+					 errmsg("could not report parameter \"%s\" to client",
+							record->name),
+					 errdetail_internal("%s", edata->message)));
+			FreeErrorData(edata);
+
+			sent = false;
+		}
+		PG_END_TRY();
 
 		/*
 		 * We need a long-lifespan copy.  If guc_strdup() fails due to OOM,
 		 * we'll set last_reported to NULL and thereby possibly make a
-		 * duplicate report later.
+		 * duplicate report later.  Don't update it if the report failed, so
+		 * that a later change back to a reportable value is still reported.
 		 */
-		guc_free(record->last_reported);
-		record->last_reported = guc_strdup(LOG, val);
+		if (sent)
+		{
+			guc_free(record->last_reported);
+			record->last_reported = guc_strdup(LOG, val);
+		}
 	}
 
 	pfree(val);
