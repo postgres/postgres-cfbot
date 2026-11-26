@@ -1874,6 +1874,23 @@ CheckTypeDependencyInSingleRelExpr(Node *expr, Oid relId, Oid typeId)
 {
 	RangeTblEntry rte = {0};
 
+	if (expr == NULL)
+		return false;
+
+	/* Also check the result type, matching recordDependencyOnSingleRelExpr */
+	if (IsA(expr, List))
+	{
+		ListCell   *l;
+
+		foreach(l, (List *) expr)
+		{
+			if (exprType(lfirst(l)) == typeId)
+				return true;
+		}
+	}
+	else if (exprType(expr) == typeId)
+		return true;
+
 	/* We gin up a rather bogus rangetable list to handle Vars */
 	rte.type = T_RangeTblEntry;
 	rte.rtekind = RTE_RELATION;
