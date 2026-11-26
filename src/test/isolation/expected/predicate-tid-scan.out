@@ -1,0 +1,20 @@
+Parsed test spec with 2 sessions
+
+starting permutation: r1 r2 w1 w2 c1 c2
+step r1: select count(*) from tb where ctid = '(0,3)';
+count
+-----
+    0
+(1 row)
+
+step r2: select count(*) from ta where ctid = '(0,3)';
+count
+-----
+    0
+(1 row)
+
+step w1: insert into ta values (100);
+step w2: insert into tb values (200);
+step c1: commit;
+step c2: commit;
+ERROR:  could not serialize access due to read/write dependencies among transactions
