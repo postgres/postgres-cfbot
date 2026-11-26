@@ -44,6 +44,7 @@ $node->safe_psql('postgres',
 	  . "CREATE TABLE mytab246 (f1 int, f2 text);\n"
 	  . "CREATE TABLE \"mixedName\" (f1 int, f2 text);\n"
 	  . "CREATE TYPE enum1 AS ENUM ('foo', 'bar', 'baz', 'BLACK');\n"
+	  . "CREATE COLLATION coll1 FROM \"C\";\n"
 	  . "CREATE PUBLICATION some_publication;\n");
 
 # In a VPATH build, we'll be started in the source directory, but we want
@@ -336,6 +337,40 @@ check_completion(
 	"CREATE TY\t",
 	qr/CREATE TYPE /,
 	"check create_command_generator");
+
+clear_query();
+
+# check CREATE DOMAIN completion with and without optional AS
+check_completion(
+	"CREATE DOMAIN d enu\t",
+	qr/CREATE DOMAIN d enum1 /,
+	"complete domain data type without AS");
+
+check_completion(
+	"CH\t",
+	qr/CHECK \(/,
+	"complete domain option without AS");
+
+clear_query();
+
+check_completion(
+	"CREATE DOMAIN d AS enum1 CH\t",
+	qr/CHECK \(/,
+	"complete domain option with AS");
+
+clear_query();
+
+check_completion(
+	"CREATE DOMAIN d text COLLATE col\t",
+	qr/coll1 /,
+	"complete domain collation without AS");
+
+clear_query();
+
+check_completion(
+	"CREATE DOMAIN d AS text COLLATE col\t",
+	qr/coll1 /,
+	"complete domain collation with AS");
 
 clear_query();
 
