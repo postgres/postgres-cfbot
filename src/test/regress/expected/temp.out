@@ -232,9 +232,11 @@ LINE 1: select nonempty('');
 DETAIL:  There is no function of that name.
 select pg_temp.nonempty('');
 ERROR:  value for domain nonempty violates check constraint "nonempty_check"
+DETAIL:  Check constraint expression: (VALUE <> ''::text).
 -- other syntax matches rules for tables
 select ''::nonempty;
 ERROR:  value for domain nonempty violates check constraint "nonempty_check"
+DETAIL:  Check constraint expression: (VALUE <> ''::text).
 reset search_path;
 -- For partitioned temp tables, ON COMMIT actions ignore storage-less
 -- partitioned tables.

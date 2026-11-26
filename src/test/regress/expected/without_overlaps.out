@@ -328,10 +328,12 @@ INSERT INTO temporal_rng4 VALUES ('[1,11)', '[9,10)'); -- start bound violates d
 ERROR:  value for domain int4_d violates check constraint "int4_d_check"
 LINE 1: INSERT INTO temporal_rng4 VALUES ('[1,11)', '[9,10)');
                                                     ^
+DETAIL:  Check constraint expression: (VALUE <> 10).
 INSERT INTO temporal_rng4 VALUES ('[1,2)', '[10,11)'); -- end bound violates domain
 ERROR:  value for domain int4_d violates check constraint "int4_d_check"
 LINE 1: INSERT INTO temporal_rng4 VALUES ('[1,2)', '[10,11)');
                                                    ^
+DETAIL:  Check constraint expression: (VALUE <> 10).
 INSERT INTO temporal_rng4 VALUES ('[1,2)', '[1,13)'), ('[1,2)', '[2,5)'); -- overlaps
 ERROR:  conflicting key value violates exclusion constraint "temporal_rng4_pk"
 DETAIL:  Key (id, valid_at)=([1,2), [2,5)) conflicts with existing key (id, valid_at)=([1,2), [1,13)).
@@ -347,6 +349,7 @@ CREATE TABLE temporal_rng4 (
 );
 INSERT INTO temporal_rng4 VALUES ('[1,2)', '[10,11)'); -- violates domain
 ERROR:  value for domain int4range_d violates check constraint "int4range_d_check"
+DETAIL:  Check constraint expression: (VALUE <> '[10,11)'::int4range).
 INSERT INTO temporal_rng4 VALUES ('[1,2)', '[1,13)'), ('[1,2)', '[2,13)'); -- overlaps
 ERROR:  conflicting key value violates exclusion constraint "temporal_rng4_pk"
 DETAIL:  Key (id, valid_at)=([1,2), [2,13)) conflicts with existing key (id, valid_at)=([1,2), [1,13)).

@@ -1667,6 +1667,7 @@ select '[4,5)'::restrictedrange @> 7;
 
 select '[4,50)'::restrictedrange @> 7; -- should fail
 ERROR:  value for domain restrictedrange violates check constraint "restrictedrange_check"
+DETAIL:  Check constraint expression: (upper(VALUE) < 10).
 drop domain restrictedrange;
 --
 -- Test multiple range types over the same subtype

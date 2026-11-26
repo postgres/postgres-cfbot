@@ -1189,6 +1189,7 @@ load_domaintype_info(TypeCacheEntry *typentry)
 			r = makeNode(DomainConstraintState);
 			r->constrainttype = DOM_CONSTRAINT_CHECK;
 			r->name = pstrdup(NameStr(c->conname));
+			r->check_expr_bin = pstrdup(constring);
 			r->check_expr = copyObject(check_expr);
 			r->check_exprstate = NULL;
 
@@ -1266,6 +1267,7 @@ load_domaintype_info(TypeCacheEntry *typentry)
 
 		r->constrainttype = DOM_CONSTRAINT_NOTNULL;
 		r->name = pstrdup("NOT NULL");
+		r->check_expr_bin = NULL;
 		r->check_expr = NULL;
 		r->check_exprstate = NULL;
 
@@ -1355,6 +1357,7 @@ prep_domain_constraints(List *constraints, MemoryContext execctx)
 		newr = makeNode(DomainConstraintState);
 		newr->constrainttype = r->constrainttype;
 		newr->name = r->name;
+		newr->check_expr_bin = r->check_expr_bin;
 		newr->check_expr = r->check_expr;
 		newr->check_exprstate = ExecInitExpr(r->check_expr, NULL);
 

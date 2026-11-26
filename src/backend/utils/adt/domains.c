@@ -34,9 +34,11 @@
 #include "catalog/pg_type.h"
 #include "executor/executor.h"
 #include "lib/stringinfo.h"
+#include "nodes/readfuncs.h"
 #include "utils/builtins.h"
 #include "utils/expandeddatum.h"
 #include "utils/lsyscache.h"
+#include "utils/ruleutils.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -191,11 +193,16 @@ domain_check_input(Datum value, bool isnull, DomainIOData *my_extra,
 
 					if (!ExecCheck(con->check_exprstate, econtext))
 					{
+						char	   *check_desc;
+
+						check_desc = deparse_expression(stringToNode(con->check_expr_bin),
+														NIL, false, false);
 						errsave(escontext,
 								(errcode(ERRCODE_CHECK_VIOLATION),
 								 errmsg("value for domain %s violates check constraint \"%s\"",
 										format_type_be(my_extra->domain_type),
 										con->name),
+								 errdetail("Check constraint expression: %s.", check_desc),
 								 errdomainconstraint(my_extra->domain_type,
 													 con->name)));
 						goto fail;

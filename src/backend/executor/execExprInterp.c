@@ -66,6 +66,7 @@
 #include "miscadmin.h"
 #include "nodes/miscnodes.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/readfuncs.h"
 #include "pgstat.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -77,6 +78,7 @@
 #include "utils/jsonpath.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/ruleutils.h"
 #include "utils/timestamp.h"
 #include "utils/tuplesort.h"
 #include "utils/typcache.h"
@@ -4499,13 +4501,20 @@ ExecEvalConstraintCheck(ExprState *state, ExprEvalStep *op)
 {
 	if (!*op->d.domaincheck.checknull &&
 		!DatumGetBool(*op->d.domaincheck.checkvalue))
+	{
+		char	   *check_desc;
+
+		check_desc = deparse_expression(stringToNode(op->d.domaincheck.constraint->check_expr_bin),
+													 NIL, false, false);
 		errsave((Node *) op->d.domaincheck.escontext,
 				(errcode(ERRCODE_CHECK_VIOLATION),
 				 errmsg("value for domain %s violates check constraint \"%s\"",
 						format_type_be(op->d.domaincheck.resulttype),
-						op->d.domaincheck.constraintname),
+						op->d.domaincheck.constraint->name),
+				 errdetail("Check constraint expression: %s.", check_desc),
 				 errdomainconstraint(op->d.domaincheck.resulttype,
-									 op->d.domaincheck.constraintname)));
+									 op->d.domaincheck.constraint->name)));
+	}
 }
 
 /*
