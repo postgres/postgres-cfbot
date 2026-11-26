@@ -790,6 +790,7 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 		WalRcvExecResult *pubres;
 		TupleTableSlot *tslot;
 		Oid			attrsRow[] = {INT2VECTOROID};
+		int64		nrows;
 
 		/* Build the pub_names comma-separated string. */
 		pub_names = makeStringInfo();
@@ -839,6 +840,22 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 					 errmsg("could not fetch column list info for table \"%s.%s\" from publisher: %s",
 							nspname, relname, pubres->err)));
 
+		nrows = tuplestore_tuple_count(pubres->tuplestore);
+
+		/*
+		 * No rows means that none of the subscribed publications publishes
+		 * the table anymore, for instance because a publication was dropped
+		 * or the table was removed from it after the subscription was created
+		 * or refreshed.  Don't take that as "no column list", which would
+		 * copy all columns.
+		 */
+		if (nrows == 0)
+			ereport(ERROR,
+					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					errmsg("table \"%s.%s\" is not published by any of the publications of subscription \"%s\"",
+						   nspname, relname, MySubscription->name),
+					errhint("Use ALTER SUBSCRIPTION ... REFRESH PUBLICATION to remove the table from the subscription, or publish the table again."));
+
 		/*
 		 * We don't support the case where the column list is different for
 		 * the same table when combining publications. See comments atop
@@ -847,11 +864,13 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 		 * still need to check here in case the column list was changed after
 		 * creating the subscription and before the sync worker is started.
 		 */
-		if (tuplestore_tuple_count(pubres->tuplestore) > 1)
+		if (nrows > 1)
 			ereport(ERROR,
 					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					errmsg("cannot use different column lists for table \"%s.%s\" in different publications",
 						   nspname, relname));
+
+		Assert(nrows == 1);
 
 		/*
 		 * Get the column list and build a single bitmap with the attnums.
@@ -1031,6 +1050,20 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 			ereport(ERROR,
 					(errmsg("could not fetch table WHERE clause info for table \"%s.%s\" from publisher: %s",
 							nspname, relname, res->err)));
+
+		/*
+		 * No rows means that none of the subscribed publications publishes
+		 * the table anymore.  As the column-list query above did return rows,
+		 * this can only happen if a publication was dropped, or the table was
+		 * removed from it, after that query.  Don't take that as "no row
+		 * filter", which would copy all rows.
+		 */
+		if (tuplestore_tuple_count(res->tuplestore) == 0)
+			ereport(ERROR,
+					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					errmsg("table \"%s.%s\" is not published by any of the publications of subscription \"%s\"",
+						   nspname, relname, MySubscription->name),
+					errhint("Use ALTER SUBSCRIPTION ... REFRESH PUBLICATION to remove the table from the subscription, or publish the table again."));
 
 		/*
 		 * Multiple row filter expressions for the same table will be combined

@@ -135,6 +135,64 @@ is( $result, qq(1
 	'check that the incremental data is replicated after the publication is created'
 );
 
+# Ensure that the initial sync of a table that is no longer published by any
+# of the subscription's publications fails instead of copying the whole table,
+# ignoring its column list and row filter.  Test both a dropped publication
+# and a table removed from the publication before the sync starts.
+$node_publisher->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_4 (a int, b int, c int);
+	INSERT INTO tab_4 SELECT i, i, i FROM generate_series(1, 5) i;
+	CREATE TABLE tab_5 (a int, b int, c int);
+	INSERT INTO tab_5 SELECT i, i, i FROM generate_series(1, 5) i;
+	CREATE PUBLICATION tap_pub_4 FOR TABLE tab_4 (a, c) WHERE (a > 3);
+	CREATE PUBLICATION tap_pub_5 FOR TABLE tab_5 (a, c) WHERE (a > 3);
+));
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	CREATE TABLE tab_4 (a int, b int, c int);
+	CREATE TABLE tab_5 (a int, b int, c int);
+));
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION tap_sub_2 CONNECTION '$publisher_connstr' PUBLICATION tap_pub_4, tap_pub_5 WITH (enabled = false)"
+);
+
+$node_publisher->safe_psql(
+	'postgres', qq(
+	DROP PUBLICATION tap_pub_4;
+	ALTER PUBLICATION tap_pub_5 DROP TABLE tab_5;
+));
+
+$offset = -s $node_subscriber->logfile;
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_2 ENABLE");
+
+$node_subscriber->wait_for_log(
+	qr/ERROR: ( [A-Z0-9]+:)? table "public.tab_4" is not published by any of the publications of subscription "tap_sub_2"/,
+	$offset);
+$node_subscriber->wait_for_log(
+	qr/ERROR: ( [A-Z0-9]+:)? table "public.tab_5" is not published by any of the publications of subscription "tap_sub_2"/,
+	$offset);
+
+$result = $node_subscriber->safe_psql('postgres',
+	"SELECT (SELECT count(*) FROM tab_4), (SELECT count(*) FROM tab_5)");
+is($result, qq(0|0),
+	'check that no data is copied for tables that are no longer published');
+
+# REFRESH PUBLICATION removes the tables from the subscription.
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_2 REFRESH PUBLICATION");
+
+$result = $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM pg_subscription_rel WHERE srrelid IN ('tab_4'::regclass, 'tab_5'::regclass)"
+);
+is($result, qq(0),
+	'check that REFRESH PUBLICATION removes the tables from the subscription');
+
+$node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_2");
+$node_publisher->safe_psql('postgres', "DROP PUBLICATION tap_pub_5");
+
 # shutdown
 $node_subscriber->stop('fast');
 $node_publisher->stop('fast');

@@ -185,6 +185,20 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
       that are still part of the publication.
      </para>
 
+     <note>
+      <para>
+       This command cannot be run while the subscription is disabled.  If the
+       subscription was disabled by
+       <link linkend="sql-createsubscription-params-with-disable-on-error"><literal>disable_on_error</literal></link>
+       due to an error that the refresh would resolve (for example, an error
+       involving a table that is no longer published), temporarily set
+       <literal>disable_on_error</literal> to <literal>false</literal>,
+       <link linkend="sql-altersubscription-params-enable">re-enable</link> the
+       subscription, perform the refresh, and then set
+       <literal>disable_on_error</literal> back to <literal>true</literal>.
+      </para>
+    </note>
+
      <para>
       <replaceable>refresh_option</replaceable> specifies additional options for the
       refresh operation.  The supported options are:

@@ -482,6 +482,15 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
           replication from the publisher. The default is
           <literal>false</literal>.
          </para>
+         <note>
+          <para>
+           If the underlying error persists, the subscription might be disabled
+           again after it is re-enabled.  If the error can only be resolved by
+           <link linkend="sql-altersubscription-params-refresh-publication"><command>ALTER SUBSCRIPTION ... REFRESH PUBLICATION</command></link>,
+           see that command for how to proceed, because it cannot be run while the
+           subscription is disabled.
+          </para>
+         </note>
         </listitem>
        </varlistentry>
 
