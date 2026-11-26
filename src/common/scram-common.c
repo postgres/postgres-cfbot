@@ -73,7 +73,12 @@ scram_SaltedPassword(const char *password,
 
 	memcpy(result, Ui_prev, key_length);
 
-	/* Subsequent iterations */
+	/*
+	 * Subsequent iterations.  The key is the same for every iteration, so let
+	 * the HMAC context keep it: setting it again would also look up the
+	 * digest algorithm again, which with OpenSSL takes process-wide locks and
+	 * serializes the threads of a multi-threaded client.
+	 */
 	for (i = 1; i < iterations; i++)
 	{
 #ifndef FRONTEND
@@ -84,7 +89,7 @@ scram_SaltedPassword(const char *password,
 		CHECK_FOR_INTERRUPTS();
 #endif
 
-		if (pg_hmac_init(hmac_ctx, (const uint8 *) password, password_len) < 0 ||
+		if (pg_hmac_init(hmac_ctx, NULL, 0) < 0 ||
 			pg_hmac_update(hmac_ctx, (uint8 *) Ui_prev, key_length) < 0 ||
 			pg_hmac_final(hmac_ctx, Ui, key_length) < 0)
 		{

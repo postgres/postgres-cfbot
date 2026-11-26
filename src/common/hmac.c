@@ -44,6 +44,7 @@ typedef enum pg_hmac_errno
 	PG_HMAC_ERROR_NONE = 0,
 	PG_HMAC_ERROR_OOM,
 	PG_HMAC_ERROR_INTERNAL,
+	PG_HMAC_ERROR_NO_KEY,
 } pg_hmac_errno;
 
 /* Internal pg_hmac_ctx structure */
@@ -55,6 +56,7 @@ struct pg_hmac_ctx
 	const char *errreason;
 	int			block_size;
 	int			digest_size;
+	bool		keyed;			/* do k_ipad and k_opad hold a key? */
 
 	/*
 	 * Use the largest block size among supported options.  This wastes some
@@ -147,6 +149,29 @@ pg_hmac_init(pg_hmac_ctx *ctx, const uint8 *key, size_t len)
 	digest_size = ctx->digest_size;
 	block_size = ctx->block_size;
 
+	/*
+	 * A NULL key reuses the key of the previous call: k_ipad and k_opad
+	 * still hold it, so only the running hash has to be reset.
+	 */
+	if (key == NULL)
+	{
+		if (!ctx->keyed)
+		{
+			ctx->error = PG_HMAC_ERROR_NO_KEY;
+			return -1;
+		}
+
+		if (pg_cryptohash_init(ctx->hash) < 0 ||
+			pg_cryptohash_update(ctx->hash, ctx->k_ipad, ctx->block_size) < 0)
+		{
+			ctx->error = PG_HMAC_ERROR_INTERNAL;
+			ctx->errreason = pg_cryptohash_error(ctx->hash);
+			return -1;
+		}
+
+		return 0;
+	}
+
 	memset(ctx->k_opad, HMAC_OPAD, ctx->block_size);
 	memset(ctx->k_ipad, HMAC_IPAD, ctx->block_size);
 
@@ -210,6 +235,7 @@ pg_hmac_init(pg_hmac_ctx *ctx, const uint8 *key, size_t len)
 
 	if (shrinkbuf)
 		FREE(shrinkbuf);
+	ctx->keyed = true;
 	return 0;
 }
 
@@ -322,6 +348,8 @@ pg_hmac_error(pg_hmac_ctx *ctx)
 			return _("internal error");
 		case PG_HMAC_ERROR_OOM:
 			return _("out of memory");
+		case PG_HMAC_ERROR_NO_KEY:
+			return _("no key set");
 	}
 
 	Assert(false);				/* cannot be reached */
