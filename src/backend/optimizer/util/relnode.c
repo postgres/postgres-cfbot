@@ -66,6 +66,9 @@ static List *build_joinrel_restrictlist(PlannerInfo *root,
 #ifdef USE_ASSERT_CHECKING
 static bool no_duplicate_clause_serials(List *clauses);
 #endif
+static bool clone_clause_is_still_needed(PlannerInfo *root,
+											RestrictInfo *rinfo,
+											Relids available_relids);
 static void build_joinrel_joinlist(RelOptInfo *joinrel,
 								   RelOptInfo *outer_rel,
 								   RelOptInfo *inner_rel);
@@ -1454,6 +1457,82 @@ no_duplicate_clause_serials(List *clauses)
 #endif
 
 /*
+ * clone_clause_is_still_needed
+ *		Check whether a clone clause made redundant by constant propagation
+ *		is still needed at this join level.
+ *
+ * reconsider_outer_join_clauses() marks such a clause with norm_selec > 1.
+ * Usually it can be omitted because the derived constant restrictions imply
+ * it.  However, it is still needed if its outer operand has already been
+ * null-extended by a pushed-down outer join whose OJ relid has not yet been
+ * added to the joinrel.  In that case the strict original clause must reject
+ * the null-extended row.
+ */
+static bool
+clone_clause_is_still_needed(PlannerInfo *root, RestrictInfo *rinfo,
+								Relids available_relids)
+{
+	Relids		left_baserels;
+	Relids		right_baserels;
+	Relids		outer_baserels;
+
+	Assert(rinfo->norm_selec > 1.0);
+	Assert(rinfo->has_clone || rinfo->is_clone);
+
+	/*
+	 * Identify the relids used by the clause's outer operand.  Strip OJ
+	 * relids first, since clone variants can carry different nulling bits.
+	 */
+	left_baserels = bms_intersect(rinfo->left_relids, root->all_baserels);
+	right_baserels = bms_intersect(rinfo->right_relids, root->all_baserels);
+	if (bms_is_subset(left_baserels, rinfo->outer_relids) &&
+		!bms_overlap(right_baserels, rinfo->outer_relids))
+		outer_baserels = left_baserels;
+	else if (bms_is_subset(right_baserels, rinfo->outer_relids) &&
+			 !bms_overlap(left_baserels, rinfo->outer_relids))
+		outer_baserels = right_baserels;
+	else
+	{
+		bms_free(left_baserels);
+		bms_free(right_baserels);
+		return true;			/* be conservative */
+	}
+
+	foreach_node(SpecialJoinInfo, sjinfo, root->join_info_list)
+	{
+		/*
+		 * This OJ is interesting only if it can null the outer operand, is
+		 * incompatible with this clone variant, and can have its relid
+		 * withheld after it has been physically performed.
+		 */
+		if (sjinfo->ojrelid == 0 ||
+			!bms_is_member(sjinfo->ojrelid, rinfo->incompatible_relids) ||
+			!bms_overlap(sjinfo->syn_righthand, outer_baserels) ||
+			bms_is_empty(sjinfo->commute_below_l))
+			continue;
+
+		/*
+		 * Both minimum inputs are present, so this OJ has physically
+		 * null-extended its RHS.  Its relid is nevertheless absent because
+		 * a commuting lower outer join has not been completed yet.
+		 */
+		if (!bms_is_member(sjinfo->ojrelid, available_relids) &&
+			bms_is_subset(sjinfo->min_lefthand, available_relids) &&
+			bms_is_subset(sjinfo->min_righthand, available_relids) &&
+			!bms_is_subset(sjinfo->commute_below_l, available_relids))
+		{
+			bms_free(left_baserels);
+			bms_free(right_baserels);
+			return true;
+		}
+	}
+
+	bms_free(left_baserels);
+	bms_free(right_baserels);
+	return false;
+}
+
+/*
  * build_joinrel_restrictlist
  * build_joinrel_joinlist
  *	  These routines build lists of restriction and join clauses for a
@@ -1584,6 +1663,11 @@ subbuild_joinrel_restrictlist(PlannerInfo *root,
 				if (!bms_is_subset(rinfo->required_relids, both_input_relids))
 					continue;
 				if (bms_overlap(rinfo->incompatible_relids, both_input_relids))
+					continue;
+				/* Drop a redundant clone unless a deferred OJ still needs it. */
+				if (rinfo->norm_selec > 1.0 &&
+					!clone_clause_is_still_needed(root, rinfo,
+												  both_input_relids))
 					continue;
 			}
 			else
@@ -1827,6 +1911,9 @@ get_baserel_parampathinfo(PlannerInfo *root, RelOptInfo *baserel,
 				continue;
 			if (bms_is_member(rinfo->rinfo_serial, pserials))
 				continue;
+			if (rinfo->norm_selec > 1.0 &&
+				!clone_clause_is_still_needed(root, rinfo, joinrelids))
+				continue;
 		}
 
 		pclauses = lappend(pclauses, rinfo);
@@ -1972,6 +2059,9 @@ get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,
 			if (bms_overlap(rinfo->incompatible_relids, join_and_req))
 				continue;
 			if (bms_is_member(rinfo->rinfo_serial, pserials))
+				continue;
+			if (rinfo->norm_selec > 1.0 &&
+				!clone_clause_is_still_needed(root, rinfo, join_and_req))
 				continue;
 		}
 
