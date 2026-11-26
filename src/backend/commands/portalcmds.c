@@ -120,6 +120,22 @@ PerformCursorOpen(ParseState *pstate, DeclareCursorStmt *cstmt, ParamListInfo pa
 					  list_make1(plan),
 					  NULL);
 
+	/*
+	 * If the query reads ephemeral named relations, such as a trigger's
+	 * transition tables, the portal needs the query environment to find them.
+	 * When that environment belongs to an SPI connection, SPI_finish() drops
+	 * the portal along with it, as it does for cursors opened through SPI.
+	 * Other cursors are left alone, so they keep their current lifetime.
+	 */
+	foreach_node(RangeTblEntry, rte, plan->rtable)
+	{
+		if (rte->rtekind == RTE_NAMEDTUPLESTORE)
+		{
+			portal->queryEnv = pstate->p_queryEnv;
+			break;
+		}
+	}
+
 	/*----------
 	 * Also copy the outer portal's parameter list into the inner portal's
 	 * memory context.  We want to pass down the parameter values in case we

@@ -2950,3 +2950,34 @@ INSERT INTO trignulldiff_child VALUES (2, 444, NULL) RETURNING *;
 
 DROP TABLE IF EXISTS trignulldiff_parent CASCADE;
 DROP FUNCTION IF EXISTS trignulldiff_return_parent();
+
+--
+-- DECLARE CURSOR inside a trigger can read the transition tables, and the
+-- cursor is closed when the trigger function returns
+--
+create table transition_cursor_tbl (a int);
+create function transition_cursor_trig() returns trigger
+language plpgsql as $$
+declare
+  c refcursor := 'transition_cursor';
+  v int;
+  n int := 0;
+begin
+  execute 'declare transition_cursor cursor for select a from new_table';
+  loop
+    fetch c into v;
+    exit when not found;
+    n := n + 1;
+  end loop;
+  raise notice 'transition cursor rows: %', n;
+  return null;
+end $$;
+create trigger transition_cursor_trig after insert on transition_cursor_tbl
+  referencing new table as new_table
+  for each statement execute function transition_cursor_trig();
+begin;
+insert into transition_cursor_tbl values (1), (2), (3);
+select count(*) from pg_cursors where name = 'transition_cursor';
+commit;
+drop table transition_cursor_tbl;
+drop function transition_cursor_trig();
