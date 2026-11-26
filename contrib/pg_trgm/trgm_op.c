@@ -185,30 +185,52 @@ _PG_init(void)
 	MarkGUCPrefixReserved("pg_trgm");
 }
 
-#define CMPCHAR(a,b) ( ((a)==(b)) ? 0 : ( ((a)<(b)) ? -1 : 1 ) )
-
 /*
  * Functions for comparing two trgms while treating each char as "signed char" or
  * "unsigned char".
+ *
+ * Trigrams are stored in memory as trg[0], trg[1], trg[2], ordered from most
+ * significant trigram to least significant trigram.
+ * The code adheres to that by shifting trg[0] to the most significant byte,
+ * trg[1] to the second most significant byte anbd trg[2] to the last significant
+ * byte. Only loading bytes makes this code endian-agnostic.
+ *
  */
+static pg_always_inline int
+cmptrgm(const trgm a, const trgm b, bool char_is_signed)
+{
+	const uint8 *ua = (const uint8 *)a;
+	const uint8 *ub = (const uint8 *)b;
+	uint32 ia 		= ((uint32)ua[0] << 16) | ((uint32)ua[1] << 8) | ua[2];
+	uint32 ib 		= ((uint32)ub[0] << 16) | ((uint32)ub[1] << 8) | ub[2];
+
+	/*
+	 * The signed comparator flips the sign bit of each of the three trigrams to
+	 * ensure correct ordering on compilers that tread char as signed.
+	 *
+	 * Background: When treated as unsigned, positive numbers sort after negative
+	 * numbers because negative numbers have the sign bit set in two's complement.
+	 * Flipping the sign bit reverses this order.
+	 */
+	if (char_is_signed)
+	{
+		ia ^= 0x00808080;
+		ib ^= 0x00808080;
+	}
+
+	return (ia < ib) ? -1 : ((ia > ib) ? 1 : 0);
+}
+
 static inline int
 CMPTRGM_SIGNED(const void *a, const void *b)
 {
-#define CMPPCHAR_S(a,b,i)  CMPCHAR( *(((const signed char*)(a))+i), *(((const signed char*)(b))+i) )
-
-	return CMPPCHAR_S(a, b, 0) ? CMPPCHAR_S(a, b, 0)
-		: (CMPPCHAR_S(a, b, 1) ? CMPPCHAR_S(a, b, 1)
-		   : CMPPCHAR_S(a, b, 2));
+	return cmptrgm(a, b, true);
 }
 
 static inline int
 CMPTRGM_UNSIGNED(const void *a, const void *b)
 {
-#define CMPPCHAR_UNS(a,b,i)  CMPCHAR( *(((const unsigned char*)(a))+i), *(((const unsigned char*)(b))+i) )
-
-	return CMPPCHAR_UNS(a, b, 0) ? CMPPCHAR_UNS(a, b, 0)
-		: (CMPPCHAR_UNS(a, b, 1) ? CMPPCHAR_UNS(a, b, 1)
-		   : CMPPCHAR_UNS(a, b, 2));
+	return cmptrgm(a, b, false);
 }
 
 /*
@@ -226,33 +248,6 @@ CMPTRGM_CHOOSE(const void *a, const void *b)
 	return CMPTRGM(a, b);
 }
 
-#define ST_SORT trigram_qsort_signed
-#define ST_ELEMENT_TYPE_VOID
-#define ST_COMPARE(a, b) CMPTRGM_SIGNED(a, b)
-#define ST_SCOPE static
-#define ST_DEFINE
-#define ST_DECLARE
-#include "lib/sort_template.h"
-
-#define ST_SORT trigram_qsort_unsigned
-#define ST_ELEMENT_TYPE_VOID
-#define ST_COMPARE(a, b) CMPTRGM_UNSIGNED(a, b)
-#define ST_SCOPE static
-#define ST_DEFINE
-#define ST_DECLARE
-#include "lib/sort_template.h"
-
-/* Sort an array of trigrams, handling signedness correctly */
-static void
-trigram_qsort(trgm *array, size_t n)
-{
-	if (GetDefaultCharSignedness())
-		trigram_qsort_signed(array, n, sizeof(trgm));
-	else
-		trigram_qsort_unsigned(array, n, sizeof(trgm));
-}
-
-
 /*
  * Compare two trigrams for equality.  This has the same signature as
  * comparison functions used for sorting, so that this can be used with
@@ -268,10 +263,90 @@ CMPTRGM_EQ(const void *a, const void *b)
 	return aa[0] != bb[0] || aa[1] != bb[1] || aa[2] != bb[2] ? 1 : 0;
 }
 
-/* Deduplicate an array of trigrams */
-static size_t
-trigram_qunique(trgm *array, size_t n)
+/*
+ * Needed to properly handle negative numbers in case char is signed.
+ */
+static inline unsigned char
+radix_key(char x, bool char_is_signed)
 {
+	return char_is_signed ? x ^ 0x80 : x;
+}
+
+static inline void
+trigram_radix_sort_recurse(trgm *trg, size_t count, int base, bool char_is_signed)
+{
+	if (count < 64)
+	{
+		for (size_t i = 1; i < count; i++)
+		{
+			trgm	tmp;
+			size_t	j = i;
+
+			memcpy(&tmp, trg[i], sizeof(trgm));
+
+			while (j > 0 && cmptrgm(trg[j - 1], tmp, char_is_signed) > 0)
+			{
+				memcpy(trg[j], trg[j - 1], sizeof(trgm));
+				j--;
+			}
+
+			memcpy(trg[j], &tmp, sizeof(trgm));
+		}
+	}
+	else
+	{
+		uint32_t freqs[256];
+		uint32_t starts[256];
+		uint32_t cur[256];
+
+		memset(freqs, 0, sizeof(freqs));
+		for (size_t i = 0; i < count; i++)
+			freqs[radix_key(trg[i][base], char_is_signed)]++;
+
+		starts[0] = 0;
+		for (int k = 1; k < 256; k++)
+			starts[k] = starts[k - 1] + freqs[k - 1];
+
+		memcpy(cur, starts, sizeof(cur));
+
+		for (size_t i = 0; i < count; i++)
+		{
+			unsigned char b = radix_key(trg[i][base], char_is_signed);
+
+			while (i < starts[b] || i >= starts[b] + freqs[b])
+			{
+				const char c = trg[i][base];
+				size_t j = cur[b];
+				trgm tmp;
+
+				while (trg[j][base] == c)
+					j++;
+
+				Assert(j < starts[b] + freqs[b]);
+
+				memcpy(tmp, trg[i], sizeof(trgm));
+				memcpy(trg[i], trg[j], sizeof(trgm));
+				memcpy(trg[j], tmp, sizeof(trgm));
+
+				cur[b] = j + 1;
+				b = radix_key(trg[i][base], char_is_signed);
+			}
+		}
+
+		for (int k = 0; k < 256; k++)
+			if (freqs[k] > 1 && base < 2)
+				trigram_radix_sort_recurse(trg + starts[k], freqs[k], base + 1, char_is_signed);
+	}
+}
+
+static size_t
+trigram_sort_and_unique(trgm *array, size_t n)
+{
+	if (GetDefaultCharSignedness())
+		trigram_radix_sort_recurse(array, n, 0, true);
+	else
+		trigram_radix_sort_recurse(array, n, 0, false);
+
 	return qunique(array, n, sizeof(trgm), CMPTRGM_EQ);
 }
 
@@ -611,10 +686,7 @@ generate_trgm(char *str, int slen)
 	 * Make trigrams unique.
 	 */
 	if (len > 1)
-	{
-		trigram_qsort(GETARR(trg), len);
-		len = trigram_qunique(GETARR(trg), len);
-	}
+		len = trigram_sort_and_unique(GETARR(trg), len);
 
 	SET_VARSIZE(trg, CALCGTSIZE(ARRKEY, len));
 
@@ -1142,10 +1214,7 @@ generate_wildcard_trgm(const char *str, int slen)
 	trg = arr.datum;
 	len = arr.length;
 	if (len > 1)
-	{
-		trigram_qsort(GETARR(trg), len);
-		len = trigram_qunique(GETARR(trg), len);
-	}
+		len = trigram_sort_and_unique(GETARR(trg), len);
 
 	trg->flag = ARRKEY;
 	SET_VARSIZE(trg, CALCGTSIZE(ARRKEY, len));
