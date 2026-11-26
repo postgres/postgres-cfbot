@@ -99,6 +99,7 @@
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/xml.h"
@@ -2543,6 +2544,8 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 		Datum	   *elem_values;
 		bool	   *elem_nulls;
 		StringInfoData buf;
+		MemoryContext elemcxt;
+		MemoryContext oldcxt;
 		int			i;
 
 		array = DatumGetArrayTypeP(value);
@@ -2556,8 +2559,16 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 
 		initStringInfo(&buf);
 
+		/* Free per-element garbage, which can be large, after each element */
+		elemcxt = AllocSetContextCreate(CurrentMemoryContext,
+										"map_sql_value_to_xml_value temporary cxt",
+										ALLOCSET_DEFAULT_SIZES);
+		oldcxt = MemoryContextSwitchTo(elemcxt);
+
 		for (i = 0; i < num_elems; i++)
 		{
+			CHECK_FOR_INTERRUPTS();
+
 			if (elem_nulls[i])
 				continue;
 			appendStringInfoString(&buf, "<element>");
@@ -2565,8 +2576,12 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 								   map_sql_value_to_xml_value(elem_values[i],
 															  elmtype, true));
 			appendStringInfoString(&buf, "</element>");
+
+			MemoryContextReset(elemcxt);
 		}
 
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextDelete(elemcxt);
 		pfree(elem_values);
 		pfree(elem_nulls);
 
