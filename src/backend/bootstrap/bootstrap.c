@@ -1106,15 +1106,15 @@ boot_get_role_oid(const char *rolname)
 /* ----------------
  *		AllocateAttribute
  *
- * Note: bootstrap never sets any per-column ACLs, so we only need
- * ATTRIBUTE_FIXED_PART_SIZE space per attribute.
+ * Note: bootstrap never sets any variable-length fields in pg_attribute, so
+ * we only need to allocate the fixed portion.
  * ----------------
  */
 static Form_pg_attribute
 AllocateAttribute(void)
 {
 	return (Form_pg_attribute)
-		MemoryContextAllocZero(TopMemoryContext, ATTRIBUTE_FIXED_PART_SIZE);
+		MemoryContextAllocZero(TopMemoryContext, sizeof(FormData_pg_attribute));
 }
 
 /*

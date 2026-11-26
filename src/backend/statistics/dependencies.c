@@ -391,8 +391,7 @@ statext_dependencies_build(StatsBuildData *data)
 			if (degree == 0.0)
 				continue;
 
-			d = (MVDependency *) palloc0(offsetof(MVDependency, attributes)
-										 + k * sizeof(AttrNumber));
+			d = palloc0_flex_array(MVDependency, attributes, k);
 
 			/* copy the dependency (and keep the indexes into stxkeys) */
 			d->degree = degree;
@@ -556,8 +555,7 @@ statext_dependencies_deserialize(bytea *data)
 		Assert((k >= 2) && (k <= STATS_MAX_DIMENSIONS));
 
 		/* now that we know the number of attributes, allocate the dependency */
-		d = (MVDependency *) palloc0(offsetof(MVDependency, attributes)
-									 + (k * sizeof(AttrNumber)));
+		d = palloc0_flex_array(MVDependency, attributes, k);
 
 		d->degree = degree;
 		d->nattributes = k;

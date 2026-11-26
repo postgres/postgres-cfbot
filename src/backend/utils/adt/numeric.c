@@ -7636,7 +7636,7 @@ make_result_safe(const NumericVar *var, Node *escontext)
 			  sign == NUMERIC_NINF))
 			elog(ERROR, "invalid numeric sign value 0x%x", sign);
 
-		result = (Numeric) palloc(NUMERIC_HDRSZ_SHORT);
+		result = palloc_flex_array(struct NumericData, choice.n_short.n_data, 0);
 
 		SET_VARSIZE(result, NUMERIC_HDRSZ_SHORT);
 		result->choice.n_header = sign;

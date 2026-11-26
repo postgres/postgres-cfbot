@@ -53,8 +53,6 @@ typedef struct StatEntry
 	pg_attribute_counted_by(lenlexeme) char lexeme[FLEXIBLE_ARRAY_MEMBER];
 } StatEntry;
 
-#define STATENTRYHDRSZ	(offsetof(StatEntry, lexeme))
-
 typedef struct
 {
 	int32		weight;
@@ -2372,7 +2370,8 @@ insertStatEntry(MemoryContext persistentContext, TSVectorStat *stat, TSVector tx
 
 	if (node == NULL)
 	{
-		node = MemoryContextAlloc(persistentContext, STATENTRYHDRSZ + we->len);
+		node = MemoryContextAlloc(persistentContext,
+								  flex_size(StatEntry, lexeme, we->len));
 		node->left = node->right = NULL;
 		node->ndoc = 1;
 		node->nentry = n;

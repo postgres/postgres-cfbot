@@ -1097,7 +1097,7 @@ generate_wildcard_trgm(const char *str, int slen)
 
 	if (slen + LPADDING + RPADDING < 3 || slen == 0)
 	{
-		trg = (TRGM *) palloc(TRGMHDRSIZE);
+		trg = palloc_flex_array(TRGM, data, 0);
 		trg->flag = ARRKEY;
 		SET_VARSIZE(trg, TRGMHDRSIZE);
 		return trg;

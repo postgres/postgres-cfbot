@@ -35,10 +35,10 @@
  * (except pg_malloc_extended with MCXT_ALLOC_NO_OOM)
  */
 pg_attribute_returns_nonnull extern char *pg_strdup(const char *in);
-pg_attribute_returns_nonnull extern void *pg_malloc(size_t size);
-pg_attribute_returns_nonnull extern void *pg_malloc0(size_t size);
-extern void *pg_malloc_extended(size_t size, int flags);
-pg_attribute_returns_nonnull extern void *pg_realloc(void *ptr, size_t size);
+pg_attribute_alloc_size(1) pg_attribute_returns_nonnull extern void *pg_malloc(size_t size);
+pg_attribute_alloc_size(1) pg_attribute_returns_nonnull extern void *pg_malloc0(size_t size);
+pg_attribute_alloc_size(1) extern void *pg_malloc_extended(size_t size, int flags);
+pg_attribute_alloc_size(2) pg_attribute_returns_nonnull extern void *pg_realloc(void *ptr, size_t size);
 extern void pg_free(void *ptr);
 
 /*
@@ -46,10 +46,10 @@ extern void pg_free(void *ptr);
  */
 extern Size add_size(Size s1, Size s2);
 extern Size mul_size(Size s1, Size s2);
-pg_attribute_returns_nonnull extern void *pg_malloc_mul(Size s1, Size s2);
-pg_attribute_returns_nonnull extern void *pg_malloc0_mul(Size s1, Size s2);
-extern void *pg_malloc_mul_extended(Size s1, Size s2, int flags);
-pg_attribute_returns_nonnull extern void *pg_realloc_mul(void *p, Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) pg_attribute_returns_nonnull extern void *pg_malloc_mul(Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) pg_attribute_returns_nonnull extern void *pg_malloc0_mul(Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) extern void *pg_malloc_mul_extended(Size s1, Size s2, int flags);
+pg_attribute_alloc_size(2, 3) pg_attribute_returns_nonnull extern void *pg_realloc_mul(void *p, Size s1, Size s2);
 
 /*
  * Variants with easier notation and more type safety
@@ -60,6 +60,13 @@ pg_attribute_returns_nonnull extern void *pg_realloc_mul(void *p, Size s1, Size 
  */
 #define pg_malloc_object(type) ((type *) pg_malloc(sizeof(type)))
 #define pg_malloc0_object(type) ((type *) pg_malloc0(sizeof(type)))
+
+/*
+ * Allocate space for a struct of type "type" whose flexible array member
+ * "member" holds "count" elements.  See flex_size() for details.
+ */
+#define pg_malloc_flex_array(type, member, count) ((type *) pg_malloc(flex_size(type, member, count)))
+#define pg_malloc0_flex_array(type, member, count) ((type *) pg_malloc0(flex_size(type, member, count)))
 
 /*
  * Allocate space for "count" objects of type "type"
@@ -77,20 +84,22 @@ pg_attribute_returns_nonnull extern void *pg_realloc_mul(void *p, Size s1, Size 
 /* Equivalent functions, deliberately named the same as backend functions */
 pg_attribute_returns_nonnull extern char *pstrdup(const char *in);
 pg_attribute_returns_nonnull extern char *pnstrdup(const char *in, Size size);
-pg_attribute_returns_nonnull extern void *palloc(Size size);
-pg_attribute_returns_nonnull extern void *palloc0(Size size);
-extern void *palloc_extended(Size size, int flags);
-pg_attribute_returns_nonnull extern void *repalloc(void *pointer, Size size);
+pg_attribute_alloc_size(1) pg_attribute_returns_nonnull extern void *palloc(Size size);
+pg_attribute_alloc_size(1) pg_attribute_returns_nonnull extern void *palloc0(Size size);
+pg_attribute_alloc_size(1) extern void *palloc_extended(Size size, int flags);
+pg_attribute_alloc_size(2) pg_attribute_returns_nonnull extern void *repalloc(void *pointer, Size size);
 extern void pfree(void *pointer);
-pg_attribute_returns_nonnull extern void *palloc_mul(Size s1, Size s2);
-pg_attribute_returns_nonnull extern void *palloc0_mul(Size s1, Size s2);
-extern void *palloc_mul_extended(Size s1, Size s2, int flags);
-pg_attribute_returns_nonnull extern void *repalloc_mul(void *p, Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) pg_attribute_returns_nonnull extern void *palloc_mul(Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) pg_attribute_returns_nonnull extern void *palloc0_mul(Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) extern void *palloc_mul_extended(Size s1, Size s2, int flags);
+pg_attribute_alloc_size(2, 3) pg_attribute_returns_nonnull extern void *repalloc_mul(void *p, Size s1, Size s2);
 
 #define palloc_object(type) ((type *) palloc(sizeof(type)))
 #define palloc0_object(type) ((type *) palloc0(sizeof(type)))
 #define palloc_array(type, count) ((type *) palloc_mul(sizeof(type), count))
 #define palloc0_array(type, count) ((type *) palloc0_mul(sizeof(type), count))
+#define palloc_flex_array(type, member, count) ((type *) palloc(flex_size(type, member, count)))
+#define palloc0_flex_array(type, member, count) ((type *) palloc0(flex_size(type, member, count)))
 #define palloc_array_extended(type, count, flags) ((type *) palloc_mul_extended(sizeof(type), count, flags))
 #define repalloc_array(pointer, type, count) ((type *) repalloc_mul(pointer, sizeof(type), count))
 

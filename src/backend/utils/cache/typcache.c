@@ -2874,9 +2874,7 @@ load_enum_cache_data(TypeCacheEntry *tcache)
 
 	/* OK, copy the data into CacheMemoryContext */
 	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
-	enumdata = (TypeCacheEnumData *)
-		palloc(offsetof(TypeCacheEnumData, enum_values) +
-			   numitems * sizeof(EnumItem));
+	enumdata = palloc_flex_array(TypeCacheEnumData, enum_values, numitems);
 	enumdata->bitmap_base = bitmap_base;
 	enumdata->sorted_values = bms_copy(bitmap);
 	enumdata->num_values = numitems;

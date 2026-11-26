@@ -78,7 +78,9 @@ gtrgm_alloc(bool isalltrue, int siglen, BITVECP sign)
 {
 	int			flag = SIGNKEY | (isalltrue ? ALLISTRUE : 0);
 	int			size = CALCGTSIZE(flag, siglen);
-	TRGM	   *res = palloc(size);
+	TRGM	   *res;
+
+	res = palloc_flex_array(TRGM, data, size - TRGMHDRSIZE);
 
 	SET_VARSIZE(res, size);
 	res->flag = flag;

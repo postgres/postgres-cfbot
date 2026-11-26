@@ -294,6 +294,19 @@ extern "C++"
 #endif
 
 /*
+ * pg_attribute_alloc_size means the function returns a pointer to an object
+ * whose size is given by the listed argument, or by the product of the two
+ * listed arguments.  This helps the compiler check object bounds.
+ *
+ * https://gcc.gnu.org/onlinedocs/gcc/Common-Attributes.html#index-alloc_005fsize
+ */
+#if __has_attribute (alloc_size)
+#define pg_attribute_alloc_size(...) __attribute__((alloc_size(__VA_ARGS__)))
+#else
+#define pg_attribute_alloc_size(...)
+#endif
+
+/*
  * pg_attribute_nonnull means the compiler should warn if the function is
  * called with the listed arguments set to NULL.  If no arguments are
  * listed, the compiler should warn if any pointer arguments are set to NULL.
@@ -1212,6 +1225,24 @@ pg_noreturn extern void ExceptionalCondition(const char *conditionName,
  *		Return the minimum of two numbers.
  */
 #define Min(x, y)		((x) < (y) ? (x) : (y))
+
+/*
+ * flex_size
+ *		Return the size of a struct "type" whose flexible array member
+ *		"member" holds "count" elements.
+ *
+ * The result is never less than sizeof(type), so that any trailing padding
+ * of the struct is covered.  "count" is evaluated only once.
+ */
+#define flex_size(type, member, count) \
+	flex_size_impl(sizeof(type), offsetof(type, member), \
+				   sizeof(((type *) 0)->member[0]), (count))
+
+static inline size_t
+flex_size_impl(size_t structsz, size_t offset, size_t elemsz, size_t count)
+{
+	return Max(structsz, offset + count * elemsz);
+}
 
 
 /* Get a bit mask of the bits set in non-size_t aligned addresses */

@@ -4941,6 +4941,8 @@ DropRelationsAllBuffers(SMgrRelation *smgr_reln, int nlocators)
 			rels[n++] = smgr_reln[i];
 	}
 
+	pg_assume(n >= 0);
+
 	/*
 	 * If there are no non-local relations, then we're done. Release the
 	 * memory and return.

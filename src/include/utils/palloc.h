@@ -68,21 +68,21 @@ extern PGDLLIMPORT MemoryContext CurrentMemoryContext;
 /*
  * Fundamental memory-allocation operations (more are in utils/memutils.h)
  */
-pg_attribute_returns_nonnull extern void *MemoryContextAlloc(MemoryContext context, Size size);
-pg_attribute_returns_nonnull extern void *MemoryContextAllocZero(MemoryContext context, Size size);
-extern void *MemoryContextAllocExtended(MemoryContext context,
-										Size size, int flags);
-extern void *MemoryContextAllocAligned(MemoryContext context,
-									   Size size, Size alignto, int flags);
+pg_attribute_alloc_size(2) pg_attribute_returns_nonnull extern void *MemoryContextAlloc(MemoryContext context, Size size);
+pg_attribute_alloc_size(2) pg_attribute_returns_nonnull extern void *MemoryContextAllocZero(MemoryContext context, Size size);
+pg_attribute_alloc_size(2) extern void *MemoryContextAllocExtended(MemoryContext context,
+																   Size size, int flags);
+pg_attribute_alloc_size(2) extern void *MemoryContextAllocAligned(MemoryContext context,
+																  Size size, Size alignto, int flags);
 
-pg_attribute_returns_nonnull extern void *palloc(Size size);
-pg_attribute_returns_nonnull extern void *palloc0(Size size);
-extern void *palloc_extended(Size size, int flags);
-extern void *palloc_aligned(Size size, Size alignto, int flags);
-pg_nodiscard pg_attribute_returns_nonnull extern void *repalloc(void *pointer, Size size);
-pg_nodiscard extern void *repalloc_extended(void *pointer,
-											Size size, int flags);
-pg_nodiscard pg_attribute_returns_nonnull extern void *repalloc0(void *pointer, Size oldsize, Size size);
+pg_attribute_alloc_size(1) pg_attribute_returns_nonnull extern void *palloc(Size size);
+pg_attribute_alloc_size(1) pg_attribute_returns_nonnull extern void *palloc0(Size size);
+pg_attribute_alloc_size(1) extern void *palloc_extended(Size size, int flags);
+pg_attribute_alloc_size(1) extern void *palloc_aligned(Size size, Size alignto, int flags);
+pg_nodiscard pg_attribute_alloc_size(2) pg_attribute_returns_nonnull extern void *repalloc(void *pointer, Size size);
+pg_nodiscard pg_attribute_alloc_size(2) extern void *repalloc_extended(void *pointer,
+																	   Size size, int flags);
+pg_nodiscard pg_attribute_alloc_size(3) pg_attribute_returns_nonnull extern void *repalloc0(void *pointer, Size oldsize, Size size);
 extern void pfree(void *pointer);
 
 /*
@@ -90,12 +90,12 @@ extern void pfree(void *pointer);
  */
 extern Size add_size(Size s1, Size s2);
 extern Size mul_size(Size s1, Size s2);
-pg_attribute_returns_nonnull extern void *palloc_mul(Size s1, Size s2);
-pg_attribute_returns_nonnull extern void *palloc0_mul(Size s1, Size s2);
-extern void *palloc_mul_extended(Size s1, Size s2, int flags);
-pg_nodiscard pg_attribute_returns_nonnull extern void *repalloc_mul(void *p, Size s1, Size s2);
-pg_nodiscard extern void *repalloc_mul_extended(void *p, Size s1, Size s2,
-												int flags);
+pg_attribute_alloc_size(1, 2) pg_attribute_returns_nonnull extern void *palloc_mul(Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) pg_attribute_returns_nonnull extern void *palloc0_mul(Size s1, Size s2);
+pg_attribute_alloc_size(1, 2) extern void *palloc_mul_extended(Size s1, Size s2, int flags);
+pg_nodiscard pg_attribute_alloc_size(2, 3) pg_attribute_returns_nonnull extern void *repalloc_mul(void *p, Size s1, Size s2);
+pg_nodiscard pg_attribute_alloc_size(2, 3) extern void *repalloc_mul_extended(void *p, Size s1, Size s2,
+																			  int flags);
 
 /*
  * Variants with easier notation and more type safety
@@ -106,6 +106,13 @@ pg_nodiscard extern void *repalloc_mul_extended(void *p, Size s1, Size s2,
  */
 #define palloc_object(type) ((type *) palloc(sizeof(type)))
 #define palloc0_object(type) ((type *) palloc0(sizeof(type)))
+
+/*
+ * Allocate space for a struct of type "type" whose flexible array member
+ * "member" holds "count" elements.  See flex_size() for details.
+ */
+#define palloc_flex_array(type, member, count) ((type *) palloc(flex_size(type, member, count)))
+#define palloc0_flex_array(type, member, count) ((type *) palloc0(flex_size(type, member, count)))
 
 /*
  * Allocate space for "count" objects of type "type"
@@ -123,8 +130,8 @@ pg_nodiscard extern void *repalloc_mul_extended(void *p, Size s1, Size s2,
 #define repalloc_array_extended(pointer, type, count, flags) ((type *) repalloc_mul_extended(pointer, sizeof(type), count, flags))
 
 /* Higher-limit allocators. */
-pg_attribute_returns_nonnull extern void *MemoryContextAllocHuge(MemoryContext context, Size size);
-pg_nodiscard pg_attribute_returns_nonnull extern void *repalloc_huge(void *pointer, Size size);
+pg_attribute_alloc_size(2) pg_attribute_returns_nonnull extern void *MemoryContextAllocHuge(MemoryContext context, Size size);
+pg_nodiscard pg_attribute_alloc_size(2) pg_attribute_returns_nonnull extern void *repalloc_huge(void *pointer, Size size);
 
 /*
  * Although this header file is nominally backend-only, certain frontend

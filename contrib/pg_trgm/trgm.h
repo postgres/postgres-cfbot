@@ -55,6 +55,10 @@ extern int	(*CMPTRGM) (const void *a, const void *b);
 #define ISWILDCARDCHAR(x) (*(x) == '_' || *(x) == '%')	/* Wildcard
 														 * meta-character */
 
+/*
+ * Note: This structure has trailing padding, so palloc_flex_array() should
+ * be used.
+ */
 typedef struct
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */

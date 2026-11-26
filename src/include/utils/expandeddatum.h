@@ -128,7 +128,7 @@ struct ExpandedObjectHeader
  */
 #define EOH_HEADER_MAGIC (-1)
 #define VARATT_IS_EXPANDED_HEADER(PTR) \
-	(((varattrib_4b *) (PTR))->va_4byte.va_header == (uint32) EOH_HEADER_MAGIC)
+	(((varattrib_4b_normal *) (PTR))->va_header == (uint32) EOH_HEADER_MAGIC)
 
 /*
  * Generic support functions for expanded objects.
