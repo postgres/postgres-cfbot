@@ -701,6 +701,63 @@ SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors;
 (0 rows)
 
 --
+-- Cursor over a btree array-key (ScalarArrayOp) index scan that reverses
+-- direction exactly at a leaf-page boundary on the first page read
+--
+CREATE TEMP TABLE array_cursor_test (a int4, b int4, c int4, d int4);
+CREATE INDEX ON array_cursor_test (a, b, c, d) WITH (fillfactor = 30);
+INSERT INTO array_cursor_test
+  SELECT a, b, c, d
+  FROM generate_series(1, 2) a, generate_series(1, 2) b,
+       generate_series(1, 10) c, generate_series(1, 10) d
+  ORDER BY a, b, c, d;
+ANALYZE array_cursor_test;
+-- The index keeps (a=1, b=1, *) on a single leaf page.  Backing up at this
+-- leaf page boundary relies on a slow-path call to btposreset to avoid
+-- spuriously returning extra rows.
+BEGIN;
+SET LOCAL enable_seqscan = off;
+SET LOCAL enable_bitmapscan = off;
+SET LOCAL enable_indexonlyscan = off;
+DECLARE array_cursor CURSOR FOR
+  SELECT * FROM array_cursor_test
+  WHERE a IN (1, 2) AND b = 1 AND c = 9
+  ORDER BY a, b, c, d;
+-- read the 10 matching rows on the first leaf page, leaving the scan at the
+-- page boundary
+FETCH FORWARD 10 FROM array_cursor;
+ a | b | c | d  
+---+---+---+----
+ 1 | 1 | 9 |  1
+ 1 | 1 | 9 |  2
+ 1 | 1 | 9 |  3
+ 1 | 1 | 9 |  4
+ 1 | 1 | 9 |  5
+ 1 | 1 | 9 |  6
+ 1 | 1 | 9 |  7
+ 1 | 1 | 9 |  8
+ 1 | 1 | 9 |  9
+ 1 | 1 | 9 | 10
+(10 rows)
+
+-- reverse direction at the boundary; should return the prior 9 rows only
+FETCH BACKWARD 10 FROM array_cursor;
+ a | b | c | d 
+---+---+---+---
+ 1 | 1 | 9 | 9
+ 1 | 1 | 9 | 8
+ 1 | 1 | 9 | 7
+ 1 | 1 | 9 | 6
+ 1 | 1 | 9 | 5
+ 1 | 1 | 9 | 4
+ 1 | 1 | 9 | 3
+ 1 | 1 | 9 | 2
+ 1 | 1 | 9 | 1
+(9 rows)
+
+END;
+DROP TABLE array_cursor_test;
+--
 -- NO SCROLL disallows backward fetching
 --
 BEGIN;

@@ -821,6 +821,9 @@ ExecEndIndexScan(IndexScanState *node)
 		 */
 		winstrument->nsearches += node->iss_Instrument->nsearches;
 		Assert(node->iss_Instrument->ntabletuplefetches == 0);
+
+		/* Collect IO stats for this process into shared instrumentation */
+		AccumulateIOStats(&winstrument->io, &node->iss_Instrument->io);
 	}
 
 	/*
@@ -869,7 +872,7 @@ ExecIndexMarkPos(IndexScanState *node)
 		}
 	}
 
-	index_markpos(node->iss_ScanDesc);
+	table_index_scan_markpos(node->iss_ScanDesc);
 }
 
 /* ----------------------------------------------------------------
@@ -898,7 +901,7 @@ ExecIndexRestrPos(IndexScanState *node)
 		}
 	}
 
-	index_restrpos(node->iss_ScanDesc);
+	table_index_scan_restrpos(node->iss_ScanDesc);
 }
 
 /* ----------------------------------------------------------------
