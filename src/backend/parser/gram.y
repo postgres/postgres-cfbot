@@ -542,7 +542,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <list>	row explicit_row implicit_row type_list array_expr_list
 %type <node>	case_expr case_arg when_clause case_default
 %type <list>	when_clause_list
-%type <node>	opt_search_clause opt_cycle_clause
+%type <node>	opt_search_clause opt_cycle_clause cycle_mark_expr
 %type <ival>	sub_type opt_materialized
 %type <node>	NumericOnly
 %type <list>	NumericOnly_list
@@ -13362,7 +13362,7 @@ opt_search_clause:
 		;
 
 opt_cycle_clause:
-		CYCLE columnList SET ColId TO AexprConst DEFAULT AexprConst USING ColId
+		CYCLE columnList SET ColId TO cycle_mark_expr DEFAULT cycle_mark_expr USING ColId
 			{
 				CTECycleClause *n = makeNode(CTECycleClause);
 
@@ -13390,6 +13390,20 @@ opt_cycle_clause:
 			{
 				$$ = NULL;
 			}
+		;
+
+/*
+ * Cycle marks must be literals, but allow casts and parentheses so that
+ * deparsed expressions can be read back.  Do not use a_expr here, since that
+ * would also allow functions, column references, and other expressions.
+ */
+cycle_mark_expr:
+			AexprConst								{ $$ = $1; }
+			| '(' cycle_mark_expr ')'				{ $$ = $2; }
+			| cycle_mark_expr TYPECAST Typename
+					{ $$ = makeTypeCast($1, $3, @2); }
+			| CAST '(' cycle_mark_expr AS Typename ')'
+					{ $$ = makeTypeCast($3, $5, @1); }
 		;
 
 opt_with_clause:

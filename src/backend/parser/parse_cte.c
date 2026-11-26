@@ -17,6 +17,7 @@
 #include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
 #include "parser/analyze.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_collate.h"
@@ -281,6 +282,20 @@ analyzeCTE(ParseState *pstate, CommonTableExpr *cte)
 								  cycle_clause->cycle_mark_default,
 								  cycle_clause->cycle_mark_type,
 								  "CYCLE/SET/DEFAULT");
+
+		/* Check after common-type coercion, which can introduce more casts. */
+		if (contain_volatile_functions(cycle_clause->cycle_mark_value))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("CYCLE mark value must not contain volatile functions"),
+					 parser_errposition(pstate,
+										exprLocation(cycle_clause->cycle_mark_value))));
+		if (contain_volatile_functions(cycle_clause->cycle_mark_default))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("CYCLE mark default must not contain volatile functions"),
+					 parser_errposition(pstate,
+										exprLocation(cycle_clause->cycle_mark_default))));
 
 		cycle_clause->cycle_mark_typmod =
 			select_common_typmod(pstate,

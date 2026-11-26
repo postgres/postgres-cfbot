@@ -307,7 +307,10 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
     been detected.  <replaceable>cycle_mark_value</replaceable> and
     <replaceable>cycle_mark_default</replaceable> must be constants and they
     must be coercible to a common data type, and the data type must have an
-    inequality operator.  (The SQL standard requires that they be Boolean
+    inequality operator.  The constants can be parenthesized and can include
+    type casts, but the resulting expressions must not contain volatile
+    functions, including those used to perform type casts.
+    (The SQL standard requires that they be Boolean
     constants or character strings, but PostgreSQL does not require that.)  By
     default, <literal>TRUE</literal> and <literal>FALSE</literal> (of type
     <type>boolean</type>) are used.  Furthermore, a column
