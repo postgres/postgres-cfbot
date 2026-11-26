@@ -11474,7 +11474,8 @@ get_func_sql_syntax(FuncExpr *expr, deparse_context *context)
 		case F_SUBSTRING_TEXT_TEXT_TEXT:
 			/* SUBSTRING SIMILAR/ESCAPE */
 			appendStringInfoString(buf, "SUBSTRING(");
-			get_rule_expr((Node *) linitial(expr->args), context, false);
+			get_rule_expr_paren((Node *) linitial(expr->args), context, false,
+								(Node *) expr);
 			appendStringInfoString(buf, " SIMILAR ");
 			get_rule_expr((Node *) lsecond(expr->args), context, false);
 			appendStringInfoString(buf, " ESCAPE ");

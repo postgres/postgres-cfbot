@@ -774,6 +774,18 @@ select
   (select * from SYSTEM_USER) as su2;
 select pg_get_viewdef('tt201v', true);
 
+-- SUBSTRING SIMILAR with an operator as first argument
+create function tt202f(text, int) returns text
+  language sql immutable as 'select $1 || $2';
+create operator < (leftarg = text, rightarg = int, function = tt202f);
+create view tt202v as
+select substring((s < 1) similar '%#"1#"' escape '#') as ss
+from (values ('x'::text)) t(s);
+select pg_get_viewdef('tt202v', true);
+drop view tt202v;
+drop operator < (text, int);
+drop function tt202f(text, int);
+
 -- corner cases with empty join conditions
 
 create view tt21v as
