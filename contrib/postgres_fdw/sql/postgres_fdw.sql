@@ -249,6 +249,56 @@ SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should work again
 ANALYZE ft1;
 ALTER FOREIGN TABLE ft2 OPTIONS (use_remote_estimate 'true');
 
+-- We do some work locally on each fetched row.  We check the local quals and
+-- evaluate the target list.  The cost of this work is the same whether we
+-- sort remotely or locally.  So that cost, however high, should not keep us
+-- from pushing down the sort or LIMIT.
+CREATE FUNCTION local_filter(int) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE COST 10000 AS $$
+BEGIN
+  RETURN $1 > 0;
+END
+$$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c1 FROM ft1 WHERE local_filter(c1) ORDER BY c1;
+-- Each of these is cheap enough that it's not postponed until after the sort.
+CREATE FUNCTION local_project(int) RETURNS int
+LANGUAGE plpgsql IMMUTABLE COST 9 AS $$
+BEGIN
+  RETURN $1;
+END
+$$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT local_project(c1), local_project(c1 + 1), local_project(c1 + 2),
+  local_project(c1 + 3)
+FROM ft1 ORDER BY c1 LIMIT 10;
+-- The same is true for target list expressions that we evaluate on top of a
+-- pushed down aggregate.  Without a LIMIT the planner does not postpone even
+-- expensive ones until after the sort.
+ALTER FUNCTION local_project(int) COST 10000;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT local_project(c2), count(*) FROM ft1 GROUP BY c2 ORDER BY c2;
+-- The same is true for HAVING quals that we check locally.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c2, count(*) FROM ft1 GROUP BY c2 HAVING local_filter(count(*)::int)
+ORDER BY c2;
+-- A local qual also means that a local sort has fewer rows to sort than a
+-- remote one, which has to sort all rows that we retrieve.  With a cheap
+-- qual, where the sort is done is decided by the cost of the sort itself.
+ALTER FUNCTION local_filter(int) COST 1;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c1 FROM ft1 WHERE local_filter(c1) ORDER BY c1;
+DROP FUNCTION local_filter(int);
+DROP FUNCTION local_project(int);
+
+-- Without remote estimates we don't know what join strategy the foreign
+-- server is going to use for a pushed down join.  With an equality join
+-- clause it can use a hash join though, just like we could.  So pushing the
+-- join down should not look more expensive than fetching both sides and
+-- joining them locally.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft1 t2 ON (t1.c1 = t2.c1);
+
 -- ===================================================================
 -- test subscription
 -- ===================================================================
@@ -1287,6 +1337,8 @@ alter extension postgres_fdw add aggregate least_agg(variadic items anyarray);
 alter server loopback options (set extensions 'postgres_fdw');
 
 -- Now aggregate will be pushed.  Aggregate will display VARIADIC argument.
+-- The ORDER BY is pushed down along with it: without remote estimates, a
+-- remote sort should be preferred over a local one.
 explain (verbose, costs off)
 select c2, least_agg(c1) from ft1 where c2 < 100 group by c2 order by c2;
 select c2, least_agg(c1) from ft1 where c2 < 100 group by c2 order by c2;
@@ -4338,9 +4390,14 @@ SELECT * FROM result_tbl ORDER BY a;
 DELETE FROM result_tbl;
 
 -- MergeAppend cases
+-- A local Sort on top of an Append is costed about the same as a MergeAppend
+-- over remotely sorted scans when there are only a few rows to sort, so
+-- disable local sorts to make sure we get a MergeAppend.
+SET enable_sort TO off;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM async_pt WHERE b % 100 = 0 ORDER BY b, a;
 SELECT * FROM async_pt WHERE b % 100 = 0 ORDER BY b, a;
+RESET enable_sort;
 
 -- Test that steady-state execution of an async MergeAppend re-fetches from
 -- an async subplan instead of just consuming its initial batch and treating
@@ -4389,15 +4446,22 @@ SELECT o.x FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT a FROM async_pt WH
 SELECT o.x FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT a FROM async_pt WHERE a = o.x OR (a = 1505 AND o.x = 2505) LIMIT 1) s ORDER BY o.x;
 
 -- MergeAppend cases
+-- The quals are checked locally, so a local Sort only has to sort the rows
+-- that pass them, while a remote sort has to sort all of them.  That makes
+-- the local Sort on top of an Append cheaper, so disable local sorts to make
+-- sure we get a MergeAppend.
+SET enable_sort TO off;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
 SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
 
 -- Test ExecMergeAppendAsyncReset code path that asserts async requests made
--- for subplans aren't pending anymore at ReScan
+-- for subplans aren't pending anymore at ReScan.  Here there are too few
+-- rows to sort to reliably get a MergeAppend without disabling local sorts.
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT o.x, s.b FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT b FROM async_pt WHERE a = 1505 OR a = o.x ORDER BY b LIMIT 1) s ORDER BY o.x;
 SELECT o.x, s.b FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT b FROM async_pt WHERE a = 1505 OR a = o.x ORDER BY b LIMIT 1) s ORDER BY o.x;
+RESET enable_sort;
 
 DROP FOREIGN TABLE async_p3;
 DROP TABLE base_tbl3;
@@ -4418,9 +4482,17 @@ SELECT * FROM result_tbl ORDER BY a;
 DELETE FROM result_tbl;
 
 -- MergeAppend cases
+-- Like above we need to disable local sorts to get a MergeAppend.  The local
+-- partition would need a Sort below the MergeAppend though, which would make
+-- that plan just as disabled as a Sort on top of an Append.  So give it an
+-- index that provides the ordering instead.
+CREATE INDEX async_p3_idx ON async_p3 (b, a);
+SET enable_sort TO off;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
 SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
+RESET enable_sort;
+DROP INDEX async_p3_idx;
 
 -- Test partitionwise joins
 SET enable_partitionwise_join TO true;

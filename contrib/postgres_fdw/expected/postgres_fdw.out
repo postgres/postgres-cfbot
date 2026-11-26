@@ -260,6 +260,105 @@ SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should work again
 -- and remote-estimate mode on ft2.
 ANALYZE ft1;
 ALTER FOREIGN TABLE ft2 OPTIONS (use_remote_estimate 'true');
+-- We do some work locally on each fetched row.  We check the local quals and
+-- evaluate the target list.  The cost of this work is the same whether we
+-- sort remotely or locally.  So that cost, however high, should not keep us
+-- from pushing down the sort or LIMIT.
+CREATE FUNCTION local_filter(int) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE COST 10000 AS $$
+BEGIN
+  RETURN $1 > 0;
+END
+$$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c1 FROM ft1 WHERE local_filter(c1) ORDER BY c1;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Foreign Scan on public.ft1
+   Output: c1
+   Filter: local_filter(ft1.c1)
+   Remote SQL: SELECT "C 1" FROM "S 1"."T 1" ORDER BY "C 1" ASC NULLS LAST
+(4 rows)
+
+-- Each of these is cheap enough that it's not postponed until after the sort.
+CREATE FUNCTION local_project(int) RETURNS int
+LANGUAGE plpgsql IMMUTABLE COST 9 AS $$
+BEGIN
+  RETURN $1;
+END
+$$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT local_project(c1), local_project(c1 + 1), local_project(c1 + 2),
+  local_project(c1 + 3)
+FROM ft1 ORDER BY c1 LIMIT 10;
+                                                 QUERY PLAN                                                 
+------------------------------------------------------------------------------------------------------------
+ Foreign Scan on public.ft1
+   Output: local_project(c1), local_project((c1 + 1)), local_project((c1 + 2)), local_project((c1 + 3)), c1
+   Remote SQL: SELECT "C 1" FROM "S 1"."T 1" ORDER BY "C 1" ASC NULLS LAST LIMIT 10::bigint
+(3 rows)
+
+-- The same is true for target list expressions that we evaluate on top of a
+-- pushed down aggregate.  Without a LIMIT the planner does not postpone even
+-- expensive ones until after the sort.
+ALTER FUNCTION local_project(int) COST 10000;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT local_project(c2), count(*) FROM ft1 GROUP BY c2 ORDER BY c2;
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+ Foreign Scan
+   Output: local_project(c2), (count(*)), c2
+   Relations: Aggregate on (public.ft1)
+   Remote SQL: SELECT count(*), c2 FROM "S 1"."T 1" GROUP BY 2 ORDER BY c2 ASC NULLS LAST
+(4 rows)
+
+-- The same is true for HAVING quals that we check locally.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c2, count(*) FROM ft1 GROUP BY c2 HAVING local_filter(count(*)::int)
+ORDER BY c2;
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+ Foreign Scan
+   Output: c2, (count(*))
+   Filter: local_filter(((count(*)))::integer)
+   Relations: Aggregate on (public.ft1)
+   Remote SQL: SELECT c2, count(*) FROM "S 1"."T 1" GROUP BY 1 ORDER BY c2 ASC NULLS LAST
+(5 rows)
+
+-- A local qual also means that a local sort has fewer rows to sort than a
+-- remote one, which has to sort all rows that we retrieve.  With a cheap
+-- qual, where the sort is done is decided by the cost of the sort itself.
+ALTER FUNCTION local_filter(int) COST 1;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT c1 FROM ft1 WHERE local_filter(c1) ORDER BY c1;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Sort
+   Output: c1
+   Sort Key: ft1.c1
+   ->  Foreign Scan on public.ft1
+         Output: c1
+         Filter: local_filter(ft1.c1)
+         Remote SQL: SELECT "C 1" FROM "S 1"."T 1"
+(7 rows)
+
+DROP FUNCTION local_filter(int);
+DROP FUNCTION local_project(int);
+-- Without remote estimates we don't know what join strategy the foreign
+-- server is going to use for a pushed down join.  With an equality join
+-- clause it can use a hash join though, just like we could.  So pushing the
+-- join down should not look more expensive than fetching both sides and
+-- joining them locally.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft1 t2 ON (t1.c1 = t2.c1);
+                                                      QUERY PLAN                                                      
+----------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
+   Output: t1.c1, t2.c1
+   Relations: (public.ft1 t1) INNER JOIN (public.ft1 t2)
+   Remote SQL: SELECT r1."C 1", r2."C 1" FROM ("S 1"."T 1" r1 INNER JOIN "S 1"."T 1" r2 ON (((r1."C 1" = r2."C 1"))))
+(4 rows)
+
 -- ===================================================================
 -- test subscription
 -- ===================================================================
@@ -2016,18 +2115,13 @@ SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT
 -- full outer join + WHERE clause, only matched rows
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t2.c1 FROM ft4 t1 FULL JOIN ft5 t2 ON (t1.c1 = t2.c1) WHERE (t1.c1 = t2.c1 OR t1.c1 IS NULL) ORDER BY t1.c1, t2.c1 OFFSET 10 LIMIT 10;
-                                                                            QUERY PLAN                                                                            
-------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Limit
+                                                                                                                 QUERY PLAN                                                                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
    Output: t1.c1, t2.c1
-   ->  Sort
-         Output: t1.c1, t2.c1
-         Sort Key: t1.c1, t2.c1
-         ->  Foreign Scan
-               Output: t1.c1, t2.c1
-               Relations: (public.ft4 t1) FULL JOIN (public.ft5 t2)
-               Remote SQL: SELECT r1.c1, r2.c1 FROM ("S 1"."T 3" r1 FULL JOIN "S 1"."T 4" r2 ON (((r1.c1 = r2.c1)))) WHERE (((r1.c1 = r2.c1) OR (r1.c1 IS NULL)))
-(9 rows)
+   Relations: (public.ft4 t1) FULL JOIN (public.ft5 t2)
+   Remote SQL: SELECT r1.c1, r2.c1 FROM ("S 1"."T 3" r1 FULL JOIN "S 1"."T 4" r2 ON (((r1.c1 = r2.c1)))) WHERE (((r1.c1 = r2.c1) OR (r1.c1 IS NULL))) ORDER BY r1.c1 ASC NULLS LAST, r2.c1 ASC NULLS LAST LIMIT 10::bigint OFFSET 10::bigint
+(4 rows)
 
 SELECT t1.c1, t2.c1 FROM ft4 t1 FULL JOIN ft5 t2 ON (t1.c1 = t2.c1) WHERE (t1.c1 = t2.c1 OR t1.c1 IS NULL) ORDER BY t1.c1, t2.c1 OFFSET 10 LIMIT 10;
  c1 | c1 
@@ -2987,16 +3081,13 @@ ALTER VIEW v4 OWNER TO regress_view_owner;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t1.c3 FROM ft1 t1, unnest(ARRAY[1, 5, 10, 100]::int[]) AS u(id)
 WHERE t1.c1 = u.id ORDER BY t1.c1;
-                                                                   QUERY PLAN                                                                   
-------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                QUERY PLAN                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
    Output: t1.c1, t1.c3
-   Sort Key: t1.c1
-   ->  Foreign Scan
-         Output: t1.c1, t1.c3
-         Relations: (public.ft1 t1) INNER JOIN (pg_catalog.unnest() u)
-         Remote SQL: SELECT r1."C 1", r1.c3 FROM ("S 1"."T 1" r1 INNER JOIN unnest('{1,5,10,100}'::integer[]) f2(c1) ON (((r1."C 1" = f2.c1))))
-(7 rows)
+   Relations: (public.ft1 t1) INNER JOIN (pg_catalog.unnest() u)
+   Remote SQL: SELECT r1."C 1", r1.c3 FROM ("S 1"."T 1" r1 INNER JOIN unnest('{1,5,10,100}'::integer[]) f2(c1) ON (((r1."C 1" = f2.c1)))) ORDER BY r1."C 1" ASC NULLS LAST
+(4 rows)
 
 SELECT t1.c1, t1.c3 FROM ft1 t1, unnest(ARRAY[1, 5, 10, 100]::int[]) AS u(id)
 WHERE t1.c1 = u.id ORDER BY t1.c1;
@@ -3012,16 +3103,13 @@ WHERE t1.c1 = u.id ORDER BY t1.c1;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1 FROM ft1 t1, generate_series(1, 4) AS g(id)
 WHERE t1.c1 = g.id ORDER BY t1.c1;
-                                                         QUERY PLAN                                                          
------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                       QUERY PLAN                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
    Output: t1.c1
-   Sort Key: t1.c1
-   ->  Foreign Scan
-         Output: t1.c1
-         Relations: (public.ft1 t1) INNER JOIN (pg_catalog.generate_series() g)
-         Remote SQL: SELECT r1."C 1" FROM ("S 1"."T 1" r1 INNER JOIN generate_series(1, 4) f2(c1) ON (((r1."C 1" = f2.c1))))
-(7 rows)
+   Relations: (public.ft1 t1) INNER JOIN (pg_catalog.generate_series() g)
+   Remote SQL: SELECT r1."C 1" FROM ("S 1"."T 1" r1 INNER JOIN generate_series(1, 4) f2(c1) ON (((r1."C 1" = f2.c1)))) ORDER BY r1."C 1" ASC NULLS LAST
+(4 rows)
 
 SELECT t1.c1 FROM ft1 t1, generate_series(1, 4) AS g(id)
 WHERE t1.c1 = g.id ORDER BY t1.c1;
@@ -3105,20 +3193,22 @@ FROM ft1 t1, ft6 t2, unnest(ARRAY[1, 5, 10, 100]::int[]) AS u(id)
 WHERE t1.c1 = u.id AND t2.c1 = u.id ORDER BY t1.c1;
                                                                    QUERY PLAN                                                                   
 ------------------------------------------------------------------------------------------------------------------------------------------------
- Merge Join
+ Sort
    Output: t1.c1, t2.c1
-   Merge Cond: (t1.c1 = u.id)
-   ->  Foreign Scan on public.ft1 t1
-         Output: t1.c1
-         Remote SQL: SELECT "C 1" FROM "S 1"."T 1" ORDER BY "C 1" ASC NULLS LAST
-   ->  Sort
-         Output: t2.c1, u.id
-         Sort Key: t2.c1
+   Sort Key: t1.c1
+   ->  Hash Join
+         Output: t1.c1, t2.c1
+         Hash Cond: (u.id = t1.c1)
          ->  Foreign Scan
                Output: t2.c1, u.id
                Relations: (public.ft6 t2) INNER JOIN (pg_catalog.unnest() u)
                Remote SQL: SELECT r2.c1, f3.c1 FROM ("S 1"."T 4" r2 INNER JOIN unnest('{1,5,10,100}'::integer[]) f3(c1) ON (((r2.c1 = f3.c1))))
-(13 rows)
+         ->  Hash
+               Output: t1.c1
+               ->  Foreign Scan on public.ft1 t1
+                     Output: t1.c1
+                     Remote SQL: SELECT "C 1" FROM "S 1"."T 1"
+(15 rows)
 
 -- Cost-based selection between two foreign servers: ft1 ("S 1"."T 1") has
 -- 1000 rows, ft6 ("S 1"."T 4") has ~33 rows.  The same query shape gets a
@@ -3360,16 +3450,13 @@ SELECT r.a, t.n, t.s
   FROM remote_tbl r, ROWS FROM (unnest(array[3, 6, 9]),
                                 generate_series(11, 13)) AS t(n, s)
  WHERE r.a = t.n ORDER BY r.a;
-                                                                                        QUERY PLAN                                                                                        
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                   QUERY PLAN                                                                                                    
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
    Output: r.a, t.n, t.s
-   Sort Key: r.a
-   ->  Foreign Scan
-         Output: r.a, t.n, t.s
-         Relations: (public.remote_tbl r) INNER JOIN (ROWS FROM (pg_catalog.unnest(), pg_catalog.generate_series()) t)
-         Remote SQL: SELECT r1.a, f2.c1, f2.c2 FROM (public.base_tbl_fn r1 INNER JOIN ROWS FROM (unnest('{3,6,9}'::integer[]), generate_series(11, 13)) f2(c1, c2) ON (((r1.a = f2.c1))))
-(7 rows)
+   Relations: (public.remote_tbl r) INNER JOIN (ROWS FROM (pg_catalog.unnest(), pg_catalog.generate_series()) t)
+   Remote SQL: SELECT r1.a, f2.c1, f2.c2 FROM (public.base_tbl_fn r1 INNER JOIN ROWS FROM (unnest('{3,6,9}'::integer[]), generate_series(11, 13)) f2(c1, c2) ON (((r1.a = f2.c1)))) ORDER BY r1.a ASC NULLS LAST
+(4 rows)
 
 SELECT r.a, t.n, t.s
   FROM remote_tbl r, ROWS FROM (unnest(array[3, 6, 9]),
@@ -3390,16 +3477,13 @@ SELECT t::text, r.a
   FROM remote_tbl r, ROWS FROM (unnest(array[3, 6, 9]),
                                 generate_series(11, 13)) AS t(n, s)
  WHERE r.a = t.n ORDER BY r.a;
-                                                                                                                QUERY PLAN                                                                                                                 
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
-   Output: ((t.*)::text), r.a
-   Sort Key: r.a
-   ->  Foreign Scan
-         Output: (t.*)::text, r.a
-         Relations: (public.remote_tbl r) INNER JOIN (ROWS FROM (pg_catalog.unnest(), pg_catalog.generate_series()) t)
-         Remote SQL: SELECT CASE WHEN (f2.*)::text IS NOT NULL THEN ROW(f2.c1, f2.c2) END, r1.a FROM (public.base_tbl_fn r1 INNER JOIN ROWS FROM (unnest('{3,6,9}'::integer[]), generate_series(11, 13)) f2(c1, c2) ON (((r1.a = f2.c1))))
-(7 rows)
+                                                                                                                            QUERY PLAN                                                                                                                            
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
+   Output: (t.*)::text, r.a
+   Relations: (public.remote_tbl r) INNER JOIN (ROWS FROM (pg_catalog.unnest(), pg_catalog.generate_series()) t)
+   Remote SQL: SELECT CASE WHEN (f2.*)::text IS NOT NULL THEN ROW(f2.c1, f2.c2) END, r1.a FROM (public.base_tbl_fn r1 INNER JOIN ROWS FROM (unnest('{3,6,9}'::integer[]), generate_series(11, 13)) f2(c1, c2) ON (((r1.a = f2.c1)))) ORDER BY r1.a ASC NULLS LAST
+(4 rows)
 
 SELECT t::text, r.a
   FROM remote_tbl r, ROWS FROM (unnest(array[3, 6, 9]),
@@ -3587,21 +3671,23 @@ EXPLAIN (VERBOSE, COSTS OFF)
 SELECT r.a FROM remote_tbl r
  WHERE EXISTS (SELECT 1 FROM unnest(array[3, 6, 9]) AS t(n) WHERE t.n = r.a)
  ORDER BY r.a;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
- Merge Semi Join
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Sort
    Output: r.a
-   Merge Cond: (r.a = t.n)
-   ->  Foreign Scan on public.remote_tbl r
-         Output: r.a, r.b
-         Remote SQL: SELECT a FROM public.base_tbl_fn ORDER BY a ASC NULLS LAST
-   ->  Sort
-         Output: t.n
-         Sort Key: t.n
-         ->  Function Scan on pg_catalog.unnest t
+   Sort Key: r.a
+   ->  Hash Semi Join
+         Output: r.a
+         Hash Cond: (r.a = t.n)
+         ->  Foreign Scan on public.remote_tbl r
+               Output: r.a, r.b
+               Remote SQL: SELECT a FROM public.base_tbl_fn
+         ->  Hash
                Output: t.n
-               Function Call: unnest('{3,6,9}'::integer[])
-(12 rows)
+               ->  Function Scan on pg_catalog.unnest t
+                     Output: t.n
+                     Function Call: unnest('{3,6,9}'::integer[])
+(14 rows)
 
 DROP FOREIGN TABLE remote_tbl;
 DROP TABLE base_tbl_fn;
@@ -4187,16 +4273,13 @@ select sum(c2) filter (where c2 in (select c2 from ft1 where c2 < 5)) from ft1;
 -- Ordered-sets within aggregate
 explain (verbose, costs off)
 select c2, rank('10'::varchar) within group (order by c6), percentile_cont(c2/10::numeric) within group (order by c1) from ft1 where c2 < 10 group by c2 having percentile_cont(c2/10::numeric) within group (order by c1) < 500 order by c2;
-                                                                                                                                                                           QUERY PLAN                                                                                                                                                                           
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
    Output: c2, (rank('10'::character varying) WITHIN GROUP (ORDER BY c6)), (percentile_cont((((c2)::numeric / '10'::numeric))::double precision) WITHIN GROUP (ORDER BY ((c1)::double precision)))
-   Sort Key: ft1.c2
-   ->  Foreign Scan
-         Output: c2, (rank('10'::character varying) WITHIN GROUP (ORDER BY c6)), (percentile_cont((((c2)::numeric / '10'::numeric))::double precision) WITHIN GROUP (ORDER BY ((c1)::double precision)))
-         Relations: Aggregate on (public.ft1)
-         Remote SQL: SELECT c2, rank('10'::character varying) WITHIN GROUP (ORDER BY c6 ASC NULLS LAST), percentile_cont((c2 / 10::numeric)) WITHIN GROUP (ORDER BY ("C 1") ASC NULLS LAST) FROM "S 1"."T 1" WHERE ((c2 < 10)) GROUP BY 1 HAVING ((percentile_cont((c2 / 10::numeric)) WITHIN GROUP (ORDER BY ("C 1") ASC NULLS LAST) < 500::double precision))
-(7 rows)
+   Relations: Aggregate on (public.ft1)
+   Remote SQL: SELECT c2, rank('10'::character varying) WITHIN GROUP (ORDER BY c6 ASC NULLS LAST), percentile_cont((c2 / 10::numeric)) WITHIN GROUP (ORDER BY ("C 1") ASC NULLS LAST) FROM "S 1"."T 1" WHERE ((c2 < 10)) GROUP BY 1 HAVING ((percentile_cont((c2 / 10::numeric)) WITHIN GROUP (ORDER BY ("C 1") ASC NULLS LAST) < 500::double precision)) ORDER BY c2 ASC NULLS LAST
+(4 rows)
 
 select c2, rank('10'::varchar) within group (order by c6), percentile_cont(c2/10::numeric) within group (order by c1) from ft1 where c2 < 10 group by c2 having percentile_cont(c2/10::numeric) within group (order by c1) < 500 order by c2;
  c2 | rank | percentile_cont 
@@ -4252,18 +4335,17 @@ alter extension postgres_fdw add function least_accum(anyelement, variadic anyar
 alter extension postgres_fdw add aggregate least_agg(variadic items anyarray);
 alter server loopback options (set extensions 'postgres_fdw');
 -- Now aggregate will be pushed.  Aggregate will display VARIADIC argument.
+-- The ORDER BY is pushed down along with it: without remote estimates, a
+-- remote sort should be preferred over a local one.
 explain (verbose, costs off)
 select c2, least_agg(c1) from ft1 where c2 < 100 group by c2 order by c2;
-                                                      QUERY PLAN                                                       
------------------------------------------------------------------------------------------------------------------------
- Sort
+                                                                 QUERY PLAN                                                                 
+--------------------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
    Output: c2, (least_agg(VARIADIC ARRAY[c1]))
-   Sort Key: ft1.c2
-   ->  Foreign Scan
-         Output: c2, (least_agg(VARIADIC ARRAY[c1]))
-         Relations: Aggregate on (public.ft1)
-         Remote SQL: SELECT c2, public.least_agg(VARIADIC ARRAY["C 1"]) FROM "S 1"."T 1" WHERE ((c2 < 100)) GROUP BY 1
-(7 rows)
+   Relations: Aggregate on (public.ft1)
+   Remote SQL: SELECT c2, public.least_agg(VARIADIC ARRAY["C 1"]) FROM "S 1"."T 1" WHERE ((c2 < 100)) GROUP BY 1 ORDER BY c2 ASC NULLS LAST
+(4 rows)
 
 select c2, least_agg(c1) from ft1 where c2 < 100 group by c2 order by c2;
  c2 | least_agg 
@@ -11384,16 +11466,18 @@ ANALYZE fpagg_tab_p3;
 SET enable_partitionwise_aggregate TO false;
 EXPLAIN (COSTS OFF)
 SELECT a, sum(b), min(b), count(*) FROM pagg_tab GROUP BY a HAVING avg(b) < 22 ORDER BY 1;
-                     QUERY PLAN                      
------------------------------------------------------
- GroupAggregate
-   Group Key: pagg_tab.a
-   Filter: (avg(pagg_tab.b) < '22'::numeric)
-   ->  Append
-         ->  Foreign Scan on fpagg_tab_p1 pagg_tab_1
-         ->  Foreign Scan on fpagg_tab_p2 pagg_tab_2
-         ->  Foreign Scan on fpagg_tab_p3 pagg_tab_3
-(7 rows)
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Sort
+   Sort Key: pagg_tab.a
+   ->  HashAggregate
+         Group Key: pagg_tab.a
+         Filter: (avg(pagg_tab.b) < '22'::numeric)
+         ->  Append
+               ->  Foreign Scan on fpagg_tab_p1 pagg_tab_1
+               ->  Foreign Scan on fpagg_tab_p2 pagg_tab_2
+               ->  Foreign Scan on fpagg_tab_p3 pagg_tab_3
+(9 rows)
 
 -- Plan with partitionwise aggregates is enabled
 SET enable_partitionwise_aggregate TO true;
@@ -11427,32 +11511,34 @@ SELECT a, sum(b), min(b), count(*) FROM pagg_tab GROUP BY a HAVING avg(b) < 22 O
 -- Should have all the columns in the target list for the given relation
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a, count(t1) FROM pagg_tab t1 GROUP BY a HAVING avg(b) < 22 ORDER BY 1;
-                                         QUERY PLAN                                         
---------------------------------------------------------------------------------------------
- Merge Append
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Sort
+   Output: t1.a, (count(((t1.*)::pagg_tab)))
    Sort Key: t1.a
-   ->  GroupAggregate
-         Output: t1.a, count(((t1.*)::pagg_tab))
-         Group Key: t1.a
-         Filter: (avg(t1.b) < '22'::numeric)
-         ->  Foreign Scan on public.fpagg_tab_p1 t1
-               Output: t1.a, t1.*, t1.b
-               Remote SQL: SELECT a, b, c FROM public.pagg_tab_p1 ORDER BY a ASC NULLS LAST
-   ->  GroupAggregate
-         Output: t1_1.a, count(((t1_1.*)::pagg_tab))
-         Group Key: t1_1.a
-         Filter: (avg(t1_1.b) < '22'::numeric)
-         ->  Foreign Scan on public.fpagg_tab_p2 t1_1
-               Output: t1_1.a, t1_1.*, t1_1.b
-               Remote SQL: SELECT a, b, c FROM public.pagg_tab_p2 ORDER BY a ASC NULLS LAST
-   ->  GroupAggregate
-         Output: t1_2.a, count(((t1_2.*)::pagg_tab))
-         Group Key: t1_2.a
-         Filter: (avg(t1_2.b) < '22'::numeric)
-         ->  Foreign Scan on public.fpagg_tab_p3 t1_2
-               Output: t1_2.a, t1_2.*, t1_2.b
-               Remote SQL: SELECT a, b, c FROM public.pagg_tab_p3 ORDER BY a ASC NULLS LAST
-(23 rows)
+   ->  Append
+         ->  HashAggregate
+               Output: t1.a, count(((t1.*)::pagg_tab))
+               Group Key: t1.a
+               Filter: (avg(t1.b) < '22'::numeric)
+               ->  Foreign Scan on public.fpagg_tab_p1 t1
+                     Output: t1.a, t1.*, t1.b
+                     Remote SQL: SELECT a, b, c FROM public.pagg_tab_p1
+         ->  HashAggregate
+               Output: t1_1.a, count(((t1_1.*)::pagg_tab))
+               Group Key: t1_1.a
+               Filter: (avg(t1_1.b) < '22'::numeric)
+               ->  Foreign Scan on public.fpagg_tab_p2 t1_1
+                     Output: t1_1.a, t1_1.*, t1_1.b
+                     Remote SQL: SELECT a, b, c FROM public.pagg_tab_p2
+         ->  HashAggregate
+               Output: t1_2.a, count(((t1_2.*)::pagg_tab))
+               Group Key: t1_2.a
+               Filter: (avg(t1_2.b) < '22'::numeric)
+               ->  Foreign Scan on public.fpagg_tab_p3 t1_2
+                     Output: t1_2.a, t1_2.*, t1_2.b
+                     Remote SQL: SELECT a, b, c FROM public.pagg_tab_p3
+(25 rows)
 
 SELECT a, count(t1) FROM pagg_tab t1 GROUP BY a HAVING avg(b) < 22 ORDER BY 1;
  a  | count 
@@ -11468,23 +11554,24 @@ SELECT a, count(t1) FROM pagg_tab t1 GROUP BY a HAVING avg(b) < 22 ORDER BY 1;
 -- When GROUP BY clause does not match with PARTITION KEY.
 EXPLAIN (COSTS OFF)
 SELECT b, avg(a), max(a), count(*) FROM pagg_tab GROUP BY b HAVING sum(a) < 700 ORDER BY 1;
-                        QUERY PLAN                         
------------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Finalize GroupAggregate
    Group Key: pagg_tab.b
    Filter: (sum(pagg_tab.a) < 700)
-   ->  Merge Append
+   ->  Sort
          Sort Key: pagg_tab.b
-         ->  Partial GroupAggregate
-               Group Key: pagg_tab.b
-               ->  Foreign Scan on fpagg_tab_p1 pagg_tab
-         ->  Partial GroupAggregate
-               Group Key: pagg_tab_1.b
-               ->  Foreign Scan on fpagg_tab_p2 pagg_tab_1
-         ->  Partial GroupAggregate
-               Group Key: pagg_tab_2.b
-               ->  Foreign Scan on fpagg_tab_p3 pagg_tab_2
-(14 rows)
+         ->  Append
+               ->  Partial HashAggregate
+                     Group Key: pagg_tab.b
+                     ->  Foreign Scan on fpagg_tab_p1 pagg_tab
+               ->  Partial HashAggregate
+                     Group Key: pagg_tab_1.b
+                     ->  Foreign Scan on fpagg_tab_p2 pagg_tab_1
+               ->  Partial HashAggregate
+                     Group Key: pagg_tab_2.b
+                     ->  Foreign Scan on fpagg_tab_p3 pagg_tab_2
+(15 rows)
 
 -- ===================================================================
 -- access rights and superuser
@@ -12436,6 +12523,10 @@ SELECT * FROM result_tbl ORDER BY a;
 
 DELETE FROM result_tbl;
 -- MergeAppend cases
+-- A local Sort on top of an Append is costed about the same as a MergeAppend
+-- over remotely sorted scans when there are only a few rows to sort, so
+-- disable local sorts to make sure we get a MergeAppend.
+SET enable_sort TO off;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM async_pt WHERE b % 100 = 0 ORDER BY b, a;
                                                           QUERY PLAN                                                          
@@ -12475,6 +12566,7 @@ SELECT * FROM async_pt WHERE b % 100 = 0 ORDER BY b, a;
  2900 | 900 | 0900
 (20 rows)
 
+RESET enable_sort;
 -- Test that steady-state execution of an async MergeAppend re-fetches from
 -- an async subplan instead of just consuming its initial batch and treating
 -- exhaustion of that batch as end-of-data.  Each partition here has 200
@@ -12637,6 +12729,11 @@ SELECT o.x FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT a FROM async_pt WH
 (2 rows)
 
 -- MergeAppend cases
+-- The quals are checked locally, so a local Sort only has to sort the rows
+-- that pass them, while a remote sort has to sort all of them.  That makes
+-- the local Sort on top of an Append cheaper, so disable local sorts to make
+-- sure we get a MergeAppend.
+SET enable_sort TO off;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
                                               QUERY PLAN                                              
@@ -12666,12 +12763,14 @@ SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
 (3 rows)
 
 -- Test ExecMergeAppendAsyncReset code path that asserts async requests made
--- for subplans aren't pending anymore at ReScan
+-- for subplans aren't pending anymore at ReScan.  Here there are too few
+-- rows to sort to reliably get a MergeAppend without disabling local sorts.
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT o.x, s.b FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT b FROM async_pt WHERE a = 1505 OR a = o.x ORDER BY b LIMIT 1) s ORDER BY o.x;
                                                                 QUERY PLAN                                                                
 ------------------------------------------------------------------------------------------------------------------------------------------
  Sort
+   Disabled: true
    Output: "*VALUES*".column1, async_pt.b
    Sort Key: "*VALUES*".column1
    ->  Nested Loop
@@ -12691,7 +12790,7 @@ SELECT o.x, s.b FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT b FROM async_
                      ->  Async Foreign Scan on public.async_p3 async_pt_3
                            Output: async_pt_3.b
                            Remote SQL: SELECT b FROM public.base_tbl3 WHERE (((a = 1505) OR (a = $1::integer))) ORDER BY b ASC NULLS LAST
-(20 rows)
+(21 rows)
 
 SELECT o.x, s.b FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT b FROM async_pt WHERE a = 1505 OR a = o.x ORDER BY b LIMIT 1) s ORDER BY o.x;
   x   |  b  
@@ -12700,6 +12799,7 @@ SELECT o.x, s.b FROM (VALUES (2505), (3505)) o(x), LATERAL (SELECT b FROM async_
  3505 | 505
 (2 rows)
 
+RESET enable_sort;
 DROP FOREIGN TABLE async_p3;
 DROP TABLE base_tbl3;
 -- Test COPY TO when foreign table is partition
@@ -12741,6 +12841,12 @@ SELECT * FROM result_tbl ORDER BY a;
 
 DELETE FROM result_tbl;
 -- MergeAppend cases
+-- Like above we need to disable local sorts to get a MergeAppend.  The local
+-- partition would need a Sort below the MergeAppend though, which would make
+-- that plan just as disabled as a Sort on top of an Append.  So give it an
+-- index that provides the ordering instead.
+CREATE INDEX async_p3_idx ON async_p3 (b, a);
+SET enable_sort TO off;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
                                               QUERY PLAN                                              
@@ -12755,13 +12861,10 @@ SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
          Output: async_pt_2.a, async_pt_2.b, async_pt_2.c
          Filter: (async_pt_2.b === 505)
          Remote SQL: SELECT a, b, c FROM public.base_tbl2 ORDER BY b ASC NULLS LAST, a ASC NULLS LAST
-   ->  Sort
+   ->  Index Scan using async_p3_idx on public.async_p3 async_pt_3
          Output: async_pt_3.a, async_pt_3.b, async_pt_3.c
-         Sort Key: async_pt_3.b, async_pt_3.a
-         ->  Seq Scan on public.async_p3 async_pt_3
-               Output: async_pt_3.a, async_pt_3.b, async_pt_3.c
-               Filter: (async_pt_3.b === 505)
-(16 rows)
+         Filter: (async_pt_3.b === 505)
+(13 rows)
 
 SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
   a   |  b  |  c   
@@ -12771,6 +12874,8 @@ SELECT * FROM async_pt WHERE b === 505 ORDER BY b, a;
  3505 | 505 | 0505
 (3 rows)
 
+RESET enable_sort;
+DROP INDEX async_p3_idx;
 -- Test partitionwise joins
 SET enable_partitionwise_join TO true;
 CREATE TABLE join_tbl (a1 int, b1 int, c1 text, a2 int, b2 int, c2 text);
