@@ -1842,9 +1842,7 @@ dump_lo_buf(ArchiveHandle *AH)
 
 /*
  *	Write buffer to the output file (usually stdout). This is used for
- *	outputting 'restore' scripts etc. It is even possible for an archive
- *	format to create a custom output routine to 'fake' a restore if it
- *	wants to generate a script (see TAR output).
+ *	outputting 'restore' scripts etc.
  */
 void
 ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH)
@@ -1871,8 +1869,6 @@ ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH)
 
 		bytes_written = size * nmemb;
 	}
-	else if (AH->CustomOutPtr)
-		bytes_written = AH->CustomOutPtr(AH, ptr, size * nmemb);
 
 	/*
 	 * If we're doing a restore, and it's direct to DB, and we're connected
@@ -4051,28 +4047,13 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 	{
 		IssueACLPerBlob(AH, te);
 	}
-	else if (te->defnLen && AH->format != archTar)
+	else if (te->defnLen)
 	{
 		/*
 		 * If defnLen is set, the defnDumper has already been called for this
-		 * TOC entry.  We don't normally expect a defnDumper to be called for
-		 * a TOC entry a second time in _printTocEntry(), but there's an
-		 * exception.  The tar format first calls WriteToc(), which scans the
-		 * entire TOC, and then it later calls RestoreArchive() to generate
-		 * restore.sql, which scans the TOC again.  There doesn't appear to be
-		 * a good way to prevent a second defnDumper call in this case without
-		 * storing the definition in memory, which defeats the purpose.  This
-		 * second defnDumper invocation should generate the same output as the
-		 * first, but even if it doesn't, the worst-case scenario is that
-		 * restore.sql might have different statistics data than the archive.
-		 *
-		 * In all other cases, encountering a TOC entry a second time in
-		 * _printTocEntry() is unexpected, so we fail because one of our
-		 * assumptions must no longer hold true.
-		 *
-		 * XXX This is a layering violation, but the alternative is an awkward
-		 * and complicated callback infrastructure for this special case. This
-		 * might be worth revisiting in the future.
+		 * TOC entry.  We don't expect a defnDumper to be called for a TOC
+		 * entry a second time in _printTocEntry(), so we fail because one of
+		 * our assumptions must no longer hold true.
 		 */
 		pg_fatal("unexpected TOC entry in _printTocEntry(): %d %s %s",
 				 te->dumpId, te->desc, te->tag);

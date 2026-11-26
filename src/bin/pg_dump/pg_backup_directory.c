@@ -14,9 +14,8 @@
  *	in case the user has manually compressed them with 'gzip'.
  *
  *	NOTE: This format is identical to the files written in the tar file in
- *	the 'tar' format, except that we don't write the restore.sql file (TODO),
- *	and the tar format doesn't support compression. Please keep the formats in
- *	sync.
+ *	the 'tar' format, except that the tar format doesn't support compression.
+ *	Please keep the formats in sync.
  *
  *
  *	Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group

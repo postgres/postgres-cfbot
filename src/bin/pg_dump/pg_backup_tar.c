@@ -5,9 +5,6 @@
  *	This file is copied from the 'files' format file, but dumps data into
  *	one temp file then sends it to the output TAR archive.
  *
- *	The tar format also includes a 'restore.sql' script which is there for
- *	the benefit of humans. This script is never used by pg_restore.
- *
  *	NOTE: If you untar the created 'tar' file, the resulting files are
  *	compatible with the 'directory' format. Please keep the two formats in
  *	sync.
@@ -84,8 +81,6 @@ typedef struct
 	pgoff_t		tarFHpos;
 	pgoff_t		tarNextMember;
 	TAR_MEMBER *FH;
-	int			isSpecialScript;
-	TAR_MEMBER *scriptTH;
 } lclContext;
 
 typedef struct
@@ -111,8 +106,6 @@ static size_t tarWrite(const void *buf, size_t len, TAR_MEMBER *th);
 static void _tarWriteHeader(TAR_MEMBER *th);
 static int	_tarGetHeader(ArchiveHandle *AH, TAR_MEMBER *th);
 static size_t _tarReadRaw(ArchiveHandle *AH, void *buf, size_t len, TAR_MEMBER *th, FILE *fh);
-
-static size_t _scriptOut(ArchiveHandle *AH, const void *buf, size_t len);
 
 /*
  *	Initializer
@@ -154,7 +147,6 @@ InitArchiveFmt_Tar(ArchiveHandle *AH)
 	ctx = pg_malloc0_object(lclContext);
 	AH->formatData = ctx;
 	ctx->filePos = 0;
-	ctx->isSpecialScript = 0;
 
 	/*
 	 * Now open the tar file, and load the TOC if we're in read mode.
@@ -588,50 +580,10 @@ _PrintFileData(ArchiveHandle *AH, char *filename)
 static void
 _PrintTocData(ArchiveHandle *AH, TocEntry *te)
 {
-	lclContext *ctx = (lclContext *) AH->formatData;
 	lclTocEntry *tctx = (lclTocEntry *) te->formatData;
-	int			pos1;
 
 	if (!tctx->filename)
 		return;
-
-	/*
-	 * If we're writing the special restore.sql script, emit a suitable
-	 * command to include each table's data from the corresponding file.
-	 *
-	 * In the COPY case this is a bit klugy because the regular COPY command
-	 * was already printed before we get control.
-	 */
-	if (ctx->isSpecialScript)
-	{
-		if (te->copyStmt)
-		{
-			/* Abort the COPY FROM stdin */
-			ahprintf(AH, "\\.\n");
-
-			/*
-			 * The COPY statement should look like "COPY ... FROM stdin;\n",
-			 * see dumpTableData().
-			 */
-			pos1 = (int) strlen(te->copyStmt) - 13;
-			if (pos1 < 6 || strncmp(te->copyStmt, "COPY ", 5) != 0 ||
-				strcmp(te->copyStmt + pos1, " FROM stdin;\n") != 0)
-				pg_fatal("unexpected COPY statement syntax: \"%s\"",
-						 te->copyStmt);
-
-			/* Emit all but the FROM part ... */
-			ahwrite(te->copyStmt, 1, pos1, AH);
-			/* ... and insert modified FROM */
-			ahprintf(AH, " FROM '$$PATH$$/%s';\n\n", tctx->filename);
-		}
-		else
-		{
-			/* --inserts mode, no worries, just include the data file */
-			ahprintf(AH, "\\i $$PATH$$/%s\n\n", tctx->filename);
-		}
-
-		return;
-	}
 
 	if (strcmp(te->desc, "BLOBS") == 0)
 		_LoadLOs(AH, te);
@@ -770,11 +722,7 @@ _CloseArchive(ArchiveHandle *AH)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
 	TAR_MEMBER *th;
-	RestoreOptions *ropt;
-	RestoreOptions *savRopt;
-	DumpOptions *savDopt;
-	int			savVerbose,
-				i;
+	int			i;
 
 	if (AH->mode == archModeWrite)
 	{
@@ -793,50 +741,6 @@ _CloseArchive(ArchiveHandle *AH)
 		WriteDataChunks(AH, NULL);
 
 		/*
-		 * Now this format wants to append a script which does a full restore
-		 * if the files have been extracted.
-		 */
-		th = tarOpen(AH, "restore.sql", 'w');
-
-		tarPrintf(th, "--\n"
-				  "-- NOTE:\n"
-				  "--\n"
-				  "-- File paths need to be edited. Search for $$PATH$$ and\n"
-				  "-- replace it with the path to the directory containing\n"
-				  "-- the extracted data files.\n"
-				  "--\n");
-
-		AH->CustomOutPtr = _scriptOut;
-
-		ctx->isSpecialScript = 1;
-		ctx->scriptTH = th;
-
-		ropt = NewRestoreOptions();
-		memcpy(ropt, AH->public.ropt, sizeof(RestoreOptions));
-		ropt->filename = NULL;
-		ropt->dropSchema = 1;
-		ropt->superuser = NULL;
-		ropt->suppressDumpWarnings = true;
-
-		savDopt = AH->public.dopt;
-		savRopt = AH->public.ropt;
-
-		SetArchiveOptions((Archive *) AH, NULL, ropt);
-
-		savVerbose = AH->public.verbose;
-		AH->public.verbose = 0;
-
-		RestoreArchive((Archive *) AH);
-
-		SetArchiveOptions((Archive *) AH, savDopt, savRopt);
-
-		AH->public.verbose = savVerbose;
-
-		tarClose(AH, th);
-
-		ctx->isSpecialScript = 0;
-
-		/*
 		 * EOF marker for tar files is two blocks of NULLs.
 		 */
 		for (i = 0; i < TAR_BLOCK_SIZE * 2; i++)
@@ -851,14 +755,6 @@ _CloseArchive(ArchiveHandle *AH)
 	}
 
 	AH->FH = NULL;
-}
-
-static size_t
-_scriptOut(ArchiveHandle *AH, const void *buf, size_t len)
-{
-	lclContext *ctx = (lclContext *) AH->formatData;
-
-	return tarWrite(buf, len, ctx->scriptTH);
 }
 
 /*
