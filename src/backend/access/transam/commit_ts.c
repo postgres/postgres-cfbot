@@ -122,7 +122,7 @@ bool		track_commit_timestamp;
 
 static void SetXidCommitTsInPage(TransactionId xid, int nsubxids,
 								 TransactionId *subxids, TimestampTz ts,
-								 ReplOriginId nodeid, int64 pageno);
+								 ReplOriginId nodeid, int64 pageno, XLogRecPtr lsn);
 static void TransactionIdSetCommitTs(TransactionId xid, TimestampTz ts,
 									 ReplOriginId nodeid, int slotno);
 static void error_commit_ts_disabled(void);
@@ -137,6 +137,7 @@ static void WriteTruncateXlogRec(int64 pageno, TransactionId oldestXid);
  * for a transaction and its subtransaction tree, as efficiently as possible.
  *
  * xid is the top level transaction id.
+ * lsn is the end of the local commit record, not the replication origin's LSN.
  *
  * subxids is an array of xids of length nsubxids, representing subtransactions
  * in the tree of xid. In various cases nsubxids may be zero.
@@ -149,7 +150,7 @@ static void WriteTruncateXlogRec(int64 pageno, TransactionId oldestXid);
 void
 TransactionTreeSetCommitTsData(TransactionId xid, int nsubxids,
 							   TransactionId *subxids, TimestampTz timestamp,
-							   ReplOriginId nodeid)
+							   ReplOriginId nodeid, XLogRecPtr lsn)
 {
 	int			i;
 	TransactionId headxid;
@@ -165,6 +166,8 @@ TransactionTreeSetCommitTsData(TransactionId xid, int nsubxids,
 	 */
 	if (!commitTsShared->commitTsActive)
 		return;
+
+	Assert(XLogRecPtrIsValid(lsn));
 
 	/*
 	 * Figure out the latest Xid in this batch: either the last subxid if
@@ -197,7 +200,7 @@ TransactionTreeSetCommitTsData(TransactionId xid, int nsubxids,
 		/* subxids[i..j] are on the same page as the head */
 
 		SetXidCommitTsInPage(headxid, j - i, subxids + i, timestamp, nodeid,
-							 pageno);
+							 pageno, lsn);
 
 		/* if we wrote out all subxids, we're done. */
 		if (j >= nsubxids)
@@ -230,7 +233,7 @@ TransactionTreeSetCommitTsData(TransactionId xid, int nsubxids,
 static void
 SetXidCommitTsInPage(TransactionId xid, int nsubxids,
 					 TransactionId *subxids, TimestampTz ts,
-					 ReplOriginId nodeid, int64 pageno)
+					 ReplOriginId nodeid, int64 pageno, XLogRecPtr lsn)
 {
 	LWLock	   *lock = SimpleLruGetBankLock(CommitTsCtl, pageno);
 	int			slotno;
@@ -238,12 +241,15 @@ SetXidCommitTsInPage(TransactionId xid, int nsubxids,
 
 	LWLockAcquire(lock, LW_EXCLUSIVE);
 
-	slotno = SimpleLruReadPage(CommitTsCtl, pageno, true, &xid);
+	/* A write in progress may already have checked the page's LSN. */
+	slotno = SimpleLruReadPage(CommitTsCtl, pageno, false, &xid);
 
 	TransactionIdSetCommitTs(xid, ts, nodeid, slotno);
 	for (i = 0; i < nsubxids; i++)
 		TransactionIdSetCommitTs(subxids[i], ts, nodeid, slotno);
 
+	if (CommitTsCtl->shared->group_lsn[slotno] < lsn)
+		CommitTsCtl->shared->group_lsn[slotno] = lsn;
 	CommitTsCtl->shared->page_dirty[slotno] = true;
 
 	LWLockRelease(lock);
@@ -554,6 +560,7 @@ CommitTsShmemRequest(void *arg)
 					 .long_segment_names = false,
 
 					 .nslots = CommitTsShmemBuffers(),
+					 .nlsns = 1,
 
 					 .PagePrecedes = CommitTsPagePrecedes,
 					 .errdetail_for_io_error = commit_ts_errdetail_for_io_error,
