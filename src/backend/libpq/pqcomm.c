@@ -1091,7 +1091,7 @@ pq_getbytes(void *b, size_t len)
  *		returns 0 if OK, EOF if trouble
  * --------------------------------
  */
-static int
+int
 pq_discardbytes(size_t len)
 {
 	size_t		amount;

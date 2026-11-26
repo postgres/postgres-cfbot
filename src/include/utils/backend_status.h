@@ -133,6 +133,10 @@ typedef struct PgBackendStatus
 	SockAddr	st_clientaddr;
 	char	   *st_clienthostname;	/* MUST be null-terminated */
 
+	/* Proxy information */
+	SockAddr	st_proxyaddr;
+	char	   *st_proxyhostname;	/* MUST be null-terminated */
+
 	/* Information about SSL connection */
 	bool		st_ssl;
 	PgBackendSSLStatus *st_sslstatus;
