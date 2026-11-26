@@ -2051,3 +2051,25 @@ ANALYZE declared_order_grouping;
 -- estimate should track the 100 distinct groups, not ndistinct(a) * ndistinct(b)
 SELECT * FROM check_estimated_rows('SELECT COUNT(*) FROM declared_order_grouping GROUP BY a, b');
 DROP TABLE declared_order_grouping;
+
+--
+-- Auto-generated statistics object names.
+--
+-- A simple column reference contributes the column name, whether written
+-- unqualified or wrapped in parens; a more complex expression contributes a
+-- fixed "expr".
+CREATE TABLE auto_t1 (a INTEGER, b INTEGER, c INTEGER);
+
+-- Unqualified columns: bare column names.
+CREATE STATISTICS ON b, c FROM auto_t1;
+
+-- Table-qualified columns in parens: still the column names.
+CREATE STATISTICS ON (auto_t1.a), (auto_t1.b) FROM auto_t1;
+
+-- A parenthesized column and a more complex expression: the column resolves
+-- to its name, the expression uses the fixed "expr".
+CREATE STATISTICS ON (a), (b + c) FROM auto_t1;
+
+\dX auto_t1*
+
+DROP TABLE auto_t1;

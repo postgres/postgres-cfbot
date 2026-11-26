@@ -44,7 +44,7 @@
 
 static char *ChooseExtendedStatisticName(const char *name1, const char *name2,
 										 const char *label, Oid namespaceid);
-static char *ChooseExtendedStatisticNameAddition(List *exprs);
+static char *ChooseExtendedStatisticNameAddition(List *exprs, Oid relid);
 
 /*
  *		CREATE STATISTICS
@@ -169,7 +169,8 @@ CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 	{
 		namespaceId = RelationGetNamespace(rel);
 		namestr = ChooseExtendedStatisticName(RelationGetRelationName(rel),
-											  ChooseExtendedStatisticNameAddition(stmt->exprs),
+											  ChooseExtendedStatisticNameAddition(stmt->exprs,
+																				  relid),
 											  "stat",
 											  namespaceId);
 	}
@@ -878,7 +879,7 @@ ChooseExtendedStatisticName(const char *name1, const char *name2,
  * ChooseIndexNameAddition.
  */
 static char *
-ChooseExtendedStatisticNameAddition(List *exprs)
+ChooseExtendedStatisticNameAddition(List *exprs, Oid relid)
 {
 	char		buf[NAMEDATALEN * 2];
 	int			buflen = 0;
@@ -896,8 +897,12 @@ ChooseExtendedStatisticNameAddition(List *exprs)
 
 		name = selem->name;
 
-		if (buflen > 0)
-			buf[buflen++] = '_';	/* insert _ between names */
+		/*
+		 * A simple column reference resolves to a bare Var; use the column
+		 * name.
+		 */
+		if (!name && selem->expr && IsA(selem->expr, Var))
+			name = get_attname(relid, ((Var *) selem->expr)->varattno, true);
 
 		/*
 		 * We use fixed 'expr' for expressions, which have empty column names.
@@ -907,6 +912,9 @@ ChooseExtendedStatisticNameAddition(List *exprs)
 		 */
 		if (!name)
 			name = "expr";
+
+		if (buflen > 0)
+			buf[buflen++] = '_';	/* insert _ between names */
 
 		/*
 		 * At this point we have buflen <= NAMEDATALEN.  name should be less
