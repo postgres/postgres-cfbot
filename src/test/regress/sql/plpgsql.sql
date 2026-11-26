@@ -2301,6 +2301,21 @@ end$$ language plpgsql;
 select multi_datum_use(42);
 
 --
+-- Test a FROM-first SELECT as a PL/pgSQL statement
+--
+
+create function fromfirst_use(p1 int) returns bigint as $$
+declare x bigint;
+begin
+  from tenk1 where unique1 < p1 select count(*) into strict x;
+  return x;
+end$$ language plpgsql;
+
+select fromfirst_use(10);
+
+drop function fromfirst_use(int);
+
+--
 -- Test STRICT limiter in both planned and EXECUTE invocations.
 -- Note that a data-modifying query is quasi strict (disallow multi rows)
 -- by default in the planned case, but not in EXECUTE.
