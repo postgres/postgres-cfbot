@@ -304,6 +304,22 @@ Not-null constraints:
 Partitions:
     test_replica_identity4_1 FOR VALUES IN (1)
 
+-- \d+ shows a non-default replica identity of a partitioned table
+ALTER TABLE ONLY test_replica_identity4 REPLICA IDENTITY FULL;
+\d+ test_replica_identity4
+                    Partitioned table "public.test_replica_identity4"
+ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+--------------+-------------
+ id     | integer |           | not null |         | plain   |              | 
+Partition key: LIST (id)
+Indexes:
+    "test_replica_identity4_pkey" PRIMARY KEY, btree (id)
+Not-null constraints:
+    "test_replica_identity4_id_not_null" NOT NULL "id"
+Partitions:
+    test_replica_identity4_1 FOR VALUES IN (1)
+Replica Identity: FULL
+
 -- Dropping the primary key is not allowed if that would leave the replica
 -- identity as nullable
 CREATE TABLE test_replica_identity5 (a int not null, b int, c int,

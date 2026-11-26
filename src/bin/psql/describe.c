@@ -3545,6 +3545,7 @@ describeOneTableDetails(const char *schemaname,
 
 		if (verbose &&
 			(tableinfo.relkind == RELKIND_RELATION ||
+			 tableinfo.relkind == RELKIND_PARTITIONED_TABLE ||
 			 tableinfo.relkind == RELKIND_MATVIEW) &&
 
 		/*
