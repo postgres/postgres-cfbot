@@ -620,3 +620,194 @@ select description, inbytes, (test_conv(inbytes, 'big5', 'utf8')).* from big5_in
  invalid, NUL byte              | \x666f6fb64800 | \x666f6fe8b1a1 | \x00     | invalid byte sequence for encoding "BIG5": 0x00
 (5 rows)
 
+--
+-- Direct conversions between single-byte Cyrillic encodings
+--
+-- The hand-written direct conversion tables must agree with
+-- conversion via UTF-8: a direct conversion must not return a
+-- different character, must not succeed for a character that has
+-- no representation in the target encoding, and must not fail
+-- for a character that does.  (Bug #19831)
+--
+-- KOI8-R 0xa4 is U+2553; in WIN866 that is 0xd6, not 0xf3.
+SELECT encode(convert(decode('a4', 'hex'), 'KOI8R', 'WIN866'), 'hex') AS koi8r_a4_to_win866;
+ koi8r_a4_to_win866 
+--------------------
+ d6
+(1 row)
+
+SELECT encode(convert(decode('a441a6', 'hex'), 'KOI8R', 'WIN866'), 'hex') AS koi8r_string_to_win866;
+ koi8r_string_to_win866 
+------------------------
+ d641b8
+(1 row)
+
+-- ISO-8859-5 0xa0 is U+00A0, which WIN1251 has at 0xa0.
+SELECT encode(convert(decode('a0', 'hex'), 'ISO_8859_5', 'WIN1251'), 'hex') AS iso8859_5_a0_to_win1251;
+ iso8859_5_a0_to_win1251 
+-------------------------
+ a0
+(1 row)
+
+-- KOI8R -> WIN1251: every byte that has a WIN1251 representation
+SELECT encode(convert(decode('9a9c9ea3b3bfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff', 'hex'), 'KOI8R', 'WIN1251'), 'hex') AS koi8r_to_win1251;
+                                                               koi8r_to_win1251                                                               
+----------------------------------------------------------------------------------------------------------------------------------------------
+ a0b0b7b8a8a9fee0e1f6e4e5f4e3f5e8e9eaebecedeeeffff0f1f2f3e6e2fcfbe7f8fdf9f7fadec0c1d6c4c5d4c3d5c8c9cacbcccdcecfdfd0d1d2d3c6c2dcdbc7d8ddd9d7da
+(1 row)
+
+-- KOI8R 0xa4 has no representation in WIN1251 and must fail
+SELECT encode(convert(decode('a4', 'hex'), 'KOI8R', 'WIN1251'), 'hex');
+ERROR:  character with byte sequence 0xa4 in encoding "KOI8R" has no equivalent in encoding "WIN1251"
+-- KOI8R 0xa6 has no representation in WIN1251 and must fail
+SELECT encode(convert(decode('a6', 'hex'), 'KOI8R', 'WIN1251'), 'hex');
+ERROR:  character with byte sequence 0xa6 in encoding "KOI8R" has no equivalent in encoding "WIN1251"
+-- KOI8R 0xa7 has no representation in WIN1251 and must fail
+SELECT encode(convert(decode('a7', 'hex'), 'KOI8R', 'WIN1251'), 'hex');
+ERROR:  character with byte sequence 0xa7 in encoding "KOI8R" has no equivalent in encoding "WIN1251"
+-- KOI8R 0xad has no representation in WIN1251 and must fail
+SELECT encode(convert(decode('ad', 'hex'), 'KOI8R', 'WIN1251'), 'hex');
+ERROR:  character with byte sequence 0xad in encoding "KOI8R" has no equivalent in encoding "WIN1251"
+-- KOI8R 0xb4 has no representation in WIN1251 and must fail
+SELECT encode(convert(decode('b4', 'hex'), 'KOI8R', 'WIN1251'), 'hex');
+ERROR:  character with byte sequence 0xb4 in encoding "KOI8R" has no equivalent in encoding "WIN1251"
+-- KOI8R 0xb6 has no representation in WIN1251 and must fail
+SELECT encode(convert(decode('b6', 'hex'), 'KOI8R', 'WIN1251'), 'hex');
+ERROR:  character with byte sequence 0xb6 in encoding "KOI8R" has no equivalent in encoding "WIN1251"
+-- KOI8R 0xb7 has no representation in WIN1251 and must fail
+SELECT encode(convert(decode('b7', 'hex'), 'KOI8R', 'WIN1251'), 'hex');
+ERROR:  character with byte sequence 0xb7 in encoding "KOI8R" has no equivalent in encoding "WIN1251"
+-- KOI8R 0xbd has no representation in WIN1251 and must fail
+SELECT encode(convert(decode('bd', 'hex'), 'KOI8R', 'WIN1251'), 'hex');
+ERROR:  character with byte sequence 0xbd in encoding "KOI8R" has no equivalent in encoding "WIN1251"
+-- WIN1251 -> KOI8R: every byte that has a KOI8R representation
+SELECT encode(convert(decode('a0a8a9b0b7b8c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff', 'hex'), 'WIN1251', 'KOI8R'), 'hex') AS win1251_to_koi8r;
+                                                               win1251_to_koi8r                                                               
+----------------------------------------------------------------------------------------------------------------------------------------------
+ 9ab3bf9c9ea3e1e2f7e7e4e5f6fae9eaebecedeeeff0f2f3f4f5e6e8e3fefbfdfff9f8fce0f1c1c2d7c7c4c5d6dac9cacbcccdcecfd0d2d3d4d5c6c8c3dedbdddfd9d8dcc0d1
+(1 row)
+
+-- WIN1251 0xa5 has no representation in KOI8R and must fail
+SELECT encode(convert(decode('a5', 'hex'), 'WIN1251', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xa5 in encoding "WIN1251" has no equivalent in encoding "KOI8R"
+-- WIN1251 0xaa has no representation in KOI8R and must fail
+SELECT encode(convert(decode('aa', 'hex'), 'WIN1251', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xaa in encoding "WIN1251" has no equivalent in encoding "KOI8R"
+-- WIN1251 0xaf has no representation in KOI8R and must fail
+SELECT encode(convert(decode('af', 'hex'), 'WIN1251', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xaf in encoding "WIN1251" has no equivalent in encoding "KOI8R"
+-- WIN1251 0xb2 has no representation in KOI8R and must fail
+SELECT encode(convert(decode('b2', 'hex'), 'WIN1251', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xb2 in encoding "WIN1251" has no equivalent in encoding "KOI8R"
+-- WIN1251 0xb3 has no representation in KOI8R and must fail
+SELECT encode(convert(decode('b3', 'hex'), 'WIN1251', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xb3 in encoding "WIN1251" has no equivalent in encoding "KOI8R"
+-- WIN1251 0xb4 has no representation in KOI8R and must fail
+SELECT encode(convert(decode('b4', 'hex'), 'WIN1251', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xb4 in encoding "WIN1251" has no equivalent in encoding "KOI8R"
+-- WIN1251 0xba has no representation in KOI8R and must fail
+SELECT encode(convert(decode('ba', 'hex'), 'WIN1251', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xba in encoding "WIN1251" has no equivalent in encoding "KOI8R"
+-- WIN1251 0xbf has no representation in KOI8R and must fail
+SELECT encode(convert(decode('bf', 'hex'), 'WIN1251', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xbf in encoding "WIN1251" has no equivalent in encoding "KOI8R"
+-- KOI8R -> WIN866: every byte that has a WIN866 representation
+SELECT encode(convert(decode('808182838485868788898a8b8c8d8e8f9091929495969a9c9ea0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbec0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff', 'hex'), 'KOI8R', 'WIN866'), 'hex') AS koi8r_to_win866;
+                                                                                                                 koi8r_to_win866                                                                                                                  
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ c4b3dabfc0d9c3b4c2c1c5dfdcdbdddeb0b1b2fef9fbfff8facdbad5f1d6c9b8b7bbd4d3c8bebdbcc6c7ccb5f0b6b9d1d2cbcfd0cad8d7ceeea0a1e6a4a5e4a3e5a8a9aaabacadaeafefe0e1e2e3a6a2eceba7e8ede9e7ea9e808196848594839588898a8b8c8d8e8f9f9091929386829c9b87989d99979a
+(1 row)
+
+-- WIN866 -> KOI8R: every byte that has a KOI8R representation
+SELECT encode(convert(decode('808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f8f9fafbfeff', 'hex'), 'WIN866', 'KOI8R'), 'hex') AS win866_to_koi8r;
+                                                                                                                 win866_to_koi8r                                                                                                                  
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ e1e2f7e7e4e5f6fae9eaebecedeeeff0f2f3f4f5e6e8e3fefbfdfff9f8fce0f1c1c2d7c7c4c5d6dac9cacbcccdcecfd09091928187b2b4a7a6b5a1a8aeadac8384898886808aafb0aba5bbb8b1a0beb9bab6b7aaa9a2a4bdbc85828d8c8e8f8bd2d3d4d5c6c8c3dedbdddfd9d8dcc0d1b3a39c959e96949a
+(1 row)
+
+-- WIN866 0xf2 has no representation in KOI8R and must fail
+SELECT encode(convert(decode('f2', 'hex'), 'WIN866', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xf2 in encoding "WIN866" has no equivalent in encoding "KOI8R"
+-- WIN866 0xf3 has no representation in KOI8R and must fail
+SELECT encode(convert(decode('f3', 'hex'), 'WIN866', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xf3 in encoding "WIN866" has no equivalent in encoding "KOI8R"
+-- WIN866 0xf4 has no representation in KOI8R and must fail
+SELECT encode(convert(decode('f4', 'hex'), 'WIN866', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xf4 in encoding "WIN866" has no equivalent in encoding "KOI8R"
+-- WIN866 0xf5 has no representation in KOI8R and must fail
+SELECT encode(convert(decode('f5', 'hex'), 'WIN866', 'KOI8R'), 'hex');
+ERROR:  character with byte sequence 0xf5 in encoding "WIN866" has no equivalent in encoding "KOI8R"
+-- WIN866 -> WIN1251: every byte that has a WIN1251 representation
+SELECT encode(convert(decode('808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8fafcfdff', 'hex'), 'WIN866', 'WIN1251'), 'hex') AS win866_to_win1251;
+                                                                     win866_to_win1251                                                                      
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+ c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeffa8b8aabaafbfa1a2b0b7b9a4a0
+(1 row)
+
+-- WIN866 0xbd has no representation in WIN1251 and must fail
+SELECT encode(convert(decode('bd', 'hex'), 'WIN866', 'WIN1251'), 'hex');
+ERROR:  character with byte sequence 0xbd in encoding "WIN866" has no equivalent in encoding "WIN1251"
+-- WIN866 0xf9 has no representation in WIN1251 and must fail
+SELECT encode(convert(decode('f9', 'hex'), 'WIN866', 'WIN1251'), 'hex');
+ERROR:  character with byte sequence 0xf9 in encoding "WIN866" has no equivalent in encoding "WIN1251"
+-- WIN1251 -> WIN866: every byte that has a WIN866 representation
+SELECT encode(convert(decode('a0a1a2a4a8aaafb0b7b8b9babfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff', 'hex'), 'WIN1251', 'WIN866'), 'hex') AS win1251_to_win866;
+                                                                     win1251_to_win866                                                                      
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+ fff6f7fdf0f2f4f8faf1fcf3f5808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafe0e1e2e3e4e5e6e7e8e9eaebecedeeef
+(1 row)
+
+-- WIN1251 0xa5 has no representation in WIN866 and must fail
+SELECT encode(convert(decode('a5', 'hex'), 'WIN1251', 'WIN866'), 'hex');
+ERROR:  character with byte sequence 0xa5 in encoding "WIN1251" has no equivalent in encoding "WIN866"
+-- WIN1251 0xb2 has no representation in WIN866 and must fail
+SELECT encode(convert(decode('b2', 'hex'), 'WIN1251', 'WIN866'), 'hex');
+ERROR:  character with byte sequence 0xb2 in encoding "WIN1251" has no equivalent in encoding "WIN866"
+-- WIN1251 0xb3 has no representation in WIN866 and must fail
+SELECT encode(convert(decode('b3', 'hex'), 'WIN1251', 'WIN866'), 'hex');
+ERROR:  character with byte sequence 0xb3 in encoding "WIN1251" has no equivalent in encoding "WIN866"
+-- WIN1251 0xb4 has no representation in WIN866 and must fail
+SELECT encode(convert(decode('b4', 'hex'), 'WIN1251', 'WIN866'), 'hex');
+ERROR:  character with byte sequence 0xb4 in encoding "WIN1251" has no equivalent in encoding "WIN866"
+-- ISO_8859_5 -> KOI8R: every byte that has a KOI8R representation
+SELECT encode(convert(decode('a0a1b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff1', 'hex'), 'ISO_8859_5', 'KOI8R'), 'hex') AS iso_8859_5_to_koi8r;
+                                                          iso_8859_5_to_koi8r                                                           
+----------------------------------------------------------------------------------------------------------------------------------------
+ 9ab3e1e2f7e7e4e5f6fae9eaebecedeeeff0f2f3f4f5e6e8e3fefbfdfff9f8fce0f1c1c2d7c7c4c5d6dac9cacbcccdcecfd0d2d3d4d5c6c8c3dedbdddfd9d8dcc0d1a3
+(1 row)
+
+-- KOI8R -> ISO_8859_5: every byte that has a ISO_8859_5 representation
+SELECT encode(convert(decode('9aa3b3c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff', 'hex'), 'KOI8R', 'ISO_8859_5'), 'hex') AS koi8r_to_iso_8859_5;
+                                                          koi8r_to_iso_8859_5                                                           
+----------------------------------------------------------------------------------------------------------------------------------------
+ a0f1a1eed0d1e6d4d5e4d3e5d8d9dadbdcdddedfefe0e1e2e3d6d2ecebd7e8ede9e7eaceb0b1c6b4b5c4b3c5b8b9babbbcbdbebfcfc0c1c2c3b6b2cccbb7c8cdc9c7ca
+(1 row)
+
+-- ISO_8859_5 -> WIN1251: every byte that has a WIN1251 representation
+SELECT encode(convert(decode('a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff', 'hex'), 'ISO_8859_5', 'WIN1251'), 'hex') AS iso_8859_5_to_win1251;
+                                                                                      iso_8859_5_to_win1251                                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ a0a88081aabdb2afa38a8c8e8dada18fc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeffb9b89083babeb3bfbc9a9c9e9da7a29f
+(1 row)
+
+-- WIN1251 -> ISO_8859_5: every byte that has a ISO_8859_5 representation
+SELECT encode(convert(decode('8081838a8c8d8e8f909a9c9d9e9fa0a1a2a3a7a8aaadafb2b3b8b9babcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff', 'hex'), 'WIN1251', 'ISO_8859_5'), 'hex') AS win1251_to_iso_8859_5;
+                                                                                      win1251_to_iso_8859_5                                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ a2a3f3a9aaacabaff2f9fafcfbffa0aefea8fda1a4ada7a6f6f1f0f4f8a5f5f7b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef
+(1 row)
+
+-- ISO_8859_5 -> WIN866: every byte that has a WIN866 representation
+SELECT encode(convert(decode('a0a1a4a7aeb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f4f7fe', 'hex'), 'ISO_8859_5', 'WIN866'), 'hex') AS iso_8859_5_to_win866;
+                                                                 iso_8859_5_to_win866                                                                 
+------------------------------------------------------------------------------------------------------------------------------------------------------
+ fff0f2f4f6808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafe0e1e2e3e4e5e6e7e8e9eaebecedeeeffcf1f3f5f7
+(1 row)
+
+-- WIN866 -> ISO_8859_5: every byte that has a ISO_8859_5 representation
+SELECT encode(convert(decode('808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7fcff', 'hex'), 'WIN866', 'ISO_8859_5'), 'hex') AS win866_to_iso_8859_5;
+                                                                 win866_to_iso_8859_5                                                                 
+------------------------------------------------------------------------------------------------------------------------------------------------------
+ b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeefa1f1a4f4a7f7aefef0a0
+(1 row)
+
