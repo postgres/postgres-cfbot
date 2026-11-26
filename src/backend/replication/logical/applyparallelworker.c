@@ -52,9 +52,7 @@
  *
  * The dynamic shared memory segment contains: (a) a shm_mq that is used to
  * send changes in the transaction from leader apply worker to parallel apply
- * worker; (b) another shm_mq that is used to send errors (and other messages
- * reported via elog/ereport) from the parallel apply worker to leader apply
- * worker; (c) necessary information to be shared among parallel apply workers
+ * worker; (b) necessary information to be shared among parallel apply workers
  * and the leader apply worker (i.e. members of ParallelApplyWorkerShared).
  *
  * Locking Considerations
@@ -158,7 +156,6 @@
 #include "postgres.h"
 
 #include "libpq/pqformat.h"
-#include "libpq/pqmq.h"
 #include "pgstat.h"
 #include "postmaster/interrupt.h"
 #include "replication/logicallauncher.h"
@@ -184,18 +181,9 @@
  */
 #define PARALLEL_APPLY_KEY_SHARED		1
 #define PARALLEL_APPLY_KEY_MQ			2
-#define PARALLEL_APPLY_KEY_ERROR_QUEUE	3
 
 /* Queue size of DSM, 16 MB for now. */
 #define DSM_QUEUE_SIZE	(16 * 1024 * 1024)
-
-/*
- * Error queue size of DSM. It is desirable to make it large enough that a
- * typical ErrorResponse can be sent without blocking. That way, a worker that
- * errors out can write the whole message into the queue and terminate without
- * waiting for the user backend.
- */
-#define DSM_ERROR_QUEUE_SIZE			(16 * 1024)
 
 /*
  * There are three fields in each message received by the parallel apply
@@ -242,10 +230,9 @@ static List *ParallelApplyWorkerPool = NIL;
 ParallelApplyWorkerShared *MyParallelShared = NULL;
 
 /*
- * Is there a message sent by a parallel apply worker that the leader apply
- * worker needs to receive?
+ * Has a parallel apply worker exited?
  */
-volatile sig_atomic_t ParallelApplyMessagePending = false;
+volatile sig_atomic_t ParallelApplyWorkerExitPending = false;
 
 /*
  * Cache the parallel apply worker information required for applying the
@@ -258,6 +245,8 @@ static ParallelApplyWorkerInfo *stream_apply_worker = NULL;
 static List *subxactlist = NIL;
 
 static void pa_free_worker_info(ParallelApplyWorkerInfo *winfo);
+static ParallelApplyWorkerStatus pa_get_worker_status(ParallelApplyWorkerShared *wshared);
+pg_noreturn static void pa_report_worker_error(void);
 static ParallelTransState pa_get_xact_state(ParallelApplyWorkerShared *wshared);
 static PartialFileSetState pa_get_fileset_state(void);
 
@@ -323,7 +312,7 @@ pa_can_start(void)
  * Set up a dynamic shared memory segment.
  *
  * We set up a control region that contains a fixed-size worker info
- * (ParallelApplyWorkerShared), a message queue, and an error queue.
+ * (ParallelApplyWorkerShared) and a message queue.
  *
  * Returns true on success, false on failure.
  */
@@ -337,7 +326,6 @@ pa_setup_dsm(ParallelApplyWorkerInfo *winfo)
 	ParallelApplyWorkerShared *shared;
 	shm_mq	   *mq;
 	Size		queue_size = DSM_QUEUE_SIZE;
-	Size		error_queue_size = DSM_ERROR_QUEUE_SIZE;
 
 	/*
 	 * Estimate how much shared memory we need.
@@ -345,16 +333,14 @@ pa_setup_dsm(ParallelApplyWorkerInfo *winfo)
 	 * Because the TOC machinery may choose to insert padding of oddly-sized
 	 * requests, we must estimate each chunk separately.
 	 *
-	 * We need one key to register the location of the header, and two other
-	 * keys to track the locations of the message queue and the error message
-	 * queue.
+	 * We need one key to register the location of the header and a key to
+	 * track the location of the message queue.
 	 */
 	shm_toc_initialize_estimator(&e);
 	shm_toc_estimate_chunk(&e, sizeof(ParallelApplyWorkerShared));
 	shm_toc_estimate_chunk(&e, queue_size);
-	shm_toc_estimate_chunk(&e, error_queue_size);
 
-	shm_toc_estimate_keys(&e, 3);
+	shm_toc_estimate_keys(&e, 2);
 	segsize = shm_toc_estimate(&e);
 
 	/* Create the shared memory segment and establish a table of contents. */
@@ -373,6 +359,7 @@ pa_setup_dsm(ParallelApplyWorkerInfo *winfo)
 	pg_atomic_init_u32(&(shared->pending_stream_count), 0);
 	shared->last_commit_end = InvalidXLogRecPtr;
 	shared->fileset_state = FS_EMPTY;
+	shared->worker_status = PA_WORKER_RUNNING;
 
 	shm_toc_insert(toc, PARALLEL_APPLY_KEY_SHARED, shared);
 
@@ -383,15 +370,6 @@ pa_setup_dsm(ParallelApplyWorkerInfo *winfo)
 
 	/* Attach the queue. */
 	winfo->mq_handle = shm_mq_attach(mq, seg, NULL);
-
-	/* Set up error queue for the worker. */
-	mq = shm_mq_create(shm_toc_allocate(toc, error_queue_size),
-					   error_queue_size);
-	shm_toc_insert(toc, PARALLEL_APPLY_KEY_ERROR_QUEUE, mq);
-	shm_mq_set_receiver(mq, MyProc);
-
-	/* Attach the queue. */
-	winfo->error_mq_handle = shm_mq_attach(mq, seg, NULL);
 
 	/* Return results to caller. */
 	winfo->dsm_seg = seg;
@@ -604,9 +582,6 @@ pa_free_worker_info(ParallelApplyWorkerInfo *winfo)
 	if (winfo->mq_handle)
 		shm_mq_detach(winfo->mq_handle);
 
-	if (winfo->error_mq_handle)
-		shm_mq_detach(winfo->error_mq_handle);
-
 	/* Unlink the files with serialized changes. */
 	if (winfo->serialize_changes)
 		stream_cleanup_files(MyLogicalRepWorker->subid, winfo->shared->xid);
@@ -618,26 +593,6 @@ pa_free_worker_info(ParallelApplyWorkerInfo *winfo)
 	ParallelApplyWorkerPool = list_delete_ptr(ParallelApplyWorkerPool, winfo);
 
 	pfree(winfo);
-}
-
-/*
- * Detach the error queue for all parallel apply workers.
- */
-void
-pa_detach_all_error_mq(void)
-{
-	ListCell   *lc;
-
-	foreach(lc, ParallelApplyWorkerPool)
-	{
-		ParallelApplyWorkerInfo *winfo = (ParallelApplyWorkerInfo *) lfirst(lc);
-
-		if (winfo->error_mq_handle)
-		{
-			shm_mq_detach(winfo->error_mq_handle);
-			winfo->error_mq_handle = NULL;
-		}
-	}
 }
 
 /*
@@ -847,9 +802,7 @@ LogicalParallelApplyLoop(shm_mq_handle *mqh)
 }
 
 /*
- * Make sure the leader apply worker tries to read from our error queue one more
- * time. This guards against the case where we exit uncleanly without sending
- * an ErrorResponse, for example because some code calls proc_exit directly.
+ * Set the worker status and notify the leader apply worker about the shutdown.
  *
  * Also explicitly detach from dsm segment to invoke on_dsm_detach callbacks,
  * if any. See ParallelWorkerShutdown for details.
@@ -857,8 +810,18 @@ LogicalParallelApplyLoop(shm_mq_handle *mqh)
 static void
 pa_shutdown(int code, Datum arg)
 {
+	SpinLockAcquire(&MyParallelShared->mutex);
+
+	/* Update the worker status based on the shutdown code and request */
+	if (code == 0 && ShutdownRequestPending)
+		MyParallelShared->worker_status = PA_WORKER_STOPPED;
+	else
+		MyParallelShared->worker_status = PA_WORKER_FAILED;
+
+	SpinLockRelease(&MyParallelShared->mutex);
+
 	SendProcSignal(MyLogicalRepWorker->leader_pid,
-				   PROCSIG_PARALLEL_APPLY_MESSAGE,
+				   PROCSIG_PARALLEL_APPLY_WORKER_EXIT,
 				   INVALID_PROC_NUMBER);
 
 	dsm_detach((dsm_segment *) DatumGetPointer(arg));
@@ -876,7 +839,6 @@ ParallelApplyWorkerMain(Datum main_arg)
 	shm_toc    *toc;
 	shm_mq	   *mq;
 	shm_mq_handle *mqh;
-	shm_mq_handle *error_mqh;
 	ReplOriginId originid;
 	int			worker_slot = DatumGetInt32(main_arg);
 	char		originname[NAMEDATALEN];
@@ -945,17 +907,6 @@ ParallelApplyWorkerMain(Datum main_arg)
 	MyParallelShared->logicalrep_worker_slot_no = worker_slot;
 	SpinLockRelease(&MyParallelShared->mutex);
 
-	/*
-	 * Attach to the error queue.
-	 */
-	mq = shm_toc_lookup(toc, PARALLEL_APPLY_KEY_ERROR_QUEUE, false);
-	shm_mq_set_sender(mq, MyProc);
-	error_mqh = shm_mq_attach(mq, seg, NULL);
-
-	pq_redirect_to_shm_mq(seg, error_mqh);
-	pq_set_parallel_leader(MyLogicalRepWorker->leader_pid,
-						   INVALID_PROC_NUMBER);
-
 	MyLogicalRepWorker->last_send_time = MyLogicalRepWorker->last_recv_time =
 		MyLogicalRepWorker->reply_time = 0;
 
@@ -999,144 +950,48 @@ ParallelApplyWorkerMain(Datum main_arg)
 }
 
 /*
- * Handle receipt of an interrupt indicating a parallel apply worker message.
- *
- * Note: this is called within a signal handler! All we can do is set a flag
- * that will cause the next CHECK_FOR_INTERRUPTS() to invoke
- * ProcessParallelApplyMessages().
+ * Handle receipt of an interrupt indicating that a parallel apply worker
+ * has exited.
  */
 void
-HandleParallelApplyMessageInterrupt(void)
+HandleParallelApplyWorkerExitInterrupt(void)
 {
 	InterruptPending = true;
-	ParallelApplyMessagePending = true;
+	ParallelApplyWorkerExitPending = true;
 	/* latch will be set by procsignal_sigusr1_handler */
 }
 
-/*
- * Process a single protocol message received from a single parallel apply
- * worker.
- */
-static void
-ProcessParallelApplyMessage(StringInfo msg)
+pg_noreturn static void
+pa_report_worker_error(void)
 {
-	char		msgtype;
+	error_context_stack = apply_error_context_stack;
 
-	msgtype = pq_getmsgbyte(msg);
-
-	switch (msgtype)
-	{
-		case PqMsg_ErrorResponse:
-
-			/*
-			 * The parallel apply worker has already reported the error with
-			 * the context of the transaction that failed.  Report the error
-			 * of the leader apply worker with the error context callbacks
-			 * that were in effect.
-			 */
-			error_context_stack = apply_error_context_stack;
-
-			/*
-			 * The actual error must have been reported by the parallel apply
-			 * worker.
-			 */
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("logical replication parallel apply worker exited due to error"),
-					 errdetail("The leader apply worker will now exit and terminate any other parallel apply workers.")));
-
-			/*
-			 * Don't need to do anything about NoticeResponse and
-			 * NotificationResponse as the logical replication worker doesn't
-			 * need to send messages to the client.
-			 */
-		case PqMsg_NoticeResponse:
-		case PqMsg_NotificationResponse:
-			break;
-
-		default:
-			elog(ERROR, "unrecognized message type received from logical replication parallel apply worker: %c (message length %d bytes)",
-				 msgtype, msg->len);
-	}
+	ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("logical replication parallel apply worker exited due to error"),
+			 errdetail("The leader apply worker will now exit and terminate any other parallel apply workers.")));
 }
 
 /*
- * Handle any queued protocol messages received from parallel apply workers.
+ * Process parallel apply worker exits.
  */
 void
-ProcessParallelApplyMessages(void)
+ProcessParallelApplyWorkerExits(void)
 {
-	ListCell   *lc;
-	MemoryContext oldcontext;
+	ParallelApplyWorkerExitPending = false;
 
-	static MemoryContext hpam_context = NULL;
-
-	/*
-	 * This is invoked from ProcessInterrupts(), and since some of the
-	 * functions it calls contain CHECK_FOR_INTERRUPTS(), there is a potential
-	 * for recursive calls if more signals are received while this runs. It's
-	 * unclear that recursive entry would be safe, and it doesn't seem useful
-	 * even if it is safe, so let's block interrupts until done.
-	 */
-	HOLD_INTERRUPTS();
-
-	/*
-	 * Moreover, CurrentMemoryContext might be pointing almost anywhere. We
-	 * don't want to risk leaking data into long-lived contexts, so let's do
-	 * our work here in a private context that we can reset on each use.
-	 */
-	if (!hpam_context)			/* first time through? */
-		hpam_context = AllocSetContextCreate(TopMemoryContext,
-											 "ProcessParallelApplyMessages",
-											 ALLOCSET_DEFAULT_SIZES);
-	else
-		MemoryContextReset(hpam_context);
-
-	oldcontext = MemoryContextSwitchTo(hpam_context);
-
-	ParallelApplyMessagePending = false;
-
-	foreach(lc, ParallelApplyWorkerPool)
+	foreach_ptr(ParallelApplyWorkerInfo, winfo, ParallelApplyWorkerPool)
 	{
-		shm_mq_result res;
-		Size		nbytes;
-		void	   *data;
-		ParallelApplyWorkerInfo *winfo = (ParallelApplyWorkerInfo *) lfirst(lc);
-
-		/*
-		 * The leader will detach from the error queue and set it to NULL
-		 * before preparing to stop all parallel apply workers, so we don't
-		 * need to handle error messages anymore. See
-		 * logicalrep_worker_detach.
-		 */
-		if (!winfo->error_mq_handle)
-			continue;
-
-		res = shm_mq_receive(winfo->error_mq_handle, &nbytes, &data, true);
-
-		if (res == SHM_MQ_WOULD_BLOCK)
-			continue;
-		else if (res == SHM_MQ_SUCCESS)
+		switch (pa_get_worker_status(winfo->shared))
 		{
-			StringInfoData msg;
-
-			initStringInfo(&msg);
-			appendBinaryStringInfo(&msg, data, nbytes);
-			ProcessParallelApplyMessage(&msg);
-			pfree(msg.data);
+			case PA_WORKER_RUNNING:
+				break;
+			case PA_WORKER_STOPPED:
+				continue;
+			case PA_WORKER_FAILED:
+				pa_report_worker_error();
 		}
-		else
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("lost connection to the logical replication parallel apply worker")));
 	}
-
-	MemoryContextSwitchTo(oldcontext);
-
-	/* Might as well clear the context on our way out */
-	MemoryContextReset(hpam_context);
-
-	RESUME_INTERRUPTS();
 }
 
 /*
@@ -1329,6 +1184,18 @@ pa_get_xact_state(ParallelApplyWorkerShared *wshared)
 	SpinLockRelease(&wshared->mutex);
 
 	return xact_state;
+}
+
+static ParallelApplyWorkerStatus
+pa_get_worker_status(ParallelApplyWorkerShared *wshared)
+{
+	ParallelApplyWorkerStatus worker_status;
+
+	SpinLockAcquire(&wshared->mutex);
+	worker_status = wshared->worker_status;
+	SpinLockRelease(&wshared->mutex);
+
+	return worker_status;
 }
 
 /*
