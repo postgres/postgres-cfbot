@@ -342,6 +342,15 @@ FROM JSON_TABLE(
 		COLUMNS (y text FORMAT JSON PATH '$')
 	) jt;
 
+-- Duplicate PASSING argument names are not allowed
+SELECT *
+FROM JSON_TABLE(
+	'{ "favorites":[{ "kind":"comedy" },{ "kind":"drama" }] }',
+	'$.favorites[*]?(@.kind == $k1)'
+		PASSING 'comedy' AS k1, 'drama' AS k1
+		COLUMNS (kind text PATH '$.kind')
+	) jt;
+
 -- PASSING arguments are also passed to column paths
 SELECT *
 FROM JSON_TABLE(
