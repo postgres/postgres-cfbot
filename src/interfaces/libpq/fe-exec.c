@@ -29,6 +29,11 @@
 #include "libpq-int.h"
 #include "mb/pg_wchar.h"
 
+#ifdef USE_ZSTD
+/* Avoid per-message compression and flush overhead for very small inputs. */
+#define PQ_COMPRESSION_MIN_INPUT_SIZE 1024
+#endif
+
 /* keep this in same order as ExecStatusType in libpq-fe.h */
 char	   *const pgresStatus[] = {
 	"PGRES_EMPTY_QUERY",
@@ -2732,6 +2737,17 @@ PQputCopyData(PGconn *conn, const char *buffer, int nbytes)
 
 	if (nbytes > 0)
 	{
+#ifdef USE_ZSTD
+		if (conn->compression_ready &&
+			conn->asyncStatus == PGASYNC_COPY_IN &&
+			nbytes >= PQ_COMPRESSION_MIN_INPUT_SIZE)
+		{
+			if (pqPutCompressedCopyData(conn, buffer, nbytes) < 0)
+				return -1;
+			return 1;
+		}
+#endif
+
 		/*
 		 * Try to flush any previously sent data in preference to growing the
 		 * output buffer.  If we can't enlarge the buffer enough to hold the
@@ -2773,6 +2789,13 @@ PQputCopyEnd(PGconn *conn, const char *errormsg)
 		libpq_append_conn_error(conn, "no COPY in progress");
 		return -1;
 	}
+
+#ifdef USE_ZSTD
+	if (conn->compression_ready &&
+		conn->asyncStatus == PGASYNC_COPY_IN &&
+		pqEndCompressedCopyData(conn) < 0)
+		return -1;
+#endif
 
 	/*
 	 * Send the COPY END indicator.  This is simple enough that we don't
