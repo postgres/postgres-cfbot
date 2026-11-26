@@ -668,6 +668,32 @@ assign_collations_walker(Node *node, assign_collations_context *context)
 															&loccontext);
 						}
 						break;
+					case T_SafeTypeCastExpr:
+						{
+							/*
+							 * Like CaseExpr, we do not recurse into the input
+							 * expression.  It was already marked with
+							 * collations during transformSafeTypeCast, and its
+							 * collation reaches the result only through
+							 * castexpr's placeholder.
+							 */
+							SafeTypeCastExpr *stc = (SafeTypeCastExpr *) node;
+
+							(void) assign_collations_walker((Node *) stc->castexpr,
+															&loccontext);
+							(void) assign_collations_walker((Node *) stc->defexpr,
+															&loccontext);
+						}
+						break;
+					case T_SafeCastElement:
+						{
+							/* Likewise, see T_SafeTypeCastExpr above */
+							SafeCastElement *elem = (SafeCastElement *) node;
+
+							(void) assign_collations_walker((Node *) elem->castexpr,
+															&loccontext);
+						}
+						break;
 					case T_SubscriptingRef:
 						{
 							/*
