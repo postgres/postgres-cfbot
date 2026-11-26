@@ -4258,8 +4258,12 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 			}
 		}
 
-		/* confirm all writes so far */
-		send_feedback(last_received, false, false);
+		/*
+		 * Confirm all writes so far.  Skip once the publisher has ended the
+		 * COPY; PQputCopyData would fail with "no COPY in progress".
+		 */
+		if (!endofstream)
+			send_feedback(last_received, false, false);
 
 		/* Reset the timestamp if no message was received */
 		rdt_data.last_recv_time = 0;
