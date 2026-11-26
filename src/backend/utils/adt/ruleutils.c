@@ -2577,14 +2577,13 @@ pg_get_constraintdef_worker(Oid constraintId, bool fullCommand,
 					operators[i] = DatumGetObjectId(elems[i]);
 
 				/* pg_get_indexdef_worker does the rest */
-				/* suppress tablespace because pg_dump wants it that way */
 				appendStringInfoString(&buf,
 									   pg_get_indexdef_worker(indexOid,
 															  0,
 															  operators,
 															  false,
 															  false,
-															  false,
+															  fullCommand,
 															  false,
 															  prettyFlags,
 															  false));
