@@ -347,6 +347,63 @@ check_completion(
 
 clear_query();
 
+# check CREATE INDEX options following the index expression list.
+check_completion(
+	"CREATE INDEX CONCURRENTLY idx ON tab1 (c1) INC\t",
+	qr/INCLUDE \(/,
+	"complete a named concurrent index without USING");
+
+clear_query();
+
+check_completion(
+	"CREATE INDEX CONCURRENTLY ON tab1 (c1) WH\t",
+	qr/WHERE /,
+	"complete an unnamed concurrent index without USING");
+
+clear_query();
+
+check_completion(
+	"CREATE INDEX idx ON tab1 (c1) WI\t",
+	qr/WITH \(/,
+	"complete a named non-concurrent index without USING");
+
+clear_query();
+
+check_completion(
+	"CREATE INDEX ON tab1 (c1) TAB\t",
+	qr/TABLESPACE /,
+	"complete an unnamed non-concurrent index without USING");
+
+clear_query();
+
+check_completion(
+	"CREATE INDEX CONCURRENTLY idx ON tab1 USING btree (c1) WH\t",
+	qr/WHERE /,
+	"complete a named concurrent index with USING");
+
+clear_query();
+
+check_completion(
+	"CREATE INDEX CONCURRENTLY ON tab1 USING btree (c1) INC\t",
+	qr/INCLUDE \(/,
+	"complete an unnamed concurrent index with USING");
+
+clear_query();
+
+check_completion(
+	"CREATE UNIQUE INDEX idx ON tab1 USING btree (c1) NULLS \t\t",
+	qr/DISTINCT.*NOT DISTINCT/s,
+	"complete a named non-concurrent index with USING");
+
+clear_query();
+
+check_completion(
+	"CREATE INDEX ON tab1 USING btree (c1) WI\t",
+	qr/WITH \(/,
+	"complete an unnamed non-concurrent index with USING");
+
+clear_query();
+
 # check VersionedQuery infrastructure
 check_completion(
 	"DROP PUBLIC\t \t\t",

@@ -3589,6 +3589,25 @@ match_previous_words(int pattern_id,
 			 !TailMatches("FOR", MatchAny, MatchAny, MatchAny))
 		COMPLETE_WITH("(");
 
+	/* Complete options after the parenthesized list of index expressions. */
+	else if (TailMatches("INDEX", "ON", MatchAny, "(*)") ||
+			 TailMatches("INDEX", MatchAny, "ON", MatchAny, "(*)") ||
+			 TailMatches("INDEX", "CONCURRENTLY", MatchAny, "ON", MatchAny, "(*)") ||
+			 TailMatches("INDEX", "ON", MatchAny, "USING", MatchAny, "(*)") ||
+			 TailMatches("INDEX", MatchAny, "ON", MatchAny, "USING", MatchAny, "(*)") ||
+			 TailMatches("INDEX", "CONCURRENTLY", MatchAny, "ON", MatchAny, "USING", MatchAny, "(*)"))
+		COMPLETE_WITH("INCLUDE (", "NULLS DISTINCT", "NULLS NOT DISTINCT",
+					  "WITH (", "TABLESPACE", "WHERE");
+
+	/* Complete NULLS [NOT] DISTINCT. */
+	else if (TailMatches("INDEX", "ON", MatchAny, "(*)", "NULLS") ||
+			 TailMatches("INDEX", MatchAny, "ON", MatchAny, "(*)", "NULLS") ||
+			 TailMatches("INDEX", "CONCURRENTLY", MatchAny, "ON", MatchAny, "(*)", "NULLS") ||
+			 TailMatches("INDEX", "ON", MatchAny, "USING", MatchAny, "(*)", "NULLS") ||
+			 TailMatches("INDEX", MatchAny, "ON", MatchAny, "USING", MatchAny, "(*)", "NULLS") ||
+			 TailMatches("INDEX", "CONCURRENTLY", MatchAny, "ON", MatchAny, "USING", MatchAny, "(*)", "NULLS"))
+		COMPLETE_WITH("DISTINCT", "NOT DISTINCT");
+
 	/* CREATE OR REPLACE */
 	else if (Matches("CREATE", "OR"))
 		COMPLETE_WITH("REPLACE");
