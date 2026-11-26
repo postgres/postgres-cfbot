@@ -830,3 +830,91 @@ select * from a, coalesce(b) as c(d int, e int, f int, g int);  -- fail
 with a(b) as (values (row(1,2,3)))
 select * from a, coalesce(b) as c(d int, e int, f float);  -- fail
 select * from int8_tbl, coalesce(row(1)) as (a int, b int);  -- fail
+
+-- Columns added to the composite types that functions return show up in the
+-- middle of the columns of the RTE, so the column alias list has to make room
+-- for them; leave the objects around for the pg_upgrade test
+create type rngfunc_t0 as (a int);
+create function rngfunc_f0() returns rngfunc_t0
+  language sql as 'select null::rngfunc_t0';
+create view rngfunc_one_v as
+  select * from rngfunc_f0() with ordinality;
+alter type rngfunc_t0 add attribute x int;
+select format('create view rngfunc_one_v2 as %s',
+              rtrim(pg_get_viewdef('rngfunc_one_v'::regclass), ';'))
+\gexec
+select * from rngfunc_one_v2;
+
+-- The same for a function that returns a domain over a composite type
+create type rngfunc_t1 as (a int);
+create domain rngfunc_d1 as rngfunc_t1;
+create function rngfunc_f1() returns rngfunc_d1
+  language sql as 'select null::rngfunc_d1';
+create view rngfunc_dom_v as
+  select * from rngfunc_f1() with ordinality;
+alter type rngfunc_t1 add attribute x int;
+select format('create view rngfunc_dom_v2 as %s',
+              rtrim(pg_get_viewdef('rngfunc_dom_v'::regclass), ';'))
+\gexec
+select * from rngfunc_dom_v2;
+
+-- Without ordinality, the aliases after the new columns of a function shift
+create type rngfunc_t2 as (a int);
+create type rngfunc_t3 as (b int);
+create function rngfunc_f2() returns rngfunc_t2
+  language sql as 'select 1';
+create function rngfunc_f3() returns rngfunc_t3
+  language sql as 'select 2';
+create view rngfunc_alias_v as
+  select * from rows from (rngfunc_f2(), rngfunc_f3()) as r(m, n);
+alter type rngfunc_t2 add attribute c int;
+create or replace function rngfunc_f2() returns rngfunc_t2
+  language sql as 'select 1, 99';
+select * from rngfunc_alias_v;
+select format('create view rngfunc_alias_v2 as %s',
+              rtrim(pg_get_viewdef('rngfunc_alias_v'::regclass), ';'))
+\gexec
+select * from rngfunc_alias_v2;
+
+-- With both, for a function that had no columns and a column named ordinality
+create type rngfunc_t4 as ();
+create type rngfunc_t5 as (a int);
+create function rngfunc_f4() returns rngfunc_t4
+  language sql as 'select row()::rngfunc_t4';
+create function rngfunc_f5() returns rngfunc_t5
+  language sql as 'select 1';
+create view rngfunc_grown_v as
+  select * from rows from (rngfunc_f4(), rngfunc_f5()) with ordinality;
+select * from rngfunc_grown_v;
+alter type rngfunc_t4 add attribute d int;
+alter type rngfunc_t4 add attribute x int;
+alter type rngfunc_t4 drop attribute d;
+alter type rngfunc_t5 add attribute ordinality int;
+create or replace function rngfunc_f4() returns rngfunc_t4
+  language sql as 'select 10';
+create or replace function rngfunc_f5() returns rngfunc_t5
+  language sql as 'select 1, 2';
+select * from rngfunc_grown_v;
+select * from rows from (rngfunc_f4(), rngfunc_f5()) with ordinality;
+select pg_get_viewdef('rngfunc_grown_v'::regclass);
+select format('create view rngfunc_grown_v2 as %s',
+              rtrim(pg_get_viewdef('rngfunc_grown_v'::regclass), ';'))
+\gexec
+select * from rngfunc_grown_v2;
+
+-- New columns after a dropped last column, renamed away from an earlier one
+create type rngfunc_t6 as (a int, b int);
+create type rngfunc_t7 as ();
+create function rngfunc_f6() returns rngfunc_t6
+  language sql as 'select null::rngfunc_t6';
+create function rngfunc_f7() returns rngfunc_t7
+  language sql as 'select null::rngfunc_t7';
+create view rngfunc_drop_v as
+  select a, ordinality
+    from rows from (rngfunc_f6(), rngfunc_f7()) with ordinality;
+alter type rngfunc_t6 drop attribute b;
+alter type rngfunc_t7 add attribute a int;
+select format('create view rngfunc_drop_v2 as %s',
+              rtrim(pg_get_viewdef('rngfunc_drop_v'::regclass), ';'))
+\gexec
+select * from rngfunc_drop_v2;
