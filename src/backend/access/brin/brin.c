@@ -2856,7 +2856,7 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 									ParallelTableScanFromBrinShared(brinshared),
 									SO_NONE);
 
-	reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
+	reltuples = table_index_build_scan(heap, index, indexInfo, true, progress,
 									   brinbuildCallbackParallel, state, scan);
 
 	/* insert the last item */
