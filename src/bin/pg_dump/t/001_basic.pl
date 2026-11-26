@@ -208,6 +208,11 @@ command_fails_like(
 	'pg_dump: unrecognized archive format');
 
 command_fails_like(
+	[ 'pg_restore', '-f -', '-F', '' ],
+	qr/\Qpg_restore: error: unrecognized archive format "";\E/,
+	'pg_restore: empty archive format');
+
+command_fails_like(
 	[ 'pg_dump', '--on-conflict-do-nothing' ],
 	qr/pg_dump: error: option --on-conflict-do-nothing requires option --inserts, --rows-per-insert, or --column-inserts/,
 	'pg_dump: --on-conflict-do-nothing requires --inserts, --rows-per-insert, --column-inserts'

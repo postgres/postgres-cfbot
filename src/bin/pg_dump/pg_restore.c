@@ -194,8 +194,7 @@ main(int argc, char **argv)
 				opts->filename = pg_strdup(optarg);
 				break;
 			case 'F':
-				if (strlen(optarg) != 0)
-					opts->formatName = pg_strdup(optarg);
+				opts->formatName = pg_strdup(optarg);
 				break;
 			case 'h':
 				if (strlen(optarg) != 0)
