@@ -69,6 +69,10 @@ extern "C"
 /* Indicates presence of the PQAUTHDATA_OAUTH_BEARER_TOKEN_V2 authdata hook */
 #define LIBPQ_HAS_OAUTH_BEARER_TOKEN_V2 1
 
+/* Features added in PostgreSQL v20: */
+/* Indicates presence of PQsendQueryPreparedPortal */
+#define LIBPQ_HAS_SEND_QUERY_PREPARED_PORTAL 1
+
 /*
  * Option flags for PQcopyResult
  */
@@ -542,6 +546,14 @@ extern int	PQsendQueryPrepared(PGconn *conn,
 								const int *paramLengths,
 								const int *paramFormats,
 								int resultFormat);
+extern int	PQsendQueryPreparedPortal(PGconn *conn,
+									  const char *stmtName,
+									  const char *portalName,
+									  int nParams,
+									  const char *const *paramValues,
+									  const int *paramLengths,
+									  const int *paramFormats,
+									  int resultFormat);
 extern int	PQsetSingleRowMode(PGconn *conn);
 extern int	PQsetChunkedRowsMode(PGconn *conn, int chunkSize);
 extern PGresult *PQgetResult(PGconn *conn);

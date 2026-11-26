@@ -160,6 +160,57 @@ LINE 1: SELECT $1, $2
  foo4     | bar4
 (1 row)
 
+-- Destination portal for a pending bind
+\portal
+\portal: missing required argument
+\close_portal
+\close_portal: missing required argument
+SELECT name = '' AS unnamed FROM pg_cursors WHERE statement = current_query() \parse inspect_portal
+BEGIN;
+\portal unused
+\bind_named inspect_portal \g
+ unnamed 
+---------
+ t
+(1 row)
+
+\bind_named stmt2 'named' \portal unused \portal chosen \g
+ ?column? 
+----------
+ named
+(1 row)
+
+SELECT name FROM pg_cursors WHERE name IN ('unused', 'chosen') ORDER BY name;
+  name  
+--------
+ chosen
+(1 row)
+
+\close_portal chosen
+SELECT count(*) FROM pg_cursors WHERE name = 'chosen';
+ count 
+-------
+     0
+(1 row)
+
+\close_portal chosen
+\bind_named inspect_portal \portal overwritten \portal '' \g
+ unnamed 
+---------
+ t
+(1 row)
+
+\close_portal ''
+\bind_named stmt2 'first' \portal chosen \g
+ ?column? 
+----------
+ first
+(1 row)
+
+\bind_named stmt2 'duplicate' \portal chosen \g
+ERROR:  cursor "chosen" already exists
+ROLLBACK;
+\close_prepared inspect_portal
 -- \close_prepared (extended query protocol)
 \close_prepared
 \close_prepared: missing required argument
@@ -4724,6 +4775,8 @@ bar 'bar' "bar"
 	\C arg1
 	\c arg1 arg2 arg3 arg4
 	\cd arg1
+	\portal ignored
+	\close_portal ignored
 	\close_prepared stmt1
 	\conninfo
 	\copy arg1 arg2 arg3 arg4 arg5 arg6

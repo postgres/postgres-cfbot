@@ -932,7 +932,8 @@ INSERT INTO tbl1 VALUES ($1, $2) \bind 'first value' 'second value' \g
          <literal>\bind_named</literal> is equivalent to <literal>\bind</literal>,
          except that it takes the name of an existing prepared statement as
          first parameter. An empty string denotes the unnamed prepared
-         statement.
+         statement. To choose the destination portal, follow this command
+         with <link linkend="app-psql-meta-command-portal"><literal>\portal</literal></link>.
         </para>
 
         <para>
@@ -1064,6 +1065,18 @@ INSERT INTO tbls1 VALUES ($1, $2) \parse stmt1
           To print your current working directory, use <literal>\! pwd</literal>.
          </para>
         </tip>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry id="app-psql-meta-command-close-portal">
+       <term><literal>\close_portal</literal> <replaceable class="parameter">portal_name</replaceable></term>
+
+       <listitem>
+        <para>
+         Sends an extended-protocol Close message for the specified portal.
+         An empty string selects the unnamed portal.  Closing a portal that
+         does not exist succeeds.
+        </para>
        </listitem>
       </varlistentry>
 
@@ -3010,6 +3023,32 @@ SELECT $1 \parse stmt1
         </listitem>
       </varlistentry>
 
+      <varlistentry id="app-psql-meta-command-portal">
+       <term><literal>\portal</literal> <replaceable class="parameter">portal_name</replaceable></term>
+
+       <listitem>
+        <para>
+         Selects the destination portal for a pending <literal>\bind_named</literal>.
+         Use it after <literal>\bind_named</literal> and before the command
+         that sends the query.  If used more than once, the last name wins.
+         An empty string selects the unnamed portal, which is the default.
+         The command has no effect without a pending <literal>\bind_named</literal>.
+        </para>
+        <para>
+         A named portal lasts until the transaction ends or it is closed.
+         For example, to inspect and then close a portal:
+<programlisting>
+BEGIN;
+SELECT $1::integer \parse stmt1
+\bind_named stmt1 42 \portal p1 \g
+SELECT name FROM pg_cursors WHERE name = 'p1';
+\close_portal p1
+COMMIT;
+</programlisting>
+        </para>
+       </listitem>
+      </varlistentry>
+
       <varlistentry id="app-psql-meta-command-prompt">
         <term><literal>\prompt [ <replaceable class="parameter">text</replaceable> ] <replaceable class="parameter">name</replaceable></literal></term>
         <listitem>
@@ -3755,7 +3794,8 @@ testdb=&gt; <userinput>\setenv LESS -imx4F</userinput>
         All queries executed while a pipeline is ongoing use the extended
         query protocol. Queries are appended to the pipeline when ending with
         a semicolon. The meta-commands <literal>\bind</literal>,
-        <literal>\bind_named</literal>, <literal>\close_prepared</literal> or
+        <literal>\bind_named</literal>, <literal>\portal</literal>,
+        <literal>\close_portal</literal>, <literal>\close_prepared</literal> or
         <literal>\parse</literal> can be used in an ongoing pipeline. While
         a pipeline is ongoing, <literal>\sendpipeline</literal> will append
         the current query buffer to the pipeline. Other meta-commands like

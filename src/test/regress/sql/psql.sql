@@ -68,6 +68,25 @@ SELECT $1, $2 \parse stmt3
 -- Multiple \g calls mean multiple executions
 \bind_named stmt2 'foo3' \g \bind_named stmt3 'foo4' 'bar4' \g
 
+-- Destination portal for a pending bind
+\portal
+\close_portal
+SELECT name = '' AS unnamed FROM pg_cursors WHERE statement = current_query() \parse inspect_portal
+BEGIN;
+\portal unused
+\bind_named inspect_portal \g
+\bind_named stmt2 'named' \portal unused \portal chosen \g
+SELECT name FROM pg_cursors WHERE name IN ('unused', 'chosen') ORDER BY name;
+\close_portal chosen
+SELECT count(*) FROM pg_cursors WHERE name = 'chosen';
+\close_portal chosen
+\bind_named inspect_portal \portal overwritten \portal '' \g
+\close_portal ''
+\bind_named stmt2 'first' \portal chosen \g
+\bind_named stmt2 'duplicate' \portal chosen \g
+ROLLBACK;
+\close_prepared inspect_portal
+
 -- \close_prepared (extended query protocol)
 \close_prepared
 \close_prepared ''
@@ -1062,6 +1081,8 @@ select \if false \\ (bogus \else \\ 42 \endif \\ forty_two;
 	\C arg1
 	\c arg1 arg2 arg3 arg4
 	\cd arg1
+	\portal ignored
+	\close_portal ignored
 	\close_prepared stmt1
 	\conninfo
 	\copy arg1 arg2 arg3 arg4 arg5 arg6

@@ -69,6 +69,7 @@ static bool PQsendQueryStart(PGconn *conn, bool newQuery);
 static int	PQsendQueryGuts(PGconn *conn,
 							const char *command,
 							const char *stmtName,
+							const char *portalName,
 							int nParams,
 							const Oid *paramTypes,
 							const char *const *paramValues,
@@ -1534,6 +1535,7 @@ PQsendQueryParams(PGconn *conn,
 	return PQsendQueryGuts(conn,
 						   command,
 						   "",	/* use unnamed statement */
+						   "",	/* use unnamed portal */
 						   nParams,
 						   paramTypes,
 						   paramValues,
@@ -1655,6 +1657,24 @@ PQsendQueryPrepared(PGconn *conn,
 					const int *paramFormats,
 					int resultFormat)
 {
+	return PQsendQueryPreparedPortal(conn, stmtName, "", nParams,
+									 paramValues, paramLengths, paramFormats,
+									 resultFormat);
+}
+
+/*
+ * Bind a prepared statement to the specified portal and execute it.
+ */
+int
+PQsendQueryPreparedPortal(PGconn *conn,
+						  const char *stmtName,
+						  const char *portalName,
+						  int nParams,
+						  const char *const *paramValues,
+						  const int *paramLengths,
+						  const int *paramFormats,
+						  int resultFormat)
+{
 	if (!PQsendQueryStart(conn, true))
 		return 0;
 
@@ -1662,6 +1682,11 @@ PQsendQueryPrepared(PGconn *conn,
 	if (!stmtName)
 	{
 		libpq_append_conn_error(conn, "statement name is a null pointer");
+		return 0;
+	}
+	if (!portalName)
+	{
+		libpq_append_conn_error(conn, "portal name is a null pointer");
 		return 0;
 	}
 	if (nParams < 0 || nParams > PQ_QUERY_PARAM_MAX_LIMIT)
@@ -1674,6 +1699,7 @@ PQsendQueryPrepared(PGconn *conn,
 	return PQsendQueryGuts(conn,
 						   NULL,	/* no command to parse */
 						   stmtName,
+						   portalName,
 						   nParams,
 						   NULL,	/* no param types */
 						   paramValues,
@@ -1774,6 +1800,7 @@ static int
 PQsendQueryGuts(PGconn *conn,
 				const char *command,
 				const char *stmtName,
+				const char *portalName,
 				int nParams,
 				const Oid *paramTypes,
 				const char *const *paramValues,
@@ -1790,8 +1817,8 @@ PQsendQueryGuts(PGconn *conn,
 
 	/*
 	 * We will send Parse (if needed), Bind, Describe Portal, Execute, Sync
-	 * (if not in pipeline mode), using specified statement name and the
-	 * unnamed portal.
+	 * (if not in pipeline mode), using the specified statement and portal
+	 * names.
 	 */
 
 	if (command)
@@ -1822,7 +1849,7 @@ PQsendQueryGuts(PGconn *conn,
 
 	/* Construct the Bind message */
 	if (pqPutMsgStart(PqMsg_Bind, conn) < 0 ||
-		pqPuts("", conn) < 0 ||
+		pqPuts(portalName, conn) < 0 ||
 		pqPuts(stmtName, conn) < 0)
 		goto sendFailed;
 
@@ -1889,13 +1916,13 @@ PQsendQueryGuts(PGconn *conn,
 	/* construct the Describe Portal message */
 	if (pqPutMsgStart(PqMsg_Describe, conn) < 0 ||
 		pqPutc('P', conn) < 0 ||
-		pqPuts("", conn) < 0 ||
+		pqPuts(portalName, conn) < 0 ||
 		pqPutMsgEnd(conn) < 0)
 		goto sendFailed;
 
 	/* construct the Execute message */
 	if (pqPutMsgStart(PqMsg_Execute, conn) < 0 ||
-		pqPuts("", conn) < 0 ||
+		pqPuts(portalName, conn) < 0 ||
 		pqPutInt(0, 4, conn) < 0 ||
 		pqPutMsgEnd(conn) < 0)
 		goto sendFailed;

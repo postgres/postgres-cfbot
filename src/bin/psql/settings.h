@@ -123,6 +123,7 @@ typedef struct _psqlSettings
 	char	  **bind_params;	/* parameters for extended query protocol call */
 	char	   *stmtName;		/* prepared statement name used for extended
 								 * query protocol commands */
+	char	   *portalName;		/* portal for \bind_named or \close_portal */
 	int			piped_commands; /* number of piped commands */
 	int			piped_syncs;	/* number of piped syncs */
 	int			available_results;	/* number of results available to get */
