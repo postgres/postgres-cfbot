@@ -51,7 +51,7 @@ env:
   # Build test dependencies as part of the build step, to see compiler
   # errors/warnings in one place.
   MBUILD_TARGET: all testprep
-  MTEST_ARGS: --print-errorlogs --no-rebuild -C build
+  MTEST_ARGS: --print-errorlogs --max-lines=500 --no-rebuild -C build
 
   # Can be set to a non-empty value to run a limited set of tests
   # (e.g. --suite regress to only run the main regression tests).
@@ -83,6 +83,7 @@ env:
     -Dreadline=enabled
     -Dssl=openssl
     -Dtap_tests=enabled
+    -Dpytest=enabled
     -Dzlib=enabled
     -Dzstd=enabled
 
@@ -527,7 +528,7 @@ jobs:
         run: |
           ./configure \
             --enable-cassert --enable-injection-points --enable-debug \
-            --enable-tap-tests --enable-nls \
+            --enable-tap-tests --enable-pytest --enable-nls \
             --with-segsize-blocks=6 \
             --with-libnuma \
             --with-liburing \
@@ -586,6 +587,42 @@ jobs:
       - *ccache_restore_branch_step
       - *linux_prepare_workspace_step
 
+      # TEMPORARY: this whole step goes away, together with the commit that
+      # added it, once https://github.com/anarazel/pg-vm-images/pull/144 is
+      # merged and this job uses the native i386 image it adds.
+      #
+      # We lift the interpreter out of the .deb instead of installing the
+      # package, because python3.X-minimal is not Multi-Arch: same (it cannot
+      # be, it ships an arch-specific /usr/bin/python3.X), so installing the
+      # i386 one would replace the amd64 python3 stack instead of joining it.
+      # The libpython packages it needs are Multi-Arch: same and do co-install,
+      # because their extension modules carry the architecture in the file name
+      # (_ctypes.cpython-313-i386-linux-gnu.so).
+      - name: Install 32-bit Python
+        run: |
+          set -ex
+          pyver=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            "libpython${pyver}-minimal:i386" "libpython${pyver}-stdlib:i386"
+          tmp=$(mktemp -d)
+          ( cd "$tmp" && apt-get download "python${pyver}-minimal:i386" )
+          dpkg-deb --fsys-tarfile "$tmp"/python${pyver}-minimal_*_i386.deb \
+            | tar -xOf - "./usr/bin/python${pyver}" \
+            > /usr/local/bin/python3-i386
+          chmod 755 /usr/local/bin/python3-i386
+          rm -rf "$tmp"
+
+          # pytest itself needs no separate install: /usr/lib/python3/dist-packages
+          # is on this interpreter's sys.path too and pytest is pure python. A
+          # wrapper is still needed, because meson's PYTEST option takes a
+          # program path and so cannot spell "python3-i386 -m pytest" itself.
+          cat > /usr/local/bin/pytest-i386 <<'PYTEST_I386'
+          #! /bin/sh
+          exec /usr/local/bin/python3-i386 -m pytest "$@"
+          PYTEST_I386
+          chmod 755 /usr/local/bin/pytest-i386
+
       - name: Configure
         shell: *su_postgres_shell
         run: |
@@ -595,6 +632,7 @@ jobs:
             --buildtype=debug \
             --pkg-config-path /usr/lib/i386-linux-gnu/pkgconfig/ \
             -DPERL=perl5.40-i386-linux-gnu \
+            -DPYTEST=pytest-i386 \
             -Dlibnuma=disabled \
             build
 
@@ -678,6 +716,10 @@ jobs:
       - *ccache_restore_branch_step
       - *linux_prepare_workspace_step
 
+      # The pytest suites load the asan-instrumented libpq into an
+      # uninstrumented python via dlopen(), which the asan runtime refuses
+      # unless it's the very first library in the process. The pytest-asan
+      # wrapper LD_PRELOADs the runtime to make that so.
       - name: Configure
         shell: *su_postgres_shell
         run: |
@@ -686,6 +728,7 @@ jobs:
             -Duuid=e2fs \
             --buildtype=debug \
             -Dllvm=enabled \
+            -DPYTEST="$(pwd)/src/tools/ci/pytest-asan" \
             build
 
       - name: Build
@@ -740,6 +783,8 @@ jobs:
         p5.34-io-tty
         p5.34-ipc-run
         python312
+        py312-packaging
+        py312-pytest
         tcl
         zstd
 
@@ -808,6 +853,7 @@ jobs:
           sh src/tools/ci/ci_macports_packages.sh $MACOS_PACKAGE_LIST
           # system python doesn't provide headers
           sudo /opt/local/bin/port select python3 python312
+          sudo /opt/local/bin/port select pytest pytest312
           # Make macports install visible to subsequent steps
           echo /opt/local/sbin >> "$GITHUB_PATH"
           echo /opt/local/bin >> "$GITHUB_PATH"
@@ -899,6 +945,7 @@ jobs:
         -Dplpython=enabled
         -Dssl=openssl
         -Dtap_tests=enabled
+        -Dpytest=enabled
 
     defaults:
       run:
@@ -996,7 +1043,7 @@ jobs:
           # meson is not preinstalled, at least on windows-2022. Install via
           # pip
           echo ::group::pip
-          python -m pip install --upgrade meson
+          python -m pip install --upgrade meson pytest
           if (!$?) { throw 'cmdfail' }
           echo ::endgroup::
 
@@ -1136,6 +1183,7 @@ jobs:
             meson:p
             perl:p
             pkgconf:p
+            python-pytest:p
             readline:p
             zlib:p
             zstd:p

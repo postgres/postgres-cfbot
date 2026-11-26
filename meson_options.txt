@@ -41,7 +41,10 @@ option('cassert', type: 'boolean', value: false,
   description: 'Enable assertion checks (for debugging)')
 
 option('tap_tests', type: 'feature', value: 'auto',
-  description: 'Enable TAP tests')
+  description: 'Enable (Perl-based) TAP tests')
+
+option('pytest', type: 'feature', value: 'auto',
+  description: 'Enable (Python-based) pytest suites')
 
 option('injection_points', type: 'boolean', value: false,
   description: 'Enable injection points')
@@ -194,6 +197,9 @@ option('PERL', type: 'string', value: 'perl',
 
 option('PROVE', type: 'string', value: 'prove',
   description: 'Path to prove binary')
+
+option('PYTEST', type: 'array', value: ['pytest', 'py.test'],
+  description: 'Path to pytest binary')
 
 option('PYTHON', type: 'array', value: ['python3', 'python'],
   description: 'Path to python binary')

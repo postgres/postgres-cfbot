@@ -4,6 +4,11 @@ tests += {
   'name': 'subscription',
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
+  'pytest': {
+    'tests': [
+      'pyt/test_031_column_list.py',
+    ],
+  },
   'tap': {
     'env': {
       'with_icu': icu.found() ? 'yes' : 'no',
@@ -40,7 +45,6 @@ tests += {
       't/028_row_filter.pl',
       't/029_on_error.pl',
       't/030_origin.pl',
-      't/031_column_list.pl',
       't/032_subscribe_use_index.pl',
       't/033_run_as_table_owner.pl',
       't/034_temporal.pl',

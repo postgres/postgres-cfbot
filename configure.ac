@@ -226,11 +226,16 @@ AC_SUBST(DTRACEFLAGS)])
 AC_SUBST(enable_dtrace)
 
 #
-# TAP tests
+# Test frameworks
 #
 PGAC_ARG_BOOL(enable, tap-tests, no,
-              [enable TAP tests (requires Perl and IPC::Run)])
+              [enable (Perl-based) TAP tests (requires Perl and IPC::Run)])
 AC_SUBST(enable_tap_tests)
+
+PGAC_ARG_BOOL(enable, pytest, no,
+              [enable (Python-based) pytest suites (requires Python)])
+AC_SUBST(enable_pytest)
+
 AC_ARG_VAR(PG_TEST_EXTRA,
            [enable selected extra tests (overridden at runtime by PG_TEST_EXTRA environment variable)])
 
@@ -2503,6 +2508,23 @@ if test "$enable_tap_tests" = yes; then
     # on failure, though, show the results to the user
     AC_MSG_RESULT([$modulestderr])
     AC_MSG_ERROR([Additional Perl modules are required to run TAP tests])
+  fi
+fi
+
+if test "$enable_pytest" = yes; then
+  PGAC_PATH_PROGS(PYTEST, [pytest py.test])
+  if test -z "$PYTEST"; then
+    # Try python -m pytest as a fallback. PYTHON is only set with
+    # --with-python, so use python3 from PATH otherwise.
+    pytest_python=${PYTHON:-python3}
+    AC_MSG_CHECKING([whether $pytest_python -m pytest works])
+    if "$pytest_python" -m pytest --version >&AS_MESSAGE_LOG_FD 2>&1; then
+      AC_MSG_RESULT([yes])
+      PYTEST="$pytest_python -m pytest"
+    else
+      AC_MSG_RESULT([no])
+      AC_MSG_ERROR([pytest not found])
+    fi
   fi
 fi
 

@@ -42,7 +42,11 @@ open(os.path.join(testdir, 'test.start'), 'x')
 
 env_dict = {**os.environ,
             'TESTDATADIR': os.path.join(testdir, 'data'),
-            'TESTLOGDIR': os.path.join(testdir, 'log')}
+            'TESTLOGDIR': os.path.join(testdir, 'log'),
+            # Prevent emitting terminal capability sequences that pollute the
+            # TAP output stream (i.e.\033[?1034h). This happens on OpenBSD with
+            # pytest for unknown reasons.
+            'TERM': ''}
 
 
 # The configuration time value of PG_TEST_EXTRA is supplied via argument

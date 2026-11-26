@@ -1,0 +1,14 @@
+#!/bin/sh
+#
+# Run pytest with the AddressSanitizer runtime preloaded.
+#
+# Our asan CI job builds libpq (and the other libraries the tests load) with
+# -fsanitize=address, but pytest itself runs in a plain, non-instrumented
+# Python interpreter that only dlopen()s those libraries. asan has to be the
+# very first thing mapped into such a process, which we arrange with
+# LD_PRELOAD. meson's PYTEST option is only a program path, not a full command,
+# so the wrapping can't live in the option itself and needs a script like this.
+#
+# We ask the compiler for the runtime's path rather than hard-coding it, so this
+# keeps working across compiler versions and distros.
+exec env LD_PRELOAD="$(${CC:-gcc} -print-file-name=libasan.so)" pytest "$@"
