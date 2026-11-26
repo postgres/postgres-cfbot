@@ -331,6 +331,7 @@ slashUsage(unsigned short int pager)
 	HELP0("  \\bind [PARAM]...       set query parameters\n");
 	HELP0("  \\bind_named STMT_NAME [PARAM]...\n"
 		  "                         set query parameters for an existing prepared statement\n");
+	HELP0("  \\close_portal NAME     close a portal\n");
 	HELP0("  \\close_prepared STMT_NAME\n"
 		  "                         close an existing prepared statement\n");
 	HELP0("  \\endpipeline           exit pipeline mode\n");
@@ -338,6 +339,7 @@ slashUsage(unsigned short int pager)
 	HELP0("  \\flushrequest          send request to the server to flush its output buffer\n");
 	HELP0("  \\getresults [NUM_RES]  read NUM_RES pending results, or all if no argument\n");
 	HELP0("  \\parse STMT_NAME       create a prepared statement\n");
+	HELP0("  \\portal NAME           select the destination portal for \\bind_named\n");
 	HELP0("  \\sendpipeline          send an extended query to an ongoing pipeline\n");
 	HELP0("  \\startpipeline         enter pipeline mode\n");
 	HELP0("  \\syncpipeline          add a synchronisation point to an ongoing pipeline\n");

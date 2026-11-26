@@ -1602,7 +1602,10 @@ ExecQueryAndProcessResults(const char *query,
 	switch (pset.send_mode)
 	{
 		case PSQL_SEND_EXTENDED_CLOSE:
-			success = PQsendClosePrepared(pset.db, pset.stmtName);
+			if (pset.portalName)
+				success = PQsendClosePortal(pset.db, pset.portalName);
+			else
+				success = PQsendClosePrepared(pset.db, pset.stmtName);
 			if (success && PQpipelineStatus(pset.db) != PQ_PIPELINE_OFF)
 				pset.piped_commands++;
 			break;
@@ -1622,10 +1625,11 @@ ExecQueryAndProcessResults(const char *query,
 			break;
 		case PSQL_SEND_EXTENDED_QUERY_PREPARED:
 			Assert(pset.stmtName != NULL);
-			success = PQsendQueryPrepared(pset.db, pset.stmtName,
-										  pset.bind_nparams,
-										  (const char *const *) pset.bind_params,
-										  NULL, NULL, 0);
+			success = PQsendQueryPreparedPortal(pset.db, pset.stmtName,
+												pset.portalName ? pset.portalName : "",
+												pset.bind_nparams,
+												(const char *const *) pset.bind_params,
+												NULL, NULL, 0);
 			if (success && PQpipelineStatus(pset.db) != PQ_PIPELINE_OFF)
 				pset.piped_commands++;
 			break;
@@ -2838,7 +2842,7 @@ uri_prefix_length(const char *connstr)
 /*
  * Reset state related to extended query protocol
  *
- * Clean up any state related to bind parameters, statement name and
+ * Clean up any state related to bind parameters, statement and portal names, and
  * PSQL_SEND_MODE.  This needs to be called after processing a query or when
  * running a new meta-command that uses the extended query protocol, like
  * \parse, \bind, etc.
@@ -2850,7 +2854,7 @@ clean_extended_state(void)
 
 	switch (pset.send_mode)
 	{
-		case PSQL_SEND_EXTENDED_CLOSE:	/* \close_prepared */
+		case PSQL_SEND_EXTENDED_CLOSE:	/* \close_prepared or \close_portal */
 			free(pset.stmtName);
 			break;
 		case PSQL_SEND_EXTENDED_PARSE:	/* \parse */
@@ -2874,6 +2878,8 @@ clean_extended_state(void)
 			break;
 	}
 
+	free(pset.portalName);
+	pset.portalName = NULL;
 	pset.stmtName = NULL;
 	pset.send_mode = PSQL_SEND_QUERY;
 }

@@ -200,6 +200,17 @@ SELECT $1 \bind 3 \sendpipeline
 \getresults 0
 \endpipeline
 
+-- Inspect and close a named portal in the pipeline's implicit transaction.
+\startpipeline
+SELECT $1::integer AS n \parse portal_stmt
+\bind_named portal_stmt 42 \portal portal_stmt \sendpipeline
+SELECT name FROM pg_cursors WHERE name = 'portal_stmt';
+\close_portal portal_stmt
+SELECT count(*) FROM pg_cursors WHERE name = 'portal_stmt';
+\bind_named portal_stmt 43 \portal portal_stmt \sendpipeline
+\close_prepared portal_stmt
+\endpipeline
+
 --
 -- Pipeline errors
 --

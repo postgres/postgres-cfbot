@@ -67,8 +67,8 @@ static backslashResult exec_command_C(PsqlScanState scan_state, bool active_bran
 static backslashResult exec_command_connect(PsqlScanState scan_state, bool active_branch);
 static backslashResult exec_command_cd(PsqlScanState scan_state, bool active_branch,
 									   const char *cmd);
-static backslashResult exec_command_close_prepared(PsqlScanState scan_state,
-												   bool active_branch, const char *cmd);
+static backslashResult exec_command_close(PsqlScanState scan_state,
+										  bool active_branch, const char *cmd);
 static backslashResult exec_command_conninfo(PsqlScanState scan_state, bool active_branch);
 static backslashResult exec_command_copy(PsqlScanState scan_state, bool active_branch);
 static backslashResult exec_command_copyright(PsqlScanState scan_state, bool active_branch);
@@ -124,6 +124,7 @@ static backslashResult exec_command_print(PsqlScanState scan_state, bool active_
 static backslashResult exec_command_parse(PsqlScanState scan_state, bool active_branch,
 										  const char *cmd);
 static backslashResult exec_command_password(PsqlScanState scan_state, bool active_branch);
+static backslashResult exec_command_portal(PsqlScanState scan_state, bool active_branch);
 static backslashResult exec_command_prompt(PsqlScanState scan_state, bool active_branch,
 										   const char *cmd);
 static backslashResult exec_command_pset(PsqlScanState scan_state, bool active_branch);
@@ -349,8 +350,8 @@ exec_command(const char *cmd,
 		status = exec_command_connect(scan_state, active_branch);
 	else if (strcmp(cmd, "cd") == 0)
 		status = exec_command_cd(scan_state, active_branch, cmd);
-	else if (strcmp(cmd, "close_prepared") == 0)
-		status = exec_command_close_prepared(scan_state, active_branch, cmd);
+	else if (strcmp(cmd, "close_portal") == 0 || strcmp(cmd, "close_prepared") == 0)
+		status = exec_command_close(scan_state, active_branch, cmd);
 	else if (strcmp(cmd, "conninfo") == 0)
 		status = exec_command_conninfo(scan_state, active_branch);
 	else if (pg_strcasecmp(cmd, "copy") == 0)
@@ -427,6 +428,8 @@ exec_command(const char *cmd,
 		status = exec_command_parse(scan_state, active_branch, cmd);
 	else if (strcmp(cmd, "password") == 0)
 		status = exec_command_password(scan_state, active_branch);
+	else if (strcmp(cmd, "portal") == 0)
+		status = exec_command_portal(scan_state, active_branch);
 	else if (strcmp(cmd, "prompt") == 0)
 		status = exec_command_prompt(scan_state, active_branch, cmd);
 	else if (strcmp(cmd, "pset") == 0)
@@ -751,10 +754,10 @@ exec_command_cd(PsqlScanState scan_state, bool active_branch, const char *cmd)
 }
 
 /*
- * \close_prepared -- close a previously prepared statement
+ * \close_portal, \close_prepared -- close a portal or a prepared statement
  */
 static backslashResult
-exec_command_close_prepared(PsqlScanState scan_state, bool active_branch, const char *cmd)
+exec_command_close(PsqlScanState scan_state, bool active_branch, const char *cmd)
 {
 	backslashResult status = PSQL_CMD_SKIP_LINE;
 
@@ -772,7 +775,10 @@ exec_command_close_prepared(PsqlScanState scan_state, bool active_branch, const 
 		}
 		else
 		{
-			pset.stmtName = opt;
+			if (strcmp(cmd, "close_portal") == 0)
+				pset.portalName = opt;
+			else
+				pset.stmtName = opt;
 			pset.send_mode = PSQL_SEND_EXTENDED_CLOSE;
 			status = PSQL_CMD_SEND;
 		}
@@ -2612,6 +2618,36 @@ exec_command_password(PsqlScanState scan_state, bool active_branch)
 		ignore_slash_options(scan_state);
 
 	return success ? PSQL_CMD_SKIP_LINE : PSQL_CMD_ERROR;
+}
+
+/*
+ * \portal -- select the destination portal for a pending \bind_named
+ */
+static backslashResult
+exec_command_portal(PsqlScanState scan_state, bool active_branch)
+{
+	if (active_branch)
+	{
+		char	   *name = psql_scan_slash_option(scan_state, OT_NORMAL, NULL, false);
+
+		if (!name)
+		{
+			pg_log_error("\\%s: missing required argument", "portal");
+			return PSQL_CMD_ERROR;
+		}
+
+		if (pset.send_mode == PSQL_SEND_EXTENDED_QUERY_PREPARED)
+		{
+			free(pset.portalName);
+			pset.portalName = name;
+		}
+		else
+			free(name);
+	}
+	else
+		ignore_slash_options(scan_state);
+
+	return PSQL_CMD_SKIP_LINE;
 }
 
 /*
