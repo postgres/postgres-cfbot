@@ -128,9 +128,33 @@ PG_FUNCTION_INFO_V1(interval_dist);
 Datum
 interval_dist(PG_FUNCTION_ARGS)
 {
-	Datum		diff = DirectFunctionCall2(interval_mi,
-										   PG_GETARG_DATUM(0),
-										   PG_GETARG_DATUM(1));
+	Interval   *a = PG_GETARG_INTERVAL_P(0);
+	Interval   *b = PG_GETARG_INTERVAL_P(1);
+	Datum		diff;
+
+	if (INTERVAL_NOT_FINITE(a) || INTERVAL_NOT_FINITE(b))
+	{
+		Interval   *p = palloc_object(Interval);
+
+		if ((INTERVAL_IS_NOEND(a) && INTERVAL_IS_NOEND(b)) ||
+			(INTERVAL_IS_NOBEGIN(a) && INTERVAL_IS_NOBEGIN(b)))
+		{
+			/* same-sign infinities are equal, as in ts_dist */
+			p->day = 0;
+			p->month = 0;
+			p->time = 0;
+		}
+		else
+		{
+			/* for all other cases, report interval +Infinity */
+			INTERVAL_NOEND(p);
+		}
+		PG_RETURN_INTERVAL_P(p);
+	}
+
+	diff = DirectFunctionCall2(interval_mi,
+							   PG_GETARG_DATUM(0),
+							   PG_GETARG_DATUM(1));
 
 	PG_RETURN_INTERVAL_P(abs_interval(DatumGetIntervalP(diff)));
 }
