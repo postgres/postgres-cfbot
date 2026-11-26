@@ -242,6 +242,7 @@ static double convert_timevalue_to_scalar(Datum value, Oid typid,
 										  bool *failure);
 static Node *strip_all_phvs_deep(PlannerInfo *root, Node *node);
 static bool contain_placeholder_walker(Node *node, void *context);
+static Node *strip_all_adjacency_relabeltypes(Node *node);
 static Node *strip_all_phvs_mutator(Node *node, void *context);
 static void examine_simple_variable(PlannerInfo *root, Var *var,
 									VariableStatData *vardata);
@@ -5671,9 +5672,8 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 	basenode = strip_all_phvs_deep(root, node);
 
 	/*
-	 * Look inside any binary-compatible relabeling.  We need to handle nested
-	 * RelabelType nodes here, because the prior stripping of PlaceHolderVars
-	 * may have brought separate RelabelTypes into adjacency.
+	 * Look inside any remaining binary-compatible relabeling at the top
+	 * level.
 	 */
 	while (IsA(basenode, RelabelType))
 		basenode = (Node *) ((RelabelType *) basenode)->arg;
@@ -6014,8 +6014,43 @@ contain_placeholder_walker(Node *node, void *context)
 }
 
 /*
+ * strip_all_adjacency_relabeltypes
+ *		Normalize adjacent or redundant RelabelTypes at the current node.
+ *
+ * Follow applyRelabelType()'s rules for merging stacked RelabelTypes and
+ * removing no-op relabels: retain only the outer relabel, and drop that too
+ * if its argument already has the required type, typmod, and collation.
+ * The caller has already copied and processed the subtree, so it is safe
+ * to modify the outer relabel in place.
+ */
+static Node *
+strip_all_adjacency_relabeltypes(Node *node)
+{
+	RelabelType *relabel;
+	Node	   *arg;
+
+	if (node == NULL || !IsA(node, RelabelType))
+		return node;
+
+	relabel = (RelabelType *) node;
+	arg = (Node *) relabel->arg;
+
+	while (arg && IsA(arg, RelabelType))
+		arg = (Node *) ((RelabelType *) arg)->arg;
+
+	if (exprType(arg) == relabel->resulttype &&
+		exprTypmod(arg) == relabel->resulttypmod &&
+		exprCollation(arg) == relabel->resultcollid)
+		node = arg;
+	else
+		relabel->arg = (Expr *) arg;
+
+	return node;
+}
+
+/*
  * strip_all_phvs_mutator
- *		Mutator to deeply strip all PlaceHolderVars
+ *		Deeply strip all PlaceHolderVars and normalize RelabelTypes
  */
 static Node *
 strip_all_phvs_mutator(Node *node, void *context)
@@ -6030,7 +6065,15 @@ strip_all_phvs_mutator(Node *node, void *context)
 		return strip_all_phvs_mutator((Node *) phv->phexpr, context);
 	}
 
-	return expression_tree_mutator(node, strip_all_phvs_mutator, context);
+	node = expression_tree_mutator(node, strip_all_phvs_mutator, context);
+
+	/*
+	 * Stripping PHVs can expose adjacent or redundant RelabelTypes at any
+	 * depth.  Normalize them after processing the children, so they do not
+	 * prevent matching to index or statistics expressions that have already
+	 * been simplified by eval_const_expressions().
+	 */
+	return strip_all_adjacency_relabeltypes(node);
 }
 
 /*
