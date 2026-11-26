@@ -1880,45 +1880,58 @@ ProcessUtilitySlow(ParseState *pstate,
 				{
 					Oid			relid;
 					CreateStatsStmt *stmt = (CreateStatsStmt *) parsetree;
-					RangeVar   *rel;
+					Node	   *fromNode;
+					List	   *relids = NIL;
 
 					/*
-					 * Examine the FROM clause.  Currently, we only allow it
-					 * to be a single simple table, but later we'll probably
-					 * allow multiple tables and JOIN syntax.  The grammar is
-					 * already prepared for that, so we have to check here
-					 * that what we got is what we can support.
+					 * Examine the FROM clause.  It must be a single item,
+					 * either a simple table for single-table statistics or a
+					 * JOIN for join statistics; the grammar accepts a list,
+					 * so we have to check here that what we got is what we
+					 * can support.
 					 */
 					if (list_length(stmt->relations) != 1)
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("only a single relation is allowed in CREATE STATISTICS")));
+								 errmsg("only a single relation or JOIN is allowed in CREATE STATISTICS")));
 
-					rel = (RangeVar *) linitial(stmt->relations);
+					fromNode = (Node *) linitial(stmt->relations);
 
-					if (!IsA(rel, RangeVar))
+					if (IsA(fromNode, RangeVar))
+					{
+						RangeVar   *rel = (RangeVar *) fromNode;
+
+						/*
+						 * CREATE STATISTICS will influence future execution
+						 * plans but does not interfere with currently
+						 * executing plans. So it should be enough to take
+						 * ShareUpdateExclusiveLock on relation, conflicting
+						 * with ANALYZE and other DDL that sets statistical
+						 * information, but not with normal queries.
+						 *
+						 * XXX RangeVarCallbackOwnsRelation not needed here,
+						 * to keep the same behavior as before.
+						 */
+						relid = RangeVarGetRelid(rel, ShareUpdateExclusiveLock, false);
+						relids = list_make1_oid(relid);
+
+						/* Run parse analysis ... */
+						stmt = transformStatsStmt(relid, stmt, queryString);
+					}
+					else if (IsA(fromNode, JoinExpr))
+					{
+						/* Join statistics passes 0 as relid */
+						relid = InvalidOid;
+
+						/* Run parse analysis ... */
+						stmt = transformStatsStmt(relid, stmt, queryString);
+					}
+					else
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("CREATE STATISTICS only supports relation names in the FROM clause")));
+								 errmsg("CREATE STATISTICS only supports relation names or JOIN clauses in the FROM clause")));
 
-					/*
-					 * CREATE STATISTICS will influence future execution plans
-					 * but does not interfere with currently executing plans.
-					 * So it should be enough to take ShareUpdateExclusiveLock
-					 * on relation, conflicting with ANALYZE and other DDL
-					 * that sets statistical information, but not with normal
-					 * queries.
-					 *
-					 * XXX RangeVarCallbackOwnsRelation not needed here, to
-					 * keep the same behavior as before.
-					 */
-					relid = RangeVarGetRelid(rel, ShareUpdateExclusiveLock, false);
-
-					/* Run parse analysis ... */
-					stmt = transformStatsStmt(relid, stmt, queryString);
-
-					address = CreateStatistics(list_make1_oid(relid), stmt,
-											   true);
+					address = CreateStatistics(relids, stmt, true);
 				}
 				break;
 

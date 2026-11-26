@@ -642,6 +642,8 @@ struct PlannerInfo
 	bool		placeholdersFrozen;
 	/* true if planning a recursive WITH item */
 	bool		hasRecursion;
+	/* true if any base relation has join statistics */
+	bool		hasJoinStats;
 	/* true if a planner extension may replan this subquery */
 	bool		assumeReplanning;
 
@@ -1533,6 +1535,16 @@ typedef struct StatisticExtInfo
 
 	/* positions in "exprs" of the entries that are plain columns */
 	Bitmapset  *columns;
+
+	/*
+	 * Join statistics fields (all NIL for single-table stats).  For a join
+	 * stat the columns in "exprs" above carry stxjoinrels-relative varnos (1
+	 * = anchor, 2 = other joined relation), which the join estimator uses to
+	 * map each column to its relation.
+	 */
+	List	   *joinrels;		/* OIDs of participating relations, anchor
+								 * first */
+	List	   *joinconds;		/* parsed join conditions (List of OpExpr) */
 } StatisticExtInfo;
 
 /*

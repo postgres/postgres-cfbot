@@ -2681,8 +2681,14 @@ describeOneTableDetails(const char *schemaname,
 							  "  " CppAsString2(STATS_EXT_NDISTINCT) " = any(stxkind) AS ndist_enabled,\n"
 							  "  " CppAsString2(STATS_EXT_DEPENDENCIES) " = any(stxkind) AS deps_enabled,\n"
 							  "  " CppAsString2(STATS_EXT_MCV) " = any(stxkind) AS mcv_enabled,\n"
-							  "stxstattarget\n"
-							  "FROM pg_catalog.pg_statistic_ext\n"
+							  "stxstattarget,\n");
+			if (pset.sversion >= 200000)
+				appendPQExpBufferStr(&buf,
+									 "pg_catalog.pg_get_statisticsobjdef_body(oid) AS body\n");
+			else
+				appendPQExpBufferStr(&buf,
+									 "NULL AS body\n");
+			appendPQExpBuffer(&buf, "FROM pg_catalog.pg_statistic_ext\n"
 							  "WHERE stxrelid = '%s'\n"
 							  "ORDER BY nsp, stxname;",
 							  oid);
@@ -2753,9 +2759,18 @@ describeOneTableDetails(const char *schemaname,
 						appendPQExpBufferChar(&buf, ')');
 					}
 
-					appendPQExpBuffer(&buf, " ON %s FROM %s",
-									  PQgetvalue(result, i, 4),
-									  PQgetvalue(result, i, 1));
+					/*
+					 * The definition after ON names all the tables of join
+					 * statistics and their join conditions, so take it from
+					 * the server when it can give it.
+					 */
+					if (!PQgetisnull(result, i, 9))
+						appendPQExpBuffer(&buf, " ON %s",
+										  PQgetvalue(result, i, 9));
+					else
+						appendPQExpBuffer(&buf, " ON %s FROM %s",
+										  PQgetvalue(result, i, 4),
+										  PQgetvalue(result, i, 1));
 
 					/* Show the stats target if it's not default */
 					if (!PQgetisnull(result, i, 8) &&
@@ -4832,7 +4847,11 @@ listExtendedStats(const char *pattern, bool verbose)
 					  gettext_noop("Schema"),
 					  gettext_noop("Name"));
 
-	if (pset.sversion >= 140000)
+	if (pset.sversion >= 200000)
+		appendPQExpBuffer(&buf,
+						  "pg_catalog.pg_get_statisticsobjdef_body(es.oid) AS \"%s\"",
+						  gettext_noop("Definition"));
+	else if (pset.sversion >= 140000)
 		appendPQExpBuffer(&buf,
 						  "pg_catalog.format('%%s FROM %%s', \n"
 						  "  pg_catalog.pg_get_statisticsobjdef_columns(es.oid), \n"

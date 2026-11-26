@@ -21,6 +21,7 @@
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "catalog/indexing.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
 #include "commands/defrem.h"
@@ -35,6 +36,7 @@
 #include "rewrite/rewriteHandler.h"
 #include "statistics/extended_stats_internal.h"
 #include "statistics/statistics.h"
+#include "storage/lmgr.h"
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/attoptcache.h"
@@ -65,6 +67,7 @@
 typedef struct StatExtEntry
 {
 	Oid			statOid;		/* OID of pg_statistic_ext entry */
+	Oid			stxowner;		/* statistics object's owner */
 	char	   *schema;			/* statistics object's schema */
 	char	   *name;			/* statistics object's name */
 	List	   *types;			/* 'char' list of enabled statistics kinds */
@@ -72,10 +75,25 @@ typedef struct StatExtEntry
 	List	   *exprs;			/* all columns and expressions in
 								 * user-declared order, mirroring stxexprs */
 	Bitmapset  *columns;		/* positions in exprs of the plain columns */
+
+	/*
+	 * Join statistics fields (NULL/invalid for single-table stats).
+	 *
+	 * For joins, the same attnum can appear from different relations, so we
+	 * keep a per-column mapping of each covered column's attnum to its source
+	 * relation varno.
+	 */
+	int16	   *attnums;		/* attribute numbers, one per stats column */
+	int			nattnums;		/* length of attnums[] and attref_varnos[] */
+	int16	   *attref_varnos;	/* source relation varno for each attnum */
+	Oid		   *joinrels;		/* participating relation OIDs, anchor first */
+	int			njoinrels;		/* number of participating relations */
+	List	   *joinconds;		/* List of OpExpr: join conditions */
 } StatExtEntry;
 
 
 static List *fetch_statentries_for_relation(Relation pg_statext, Relation rel);
+static VacAttrStats *examine_join_stats_column(Oid relid, AttrNumber attnum);
 static VacAttrStats **lookup_var_attr_stats(StatExtEntry *stat,
 											int nvacatts, VacAttrStats **vacatts);
 static void statext_store(Oid statOid, bool inh,
@@ -171,9 +189,56 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 		MCVList    *mcv = NULL;
 		Datum		exprstats = (Datum) 0;
 		VacAttrStats **stats;
+		VacAttrStats **mcv_stats = NULL;
 		ListCell   *lc2;
 		int			stattarget;
 		StatsBuildData *data;
+		bool		not_computed = false;
+		Oid			join_index = InvalidOid;
+
+		/*
+		 * Join statistics are not built for an inheritance tree, and not at
+		 * all with a statistics target of 0, which is checked here so that
+		 * their other tables are not locked for nothing.
+		 */
+		if (stat->njoinrels > 0 && (inh || stat->stattarget == 0))
+			continue;
+
+		/* lock the other tables, whose columns lookup_var_attr_stats() reads */
+		if (stat->njoinrels > 0)
+		{
+			bool		skip = false;
+
+			/*
+			 * Don't wait for a lock on the other tables.  ALTER TABLE on one
+			 * of them holds AccessExclusiveLock while it waits for our lock
+			 * on onerel to re-create these statistics, so waiting would
+			 * deadlock. Skip the statistics instead and keep any existing
+			 * data.
+			 */
+			for (int i = 1; i < stat->njoinrels; i++)
+			{
+				if (!ConditionalLockRelationOid(stat->joinrels[i],
+												AccessShareLock))
+				{
+					if (!AmAutoVacuumWorkerProcess())
+						ereport(WARNING,
+								(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+								 errmsg("statistics object \"%s.%s\" could not be computed for relation \"%s.%s\"",
+										stat->schema, stat->name,
+										get_namespace_name(onerel->rd_rel->relnamespace),
+										RelationGetRelationName(onerel)),
+								 errdetail("Could not obtain lock on table \"%s.%s\".",
+										   get_namespace_name(get_rel_namespace(stat->joinrels[i])),
+										   get_rel_name(stat->joinrels[i])),
+								 errtable(onerel)));
+					skip = true;
+					break;
+				}
+			}
+			if (skip)
+				continue;
+		}
 
 		/*
 		 * Check if we can build these stats based on the column analyzed. If
@@ -199,12 +264,141 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 		if (stattarget == 0)
 			continue;
 
-		/* evaluate expressions (if the statistics object has any) */
-		data = make_build_data(onerel, stat, numrows, rows, stats, stattarget);
-		if (!data)
+		/* check whether the join statistics can be built this time */
+		if (stat->njoinrels > 0)
 		{
-			report_ext_stats_not_computed(onerel, stat);
-			continue;
+			bool		skip = false;
+			Var		   *sampled_var;
+			Var		   *probed_var;
+			bool		commuted;
+			OpExpr	   *joincond;
+			Relation	probed_rel;
+
+			/*
+			 * Only a join of two tables on a single condition can be built so
+			 * far, although CREATE STATISTICS accepts other shapes.  Skip the
+			 * others and keep any existing data.  njoinrels counts the
+			 * anchor.
+			 */
+			if (stat->njoinrels != 2 || list_length(stat->joinconds) != 1)
+			{
+				if (!AmAutoVacuumWorkerProcess())
+					ereport(WARNING,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("statistics object \"%s.%s\" could not be computed for relation \"%s.%s\"",
+									stat->schema, stat->name,
+									get_namespace_name(onerel->rd_rel->relnamespace),
+									RelationGetRelationName(onerel)),
+							 errdetail("Statistics can currently be built only for joins of two tables on a single equality condition."),
+							 errtable(onerel)));
+				continue;
+			}
+
+			/*
+			 * Refresh the statistics only if their owner, not the user
+			 * running ANALYZE, still has SELECT on the other tables, and
+			 * otherwise keep any existing data.  The anchor is not checked,
+			 * as for single-table statistics.
+			 */
+			for (int i = 1; i < stat->njoinrels; i++)
+			{
+				if (pg_class_aclcheck(stat->joinrels[i], stat->stxowner,
+									  ACL_SELECT) != ACLCHECK_OK)
+				{
+					if (!AmAutoVacuumWorkerProcess())
+						ereport(WARNING,
+								(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+								 errmsg("statistics object \"%s.%s\" could not be computed for relation \"%s.%s\"",
+										stat->schema, stat->name,
+										get_namespace_name(onerel->rd_rel->relnamespace),
+										RelationGetRelationName(onerel)),
+								 errdetail("Its owner lacks SELECT privilege on table \"%s.%s\".",
+										   get_namespace_name(get_rel_namespace(stat->joinrels[i])),
+										   get_rel_name(stat->joinrels[i])),
+								 errtable(onerel)));
+					skip = true;
+					break;
+				}
+			}
+			if (skip)
+				continue;
+
+			/*
+			 * CREATE STATISTICS rejects tables with inheritance children, as
+			 * the sampling does not cover them, but a table may have gained
+			 * some since.  Skip the statistics then and keep any existing
+			 * data.
+			 */
+			for (int i = 0; i < stat->njoinrels; i++)
+			{
+				if (find_inheritance_children(stat->joinrels[i], NoLock) != NIL)
+				{
+					if (!AmAutoVacuumWorkerProcess())
+						ereport(WARNING,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("statistics object \"%s.%s\" could not be computed for relation \"%s.%s\"",
+										stat->schema, stat->name,
+										get_namespace_name(onerel->rd_rel->relnamespace),
+										RelationGetRelationName(onerel)),
+								 errdetail("Table \"%s.%s\" has inheritance children.",
+										   get_namespace_name(get_rel_namespace(stat->joinrels[i])),
+										   get_rel_name(stat->joinrels[i])),
+								 errtable(onerel)));
+					skip = true;
+					break;
+				}
+			}
+			if (skip)
+				continue;
+
+			/*
+			 * The join values are looked up in an index on the probed table's
+			 * join column, so skip the statistics without one and keep any
+			 * existing data.  The lock taken above keeps the index from being
+			 * dropped before the build.
+			 *
+			 * XXX Sampling by a sequential scan of the probed table, instead
+			 * of index lookups, would remove this skip.
+			 */
+			joincond = linitial_node(OpExpr, stat->joinconds);
+			join_stats_cond_sides(joincond, &sampled_var, &probed_var,
+								  &commuted);
+			probed_rel = table_open(stat->joinrels[1], NoLock);
+			join_index = find_index_for_operator(probed_rel,
+												 probed_var->varattno,
+												 joincond->opno,
+												 joincond->inputcollid);
+			if (!OidIsValid(join_index))
+			{
+				if (!AmAutoVacuumWorkerProcess())
+					ereport(WARNING,
+							(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							 errmsg("statistics object \"%s.%s\" could not be computed for relation \"%s.%s\"",
+									stat->schema, stat->name,
+									get_namespace_name(onerel->rd_rel->relnamespace),
+									RelationGetRelationName(onerel)),
+							 errdetail("Table \"%s.%s\" has no suitable index on column \"%s\".",
+									   get_namespace_name(RelationGetNamespace(probed_rel)),
+									   RelationGetRelationName(probed_rel),
+									   get_attname(RelationGetRelid(probed_rel),
+												   probed_var->varattno, false)),
+							 errtable(onerel)));
+				table_close(probed_rel, NoLock);
+				continue;
+			}
+			table_close(probed_rel, NoLock);
+
+			data = NULL;
+		}
+		else
+		{
+			/* evaluate expressions (if the statistics object has any) */
+			data = make_build_data(onerel, stat, numrows, rows, stats, stattarget);
+			if (!data)
+			{
+				report_ext_stats_not_computed(onerel, stat);
+				continue;
+			}
 		}
 
 		/* compute statistic of each requested type */
@@ -217,7 +411,25 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 			else if (t == STATS_EXT_DEPENDENCIES)
 				dependencies = statext_dependencies_build(data);
 			else if (t == STATS_EXT_MCV)
-				mcv = statext_mcv_build(data, totalrows, stattarget);
+			{
+				if (stat->njoinrels > 0)
+					mcv = statext_join_mcv_build(onerel,
+												 stat->joinrels,
+												 stat->njoinrels,
+												 stat->joinconds,
+												 join_index,
+												 stat->attnums,
+												 stat->attref_varnos,
+												 stat->nattnums,
+												 stattarget,
+												 numrows, rows, totalrows,
+												 &mcv_stats);
+				else
+				{
+					mcv = statext_mcv_build(data, totalrows, stattarget);
+					mcv_stats = stats;
+				}
+			}
 			else if (t == STATS_EXT_EXPRESSIONS)
 			{
 				AnlExprData *exprdata;
@@ -252,7 +464,7 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 					if (!exprdata)
 					{
 						report_ext_stats_not_computed(onerel, stat);
-						data = NULL;
+						not_computed = true;
 						break;
 					}
 					nexprs = list_length(cmplxexprs);
@@ -264,12 +476,13 @@ BuildRelationExtStatistics(Relation onerel, bool inh, double totalrows,
 			}
 		}
 
-		if (!data)
+		/* skip storing if an expression could not be analyzed */
+		if (not_computed)
 			continue;
 
 		/* store the statistics in the catalog */
 		statext_store(stat->statOid, inh,
-					  ndistinct, dependencies, mcv, exprstats, stats);
+					  ndistinct, dependencies, mcv, exprstats, mcv_stats);
 
 		/* for reporting progress */
 		pgstat_progress_update_param(PROGRESS_ANALYZE_EXT_STATS_COMPUTED,
@@ -689,6 +902,7 @@ fetch_statentries_for_relation(Relation pg_statext, Relation rel)
 		entry = palloc0_object(StatExtEntry);
 		staForm = (Form_pg_statistic_ext) GETSTRUCT(htup);
 		entry->statOid = staForm->oid;
+		entry->stxowner = staForm->stxowner;
 		entry->schema = get_namespace_name(staForm->stxnamespace);
 		entry->name = pstrdup(NameStr(staForm->stxname));
 
@@ -718,6 +932,71 @@ fetch_statentries_for_relation(Relation pg_statext, Relation rel)
 		 * order.
 		 */
 		entry->exprs = statext_get_stxexprs(htup, rel, &entry->columns);
+
+		/*
+		 * Fetch join statistics fields.  These are all NULL for single-table
+		 * statistics.
+		 */
+		datum = SysCacheGetAttr(STATEXTOID, htup,
+								Anum_pg_statistic_ext_stxjoinrels, &isnull);
+		if (!isnull)
+		{
+			oidvector  *ov = (oidvector *) DatumGetPointer(datum);
+
+			entry->njoinrels = ov->dim1;
+			entry->joinrels = (Oid *) palloc(ov->dim1 * sizeof(Oid));
+			memcpy(entry->joinrels, ov->values, ov->dim1 * sizeof(Oid));
+
+			/* nattnums/attnums are populated below with attref_varnos */
+		}
+		else
+		{
+			entry->njoinrels = 0;
+			entry->joinrels = NULL;
+		}
+
+		/*
+		 * For join stats, extract per-column varnos from the plain-column Var
+		 * nodes in entry->exprs (in declared order).  Each Var's varno tells
+		 * which relation it belongs to (1=anchor, 2=first joined, etc.)
+		 */
+		if (entry->njoinrels > 0)
+		{
+			ListCell   *elc;
+			int			idx = 0;
+
+			entry->nattnums = bms_num_members(entry->columns);
+
+			entry->attnums = (int16 *) palloc(entry->nattnums * sizeof(int16));
+			entry->attref_varnos = (int16 *) palloc(entry->nattnums * sizeof(int16));
+			foreach(elc, entry->exprs)
+			{
+				Node	   *node = (Node *) lfirst(elc);
+				Var		   *var;
+
+				if (!bms_is_member(foreach_current_index(elc), entry->columns))
+					continue;
+
+				var = (Var *) node;
+				entry->attnums[idx] = var->varattno;
+				entry->attref_varnos[idx] = var->varno;
+				idx++;
+			}
+		}
+		else
+			entry->attref_varnos = NULL;
+
+		datum = SysCacheGetAttr(STATEXTOID, htup,
+								Anum_pg_statistic_ext_stxjoinconds, &isnull);
+		if (!isnull)
+		{
+			char	   *str = TextDatumGetCString(datum);
+
+			entry->joinconds = (List *) stringToNode(str);
+			pfree(str);
+		}
+		else
+			entry->joinconds = NIL;
 
 		result = lappend(result, entry);
 	}
@@ -892,11 +1171,48 @@ examine_expression(Node *expr, int stattarget)
 }
 
 /*
+ * examine_join_stats_column
+ *		Find the statistics target of a column of another table of join
+ *		statistics, as examine_attribute() does for the analyzed table.
+ *
+ * Returns NULL if the column is not analyzed, or if the table cannot be
+ * locked without waiting, for the reason BuildRelationExtStatistics() gives.
+ * Only attstattarget is set in the result.
+ */
+static VacAttrStats *
+examine_join_stats_column(Oid relid, AttrNumber attnum)
+{
+	Relation	rel;
+	int			attstattarget;
+	VacAttrStats *stats = NULL;
+
+	if (!ConditionalLockRelationOid(relid, AccessShareLock))
+		return NULL;
+	rel = table_open(relid, NoLock);
+
+	if (attribute_is_analyzable(rel, attnum,
+								TupleDescAttr(RelationGetDescr(rel), attnum - 1),
+								&attstattarget))
+	{
+		stats = palloc0_object(VacAttrStats);
+		/* as std_typanalyze() does, -1 means the default target */
+		stats->attstattarget = attstattarget < 0 ? default_statistics_target
+			: attstattarget;
+	}
+
+	table_close(rel, NoLock);
+	return stats;
+}
+
+/*
  * Using 'vacatts' of size 'nvacatts' as input data, return a newly-built
  * VacAttrStats array which includes only the items corresponding to the
  * columns and expressions in 'exprs', in the same order.  If we don't have all
  * of the per-column stats available to compute the extended stats, then we
  * return NULL to indicate to the caller that the stats should not be built.
+ *
+ * The columns of the other tables of join statistics are not in 'vacatts', so
+ * examine_join_stats_column() looks them up.
  */
 static VacAttrStats **
 lookup_var_attr_stats(StatExtEntry *stat, int nvacatts, VacAttrStats **vacatts)
@@ -917,16 +1233,23 @@ lookup_var_attr_stats(StatExtEntry *stat, int nvacatts, VacAttrStats **vacatts)
 		if (bms_is_member(foreach_current_index(lc), stat->columns))
 		{
 			AttrNumber	attno = ((Var *) node)->varattno;
+			Index		varno = ((Var *) node)->varno;
 			int			j;
 
-			/* lookup VacAttrStats info for a plain column (same attnum) */
-			stats[i] = NULL;
-			for (j = 0; j < nvacatts; j++)
+			if (varno != 1)
+				stats[i] = examine_join_stats_column(stat->joinrels[varno - 1],
+													 attno);
+			else
 			{
-				if (attno == vacatts[j]->tupattnum)
+				/* lookup VacAttrStats info for a plain column (same attnum) */
+				stats[i] = NULL;
+				for (j = 0; j < nvacatts; j++)
 				{
-					stats[i] = vacatts[j];
-					break;
+					if (attno == vacatts[j]->tupattnum)
+					{
+						stats[i] = vacatts[j];
+						break;
+					}
 				}
 			}
 
@@ -1051,7 +1374,7 @@ multi_sort_init(int ndims)
 {
 	MultiSortSupport mss;
 
-	Assert(ndims >= 2);
+	Assert(ndims >= 1);			/* join MCV stats may have a single column */
 
 	mss = (MultiSortSupport) palloc0(offsetof(MultiSortSupportData, ssup)
 									 + sizeof(SortSupportData) * ndims);
@@ -1440,6 +1763,14 @@ choose_best_statistics(List *stats, char requiredkind, bool inh,
 			continue;
 
 		/*
+		 * Skip join statistics.  These describe the distribution over the
+		 * join result, not the base table, so they must not be used to
+		 * estimate single-table clauses.
+		 */
+		if (info->joinrels != NIL)
+			continue;
+
+		/*
 		 * Collect attributes and expressions in remaining (unestimated)
 		 * clauses fully covered by this statistic object.
 		 *
@@ -1534,7 +1865,7 @@ choose_best_statistics(List *stats, char requiredkind, bool inh,
  * Returns false if there is something we definitively can't handle.
  * On true return, we can proceed to match the *exprs against statistics.
  */
-static bool
+bool
 statext_is_compatible_clause_internal(PlannerInfo *root, Node *clause,
 									  Index relid, Bitmapset **attnums,
 									  List **exprs, bool *leakproof)

@@ -1544,7 +1544,12 @@ mcv_match_expression(Node *expr, List *exprs, Oid *collid)
 
 		if (expr_is_var)
 		{
+			/*
+			 * Compare varno too: a join statistics object has columns of
+			 * several relations, which may have the same attnum.
+			 */
 			if (IsA(node, Var) &&
+				((Var *) node)->varno == ((Var *) expr)->varno &&
 				((Var *) node)->varattno == ((Var *) expr)->varattno)
 				return idx;
 		}
@@ -1581,7 +1586,7 @@ mcv_match_expression(Node *expr, List *exprs, Oid *collid)
  * & and |, which should be faster than min/max. The bitmaps are fairly
  * small, though (thanks to the cap on the MCV list size).
  */
-static bool *
+bool *
 mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 					 List *exprs,
 					 MCVList *mcvlist, bool is_or)

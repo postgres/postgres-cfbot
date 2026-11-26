@@ -4235,6 +4235,23 @@ my %tests = (
 		},
 	},
 
+	'CREATE STATISTICS extended_stats_join' => {
+		create_order => 99,
+		create_sql => 'CREATE STATISTICS dump_test.test_ext_stats_join (mcv)
+							ON f.col2, t.col3
+							FROM dump_test.test_fifth_table f
+							JOIN dump_test.test_table t ON (f.col1 = t.col1)',
+		regexp => qr/^
+			\QCREATE STATISTICS dump_test.test_ext_stats_join (mcv) ON test_fifth_table.col2, test_table.col3 FROM dump_test.test_fifth_table JOIN dump_test.test_table ON (test_fifth_table.col1 = test_table.col1);\E
+		    /xms,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_post_data => 1, },
+		unlike => {
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
 	'CREATE SEQUENCE test_table_col1_seq' => {
 		regexp => qr/^
 			\QCREATE SEQUENCE dump_test.test_table_col1_seq\E

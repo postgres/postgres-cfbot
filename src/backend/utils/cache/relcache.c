@@ -285,6 +285,8 @@ typedef struct StatExtExprsCacheEnt
 	Oid			statOid;		/* OID of the statistics object */
 	List	   *exprs;			/* all its entries, columns included */
 	Bitmapset  *columns;		/* positions in exprs of plain columns */
+	List	   *joinrels;		/* OIDs of stxjoinrels, NIL if not a join */
+	List	   *joinconds;		/* stxjoinconds, NIL if not a join */
 } StatExtExprsCacheEnt;
 
 
@@ -5098,7 +5100,9 @@ RelationGetStatExtList(Relation relation)
  *		get the parsed entries of a statistics object on this relation
  *
  * Returns the entries as statext_get_stxexprs() prepares them, and sets
- * *columns to the positions of those that are plain columns.  They are
+ * *columns to the positions of those that are plain columns, and for join
+ * statistics *joinrels and *joinconds to their tables and join conditions,
+ * which are NIL otherwise.  They are
  * cached in the relcache entry, as RelationGetIndexExpressions() caches
  * index expressions, because parsing them on every planning is expensive.
  * They are found by OID, which ALTER TABLE changes when it re-creates a
@@ -5107,11 +5111,16 @@ RelationGetStatExtList(Relation relation)
  * invalidation.
  */
 List *
-RelationGetStatExtExprs(Relation relation, Oid statOid, Bitmapset **columns)
+RelationGetStatExtExprs(Relation relation, Oid statOid, Bitmapset **columns,
+						List **joinrels, List **joinconds)
 {
 	HeapTuple	htup;
 	List	   *exprs;
 	Bitmapset  *cols;
+	List	   *jrels = NIL;
+	List	   *jconds = NIL;
+	Datum		datum;
+	bool		isnull;
 	StatExtExprsCacheEnt *entry;
 	MemoryContext oldcxt;
 
@@ -5121,6 +5130,8 @@ RelationGetStatExtExprs(Relation relation, Oid statOid, Bitmapset **columns)
 		if (cached->statOid == statOid)
 		{
 			*columns = bms_copy(cached->columns);
+			*joinrels = list_copy(cached->joinrels);
+			*joinconds = copyObject(cached->joinconds);
 			return copyObject(cached->exprs);
 		}
 	}
@@ -5136,6 +5147,23 @@ RelationGetStatExtExprs(Relation relation, Oid statOid, Bitmapset **columns)
 	Assert(((Form_pg_statistic_ext) GETSTRUCT(htup))->stxrelid ==
 		   RelationGetRelid(relation));
 	exprs = statext_get_stxexprs(htup, relation, &cols);
+
+	datum = SysCacheGetAttr(STATEXTOID, htup,
+							Anum_pg_statistic_ext_stxjoinrels, &isnull);
+	if (!isnull)
+	{
+		oidvector  *ov = (oidvector *) DatumGetPointer(datum);
+		char	   *condstr;
+
+		for (int i = 0; i < ov->dim1; i++)
+			jrels = lappend_oid(jrels, ov->values[i]);
+
+		datum = SysCacheGetAttrNotNull(STATEXTOID, htup,
+									   Anum_pg_statistic_ext_stxjoinconds);
+		condstr = TextDatumGetCString(datum);
+		jconds = (List *) stringToNode(condstr);
+		pfree(condstr);
+	}
 	ReleaseSysCache(htup);
 
 	if (relation->rd_statexprcxt == NULL)
@@ -5153,10 +5181,14 @@ RelationGetStatExtExprs(Relation relation, Oid statOid, Bitmapset **columns)
 	entry->statOid = statOid;
 	entry->exprs = copyObject(exprs);
 	entry->columns = bms_copy(cols);
+	entry->joinrels = list_copy(jrels);
+	entry->joinconds = copyObject(jconds);
 	relation->rd_statexprs = lappend(relation->rd_statexprs, entry);
 	MemoryContextSwitchTo(oldcxt);
 
 	*columns = cols;
+	*joinrels = jrels;
+	*joinconds = jconds;
 	return exprs;
 }
 

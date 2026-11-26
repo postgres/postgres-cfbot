@@ -55,6 +55,12 @@ CATALOG(pg_statistic_ext,3381,StatisticExtRelationId)
 												 * statistics object is
 												 * defined on; simple columns
 												 * are Var nodes */
+
+	/* Fields for join statistics (all NULL for single-table stats) */
+
+	/* participating rels anchor-first (stxjoinrels[0] == stxrelid) */
+	oidvector	stxjoinrels BKI_DEFAULT(_null_) BKI_FORCE_NULL;
+	pg_node_tree stxjoinconds BKI_DEFAULT(_null_) BKI_FORCE_NULL;
 #endif
 
 } FormData_pg_statistic_ext;
@@ -73,6 +79,9 @@ DECLARE_TOAST(pg_statistic_ext, 3439, 3440);
 DECLARE_UNIQUE_INDEX_PKEY(pg_statistic_ext_oid_index, 3380, StatisticExtOidIndexId, pg_statistic_ext, btree(oid oid_ops));
 DECLARE_UNIQUE_INDEX(pg_statistic_ext_name_index, 3997, StatisticExtNameIndexId, pg_statistic_ext, btree(stxname name_ops, stxnamespace oid_ops));
 DECLARE_INDEX(pg_statistic_ext_relid_index, 3379, StatisticExtRelidIndexId, pg_statistic_ext, btree(stxrelid oid_ops));
+
+/* each participating relation of a join statistics object exists */
+DECLARE_ARRAY_FOREIGN_KEY((stxjoinrels), pg_class, (oid));
 
 MAKE_SYSCACHE(STATEXTOID, pg_statistic_ext_oid_index, 4);
 MAKE_SYSCACHE(STATEXTNAMENSP, pg_statistic_ext_name_index, 4);

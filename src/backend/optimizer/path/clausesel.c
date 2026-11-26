@@ -966,6 +966,15 @@ clause_selectivity_ext(PlannerInfo *root,
 		s1 = boolvarsel(root, clause, varRelid);
 	}
 
+	/*
+	 * A clause on varRelid that also mentions other relations (hence not
+	 * cacheable) is a join clause applied by a parameterized scan of
+	 * varRelid.  Correct its estimate with join statistics, as the join step
+	 * would (see join_mcv_restriction_selectivity()).
+	 */
+	if (use_extended_stats && rinfo != NULL && !cacheable && varRelid != 0)
+		s1 = join_mcv_restriction_selectivity(root, rinfo, varRelid, s1);
+
 	/* Cache the result if possible */
 	if (cacheable)
 	{

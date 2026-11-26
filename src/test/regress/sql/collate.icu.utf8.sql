@@ -766,6 +766,28 @@ INSERT INTO test_arbiter_ci VALUES ('ABC', 'fourth')
   DO SELECT RETURNING *;  -- error
 SELECT x, y FROM test_arbiter_ci;
 DROP TABLE test_arbiter_ci;
+
+-- Join statistics must not sample the join through an index that differs
+-- from the join condition in collation
+CREATE TABLE test_join_mcv_ci (x text COLLATE case_insensitive);
+INSERT INTO test_join_mcv_ci SELECT x FROM test3ci;
+CREATE TABLE test_join_mcv_ci_inner (x text COLLATE case_insensitive);
+INSERT INTO test_join_mcv_ci_inner SELECT x FROM test1ci;
+CREATE INDEX test_join_mcv_ci_inner_c ON test_join_mcv_ci_inner (x COLLATE "C");
+CREATE STATISTICS test_join_mcv_ci_stats (mcv) ON t2.x
+  FROM test_join_mcv_ci t1 JOIN test_join_mcv_ci_inner t2 ON (t1.x = t2.x);  -- warning
+ANALYZE test_join_mcv_ci;  -- warning
+SELECT m.values, m.frequency FROM pg_statistic_ext s
+  JOIN pg_statistic_ext_data d ON (d.stxoid = s.oid),
+  pg_mcv_list_items(d.stxdmcv) m
+WHERE s.stxname = 'test_join_mcv_ci_stats' ORDER BY m.values;
+CREATE INDEX test_join_mcv_ci_inner_ci ON test_join_mcv_ci_inner (x);
+ANALYZE test_join_mcv_ci;
+SELECT m.values, m.frequency FROM pg_statistic_ext s
+  JOIN pg_statistic_ext_data d ON (d.stxoid = s.oid),
+  pg_mcv_list_items(d.stxdmcv) m
+WHERE s.stxname = 'test_join_mcv_ci_stats' ORDER BY m.values;
+DROP TABLE test_join_mcv_ci, test_join_mcv_ci_inner;
 SELECT string_to_array('ABC,DEF,GHI' COLLATE case_insensitive, ',', 'abc');
 SELECT string_to_array('ABCDEFGHI' COLLATE case_insensitive, NULL, 'b');
 

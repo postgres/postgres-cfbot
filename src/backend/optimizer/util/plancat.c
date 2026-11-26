@@ -1655,7 +1655,8 @@ get_relation_constraints(PlannerInfo *root,
 static void
 get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 							   Oid statOid, bool inh,
-							   List *exprs, Bitmapset *columns)
+							   List *exprs, Bitmapset *columns,
+							   List *joinrels, List *joinconds)
 {
 	Form_pg_statistic_ext_data dataForm;
 	HeapTuple	dtup;
@@ -1707,6 +1708,13 @@ get_relation_statistics_worker(List **stainfos, RelOptInfo *rel,
 		info->exprs = exprs;
 		info->columns = columns;
 
+		/*
+		 * Join statistics have only the MCV kind, so only it carries the join
+		 * fields, which are NIL for statistics on a single table.
+		 */
+		info->joinrels = joinrels;
+		info->joinconds = joinconds;
+
 		*stainfos = lappend(*stainfos, info);
 	}
 
@@ -1751,6 +1759,9 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 		Oid			statOid = lfirst_oid(l);
 		List	   *exprs = NIL;
 		Bitmapset  *columns = NULL;
+		List	   *joinrels = NIL;
+		List	   *joinconds = NIL;
+		bool		isjoin;
 
 		/*
 		 * Preprocess the columns and expressions. We read them, fix the
@@ -1761,7 +1772,11 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 		 * is at least one of those, possibly both. So it's better to process
 		 * columns and expressions here.
 		 */
-		exprs = RelationGetStatExtExprs(relation, statOid, &columns);
+		exprs = RelationGetStatExtExprs(relation, statOid, &columns,
+										&joinrels, &joinconds);
+		isjoin = (joinrels != NIL);
+		if (isjoin)
+			root->hasJoinStats = true;
 
 		/*
 		 * Modify the copies we obtain from the relcache to have the correct
@@ -1770,8 +1785,10 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 		 *
 		 * This must be done before const-simplification because
 		 * eval_const_expressions reduces NullTest for Vars based on varno.
+		 *
+		 * Join statistics keep their varnos, which index stxjoinrels.
 		 */
-		if (varno != 1)
+		if (varno != 1 && !isjoin)
 			ChangeVarNodes((Node *) exprs, 1, varno, 0);
 
 		/*
@@ -1796,10 +1813,10 @@ get_relation_statistics(PlannerInfo *root, RelOptInfo *rel,
 		/* extract statistics for possible values of stxdinherit flag */
 
 		get_relation_statistics_worker(&stainfos, rel, statOid, true,
-									   exprs, columns);
+									   exprs, columns, joinrels, joinconds);
 
 		get_relation_statistics_worker(&stainfos, rel, statOid, false,
-									   exprs, columns);
+									   exprs, columns, joinrels, joinconds);
 	}
 
 	list_free(statoidlist);

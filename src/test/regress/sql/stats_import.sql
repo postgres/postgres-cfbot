@@ -3287,4 +3287,122 @@ SELECT expr, n_distinct FROM pg_stats_ext_exprs
 WHERE statistics_schemaname = 'stats_import' AND statistics_name = 'test_fold_stat'
 ORDER BY expr;
 
+-- Join statistics: copy their statistics to clones and compare, like for
+-- test_stat above.  The columns of join statistics can come from the joined
+-- table rather than from the table the statistics belong to.
+CREATE TABLE stats_import.tail_dim (
+    id    INTEGER PRIMARY KEY,
+    label TEXT NOT NULL
+) WITH (autovacuum_enabled = false);
+CREATE TABLE stats_import.tail_fact (
+    dim_id INTEGER NOT NULL
+) WITH (autovacuum_enabled = false);
+INSERT INTO stats_import.tail_dim VALUES
+    (1, 'common_a'), (2, 'common_b'),
+    (3, 'other_a'), (4, 'other_b'),
+    (5, 'extra_1'), (6, 'extra_2');
+INSERT INTO stats_import.tail_fact (dim_id)
+SELECT 1 FROM generate_series(1, 90)
+UNION ALL SELECT 2 FROM generate_series(1, 70)
+UNION ALL SELECT 3 FROM generate_series(1, 25)
+UNION ALL SELECT 4 FROM generate_series(1, 15);
+ANALYZE stats_import.tail_dim;
+ANALYZE stats_import.tail_fact;
+-- tail_dim.label is column 2, and tail_fact has only one column
+CREATE STATISTICS stats_import.jstats_tail (mcv) ON d.label
+FROM stats_import.tail_fact f JOIN stats_import.tail_dim d ON (f.dim_id = d.id);
+ALTER STATISTICS stats_import.jstats_tail SET STATISTICS 2;
+ANALYZE stats_import.tail_fact;
+
+CREATE TABLE stats_import.test_orders (id int, test_id int, qty int)
+  WITH (autovacuum_enabled = false);
+INSERT INTO stats_import.test_orders
+  SELECT g, g % 4 + 1, g % 2 FROM generate_series(1, 80) g;
+-- Columns from both tables; test.name is column 2, which in test_orders is
+-- the integer test_id
+CREATE STATISTICS stats_import.test_orders_stat (mcv) ON o.qty, t.name
+FROM stats_import.test_orders o JOIN stats_import.test t ON (o.test_id = t.id);
+ANALYZE stats_import.test_orders;
+
+CREATE TABLE stats_import.tail_fact_clone (LIKE stats_import.tail_fact)
+  WITH (autovacuum_enabled = false);
+CREATE TABLE stats_import.tail_dim_clone (LIKE stats_import.tail_dim)
+  WITH (autovacuum_enabled = false);
+CREATE TABLE stats_import.test_orders_clone (LIKE stats_import.test_orders)
+  WITH (autovacuum_enabled = false);
+-- Join statistics need an index on the joined table's join column
+CREATE INDEX ON stats_import.tail_dim_clone (id);
+CREATE INDEX ON stats_import.test_clone (id);
+CREATE STATISTICS stats_import.jstats_tail_clone (mcv) ON d.label
+FROM stats_import.tail_fact_clone f JOIN stats_import.tail_dim_clone d
+  ON (f.dim_id = d.id);
+CREATE STATISTICS stats_import.test_orders_stat_clone (mcv) ON o.qty, t.name
+FROM stats_import.test_orders_clone o JOIN stats_import.test_clone t
+  ON (o.test_id = t.id);
+
+-- The statistics to copy
+SELECT statistics_name, most_common_vals, most_common_freqs FROM pg_stats_ext
+WHERE statistics_schemaname = 'stats_import'
+  AND statistics_name IN ('jstats_tail', 'test_orders_stat')
+ORDER BY statistics_name;
+
+SELECT pg_catalog.pg_restore_extended_stats(
+    'schemaname', 'stats_import',
+    'relname', 'tail_fact_clone',
+    'statistics_schemaname', 'stats_import',
+    'statistics_name', 'jstats_tail_clone',
+    'inherited', e.inherited,
+    'most_common_vals', e.most_common_vals,
+    'most_common_freqs', e.most_common_freqs,
+    'most_common_base_freqs', e.most_common_base_freqs)
+FROM pg_stats_ext AS e
+WHERE e.statistics_schemaname = 'stats_import'
+  AND e.statistics_name = 'jstats_tail';
+SELECT pg_catalog.pg_restore_extended_stats(
+    'schemaname', 'stats_import',
+    'relname', 'test_orders_clone',
+    'statistics_schemaname', 'stats_import',
+    'statistics_name', 'test_orders_stat_clone',
+    'inherited', e.inherited,
+    'most_common_vals', e.most_common_vals,
+    'most_common_freqs', e.most_common_freqs,
+    'most_common_base_freqs', e.most_common_base_freqs)
+FROM pg_stats_ext AS e
+WHERE e.statistics_schemaname = 'stats_import'
+  AND e.statistics_name = 'test_orders_stat';
+
+-- The clones have the same statistics: no differences
+SELECT statname, (stats).*
+FROM stats_import.pg_stats_ext_get_difference('jstats_tail', 'jstats_tail_clone')
+\gx
+SELECT statname, (stats).*
+FROM stats_import.pg_stats_ext_get_difference('test_orders_stat',
+                                              'test_orders_stat_clone')
+\gx
+
+-- Restoring join statistics needs MAINTAIN on the anchor table only: it
+-- writes the given values and reads nothing from the other tables
+CREATE ROLE regress_test_join_restore;
+GRANT USAGE ON SCHEMA stats_import TO regress_test_join_restore;
+GRANT MAINTAIN ON stats_import.tail_fact_clone TO regress_test_join_restore;
+SET ROLE regress_test_join_restore;
+SELECT has_table_privilege('stats_import.tail_dim_clone', 'SELECT, MAINTAIN')
+  AS dim_privileges;
+SELECT pg_catalog.pg_restore_extended_stats(
+    'schemaname', 'stats_import',
+    'relname', 'tail_fact_clone',
+    'statistics_schemaname', 'stats_import',
+    'statistics_name', 'jstats_tail_clone',
+    'inherited', false,
+    'most_common_vals', '{{common_a}}'::text[],
+    'most_common_freqs', '{1}'::double precision[],
+    'most_common_base_freqs', '{1}'::double precision[]);
+RESET ROLE;
+SELECT most_common_vals FROM pg_stats_ext
+WHERE statistics_schemaname = 'stats_import'
+  AND statistics_name = 'jstats_tail_clone';
+REVOKE MAINTAIN ON stats_import.tail_fact_clone FROM regress_test_join_restore;
+REVOKE USAGE ON SCHEMA stats_import FROM regress_test_join_restore;
+DROP ROLE regress_test_join_restore;
+
 DROP SCHEMA stats_import CASCADE;

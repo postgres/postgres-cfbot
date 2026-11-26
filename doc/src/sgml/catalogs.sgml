@@ -7803,7 +7803,8 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        (references <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>oid</structfield>)
       </para>
       <para>
-       Table containing the columns described by this object
+       Table containing the columns described by this object, or for join
+       statistics the first table of the join, which owns the object
       </para></entry>
      </row>
 
@@ -7878,6 +7879,32 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        is defined on.  Both column
        references and expressions are stored here, with one element per
        column or expression, in the order they were written.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>stxjoinrels</structfield> <type>oidvector</type>
+       (references <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>oid</structfield>)
+      </para>
+      <para>
+       For join statistics, the tables of the join, starting with
+       <structfield>stxrelid</structfield>.  A column reference in
+       <structfield>stxexprs</structfield> or
+       <structfield>stxjoinconds</structfield> identifies its table by its
+       position in this list.  Null for single-table statistics.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>stxjoinconds</structfield> <type>pg_node_tree</type>
+      </para>
+      <para>
+       For join statistics, expression trees (in
+       <function>nodeToString()</function> representation) for the join
+       conditions, one element per equality between two columns.  Null for
+       single-table statistics.
       </para></entry>
      </row>
 
