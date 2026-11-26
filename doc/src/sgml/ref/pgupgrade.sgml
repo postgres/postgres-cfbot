@@ -88,14 +88,14 @@ PostgreSQL documentation
 
     <variablelist>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-old-bindir">
       <term><option>-b</option> <replaceable>bindir</replaceable></term>
       <term><option>--old-bindir=</option><replaceable>bindir</replaceable></term>
       <listitem><para>the old PostgreSQL executable directory;
       environment variable <envar>PGBINOLD</envar></para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-new-bindir">
       <term><option>-B</option> <replaceable>bindir</replaceable></term>
       <term><option>--new-bindir=</option><replaceable>bindir</replaceable></term>
       <listitem><para>the new PostgreSQL executable directory;
@@ -103,41 +103,41 @@ PostgreSQL documentation
       environment variable <envar>PGBINNEW</envar></para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-check">
       <term><option>-c</option></term>
       <term><option>--check</option></term>
       <listitem><para>check clusters only, don't change any data</para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-old-datadir">
       <term><option>-d</option> <replaceable>configdir</replaceable></term>
       <term><option>--old-datadir=</option><replaceable>configdir</replaceable></term>
       <listitem><para>the old database cluster configuration directory; environment
       variable <envar>PGDATAOLD</envar></para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-new-datadir">
       <term><option>-D</option> <replaceable>configdir</replaceable></term>
       <term><option>--new-datadir=</option><replaceable>configdir</replaceable></term>
       <listitem><para>the new database cluster configuration directory; environment
       variable <envar>PGDATANEW</envar></para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-jobs">
       <term><option>-j <replaceable class="parameter">njobs</replaceable></option></term>
       <term><option>--jobs=<replaceable class="parameter">njobs</replaceable></option></term>
       <listitem><para>number of simultaneous connections and processes/threads to use
       </para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-link">
       <term><option>-k</option></term>
       <term><option>--link</option></term>
       <listitem><para>use hard links instead of copying files to the new
       cluster</para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-no-sync">
       <term><option>-N</option></term>
       <term><option>--no-sync</option></term>
       <listitem>
@@ -153,7 +153,7 @@ PostgreSQL documentation
       </listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-old-options">
       <term><option>-o</option> <replaceable class="parameter">options</replaceable></term>
       <term><option>--old-options</option> <replaceable class="parameter">options</replaceable></term>
       <listitem><para>options to be passed directly to the
@@ -161,7 +161,7 @@ PostgreSQL documentation
       option invocations are appended</para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-new-options">
       <term><option>-O</option> <replaceable class="parameter">options</replaceable></term>
       <term><option>--new-options</option> <replaceable class="parameter">options</replaceable></term>
       <listitem><para>options to be passed directly to the
@@ -169,28 +169,28 @@ PostgreSQL documentation
       option invocations are appended</para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-old-port">
       <term><option>-p</option> <replaceable>port</replaceable></term>
       <term><option>--old-port=</option><replaceable>port</replaceable></term>
       <listitem><para>the old cluster port number; environment
       variable <envar>PGPORTOLD</envar></para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-new-port">
       <term><option>-P</option> <replaceable>port</replaceable></term>
       <term><option>--new-port=</option><replaceable>port</replaceable></term>
       <listitem><para>the new cluster port number; environment
       variable <envar>PGPORTNEW</envar></para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-retain">
       <term><option>-r</option></term>
       <term><option>--retain</option></term>
       <listitem><para>retain SQL and log files even after successful completion
       </para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-socketdir">
       <term><option>-s</option> <replaceable>dir</replaceable></term>
       <term><option>--socketdir=</option><replaceable>dir</replaceable></term>
       <listitem><para>directory to use for postmaster sockets during upgrade;
@@ -198,26 +198,26 @@ PostgreSQL documentation
       variable <envar>PGSOCKETDIR</envar></para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-username">
       <term><option>-U</option> <replaceable>username</replaceable></term>
       <term><option>--username=</option><replaceable>username</replaceable></term>
       <listitem><para>cluster's install user name; environment
       variable <envar>PGUSER</envar></para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-verbose">
       <term><option>-v</option></term>
       <term><option>--verbose</option></term>
       <listitem><para>enable verbose internal logging</para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-version">
       <term><option>-V</option></term>
       <term><option>--version</option></term>
       <listitem><para>display version information, then exit</para></listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-clone">
       <term><option>--clone</option></term>
       <listitem>
        <para>
@@ -238,7 +238,7 @@ PostgreSQL documentation
       </listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-copy">
       <term><option>--copy</option></term>
       <listitem>
        <para>
@@ -249,7 +249,7 @@ PostgreSQL documentation
       </listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-copy-file-range">
       <term><option>--copy-file-range</option></term>
       <listitem>
        <para>
@@ -262,7 +262,7 @@ PostgreSQL documentation
       </listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-no-statistic">
       <term><option>--no-statistics</option></term>
       <listitem>
        <para>
@@ -271,7 +271,7 @@ PostgreSQL documentation
       </listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-set-char-signedness">
       <term><option>--set-char-signedness=</option><replaceable>option</replaceable></term>
       <listitem>
        <para>
@@ -324,7 +324,7 @@ PostgreSQL documentation
       </listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-swap">
       <term><option>--swap</option></term>
       <listitem>
        <para>
@@ -350,7 +350,7 @@ PostgreSQL documentation
       </listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-sync-method">
       <term><option>--sync-method=</option><replaceable>method</replaceable></term>
       <listitem>
        <para>
@@ -373,7 +373,19 @@ PostgreSQL documentation
       </listitem>
      </varlistentry>
 
-     <varlistentry>
+     <varlistentry id="pgupgrade-options-preserve-commit-timestamps">
+      <term><option>--preserve-commit-timestamps</option></term>
+      <listitem>
+       <para>
+        preserve the commit timestamp during the upgrade. The upgrade would fail
+        if the old cluster enables
+        <link linkend="guc-track-commit-timestamp"><varname>track_commit_timestamp</varname></link>
+        but new cluster does not.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="pgupgrade-options-sync-help">
       <term><option>-?</option></term>
       <term><option>--help</option></term>
       <listitem><para>show help, then exit</para></listitem>
