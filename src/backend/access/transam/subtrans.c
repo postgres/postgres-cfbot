@@ -31,6 +31,7 @@
 #include "access/slru.h"
 #include "access/subtrans.h"
 #include "access/transam.h"
+#include "access/varsup.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "storage/subsystems.h"
