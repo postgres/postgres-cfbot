@@ -647,7 +647,7 @@ CREATE TABLE gtest20 (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) VIRTU
 INSERT INTO gtest20 (a) VALUES (10);  -- ok
 INSERT INTO gtest20 (a) VALUES (30);  -- violates constraint
 ERROR:  new row for relation "gtest20" violates check constraint "gtest20_b_check"
-DETAIL:  Failing row contains (30, virtual).
+DETAIL:  Failing row contains (30, virtual). Check constraint expression: (b < 50).
 ALTER TABLE gtest20 ALTER COLUMN b SET EXPRESSION AS (a * 100);  -- violates constraint
 ERROR:  check constraint "gtest20_b_check" of relation "gtest20" is violated by some row
 ALTER TABLE gtest20 ALTER COLUMN b SET EXPRESSION AS (a * 3);  -- ok
@@ -693,7 +693,7 @@ ALTER TABLE gtest20c ADD CONSTRAINT whole_row_check CHECK (gtest20c IS NOT NULL)
 INSERT INTO gtest20c VALUES (1);  -- ok
 INSERT INTO gtest20c VALUES (NULL);  -- fails
 ERROR:  new row for relation "gtest20c" violates check constraint "whole_row_check"
-DETAIL:  Failing row contains (null, virtual).
+DETAIL:  Failing row contains (null, virtual). Check constraint expression: (gtest20c.* IS NOT NULL).
 ALTER TABLE gtest20c ALTER COLUMN b SET EXPRESSION AS (NULL::int);  -- violates constraint
 ERROR:  check constraint "whole_row_check" of relation "gtest20c" is violated by some row
 -- index with whole-row reference needs rebuild

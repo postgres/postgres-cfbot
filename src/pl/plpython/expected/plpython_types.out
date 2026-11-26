@@ -424,8 +424,10 @@ SELECT * FROM test_type_conversion_booltrue(true, true);
 
 SELECT * FROM test_type_conversion_booltrue(false, true);
 ERROR:  value for domain booltrue violates check constraint "booltrue_check"
+DETAIL:  Check constraint expression: ((VALUE IS TRUE) OR (VALUE IS NULL)).
 SELECT * FROM test_type_conversion_booltrue(true, false);
 ERROR:  value for domain booltrue violates check constraint "booltrue_check"
+DETAIL:  Check constraint expression: ((VALUE IS TRUE) OR (VALUE IS NULL)).
 CONTEXT:  while creating return value
 PL/Python function "test_type_conversion_booltrue"
 CREATE DOMAIN uint2 AS int2 CHECK (VALUE >= 0);
@@ -443,6 +445,7 @@ INFO:  (100, <class 'int'>)
 SELECT * FROM test_type_conversion_uint2(100::uint2, -50);
 INFO:  (100, <class 'int'>)
 ERROR:  value for domain uint2 violates check constraint "uint2_check"
+DETAIL:  Check constraint expression: (VALUE >= 0).
 CONTEXT:  while creating return value
 PL/Python function "test_type_conversion_uint2"
 SELECT * FROM test_type_conversion_uint2(null, 1);
@@ -464,8 +467,10 @@ SELECT * FROM test_type_conversion_nnint(10, 20);
 
 SELECT * FROM test_type_conversion_nnint(null, 20);
 ERROR:  value for domain nnint violates check constraint "nnint_check"
+DETAIL:  Check constraint expression: (VALUE IS NOT NULL).
 SELECT * FROM test_type_conversion_nnint(10, null);
 ERROR:  value for domain nnint violates check constraint "nnint_check"
+DETAIL:  Check constraint expression: (VALUE IS NOT NULL).
 CONTEXT:  while creating return value
 PL/Python function "test_type_conversion_nnint"
 CREATE DOMAIN bytea10 AS bytea CHECK (octet_length(VALUE) = 10 AND VALUE IS NOT NULL);
@@ -482,16 +487,20 @@ INFO:  (b'hello wold', <class 'bytes'>)
 
 SELECT * FROM test_type_conversion_bytea10('hello world', 'hello wold');
 ERROR:  value for domain bytea10 violates check constraint "bytea10_check"
+DETAIL:  Check constraint expression: ((octet_length(VALUE) = 10) AND (VALUE IS NOT NULL)).
 SELECT * FROM test_type_conversion_bytea10('hello word', 'hello world');
 INFO:  (b'hello word', <class 'bytes'>)
 ERROR:  value for domain bytea10 violates check constraint "bytea10_check"
+DETAIL:  Check constraint expression: ((octet_length(VALUE) = 10) AND (VALUE IS NOT NULL)).
 CONTEXT:  while creating return value
 PL/Python function "test_type_conversion_bytea10"
 SELECT * FROM test_type_conversion_bytea10(null, 'hello word');
 ERROR:  value for domain bytea10 violates check constraint "bytea10_check"
+DETAIL:  Check constraint expression: ((octet_length(VALUE) = 10) AND (VALUE IS NOT NULL)).
 SELECT * FROM test_type_conversion_bytea10('hello word', null);
 INFO:  (b'hello word', <class 'bytes'>)
 ERROR:  value for domain bytea10 violates check constraint "bytea10_check"
+DETAIL:  Check constraint expression: ((octet_length(VALUE) = 10) AND (VALUE IS NOT NULL)).
 CONTEXT:  while creating return value
 PL/Python function "test_type_conversion_bytea10"
 --
@@ -839,6 +848,7 @@ return [2,1]
 $$ LANGUAGE plpython3u;
 SELECT * FROM test_type_conversion_array_domain_check_violation();
 ERROR:  value for domain ordered_pair_domain violates check constraint "ordered_pair_domain_check"
+DETAIL:  Check constraint expression: ((array_length(VALUE, 1) = 2) AND ((VALUE)[1] < (VALUE)[2])).
 CONTEXT:  while creating return value
 PL/Python function "test_type_conversion_array_domain_check_violation"
 --
@@ -866,6 +876,7 @@ select test_build_uint2_array(1::int2);
 
 select test_build_uint2_array(-1::int2);  -- fail
 ERROR:  value for domain uint2 violates check constraint "uint2_check"
+DETAIL:  Check constraint expression: (VALUE >= 0).
 CONTEXT:  while creating return value
 PL/Python function "test_build_uint2_array"
 --
@@ -899,6 +910,7 @@ INFO:  ([2, 4], <class 'list'>)
 
 select test_type_conversion_domain_array2(array[4,2]);  -- fail
 ERROR:  value for domain ordered_pair_domain violates check constraint "ordered_pair_domain_check"
+DETAIL:  Check constraint expression: ((array_length(VALUE, 1) = 2) AND ((VALUE)[1] < (VALUE)[2])).
 CREATE FUNCTION test_type_conversion_array_domain_array(x ordered_pair_domain[])
   RETURNS ordered_pair_domain AS $$
 plpy.info(x, type(x))
@@ -981,6 +993,7 @@ SELECT nnint_test(null, 3);
 
 SELECT nnint_test(3, null);  -- fail
 ERROR:  value for domain nnint violates check constraint "nnint_check"
+DETAIL:  Check constraint expression: (VALUE IS NOT NULL).
 CONTEXT:  while creating return value
 PL/Python function "nnint_test"
 --
@@ -998,6 +1011,7 @@ SELECT read_ordered_named_pair(row(1, 2));
 
 SELECT read_ordered_named_pair(row(2, 1));  -- fail
 ERROR:  value for domain ordered_named_pair violates check constraint "ordered_named_pair_check"
+DETAIL:  Check constraint expression: ((VALUE).i <= (VALUE).j).
 CREATE FUNCTION build_ordered_named_pair(i int, j int) RETURNS ordered_named_pair AS $$
 return {'i': i, 'j': j}
 $$ LANGUAGE plpython3u;
@@ -1009,6 +1023,7 @@ SELECT build_ordered_named_pair(1,2);
 
 SELECT build_ordered_named_pair(2,1);  -- fail
 ERROR:  value for domain ordered_named_pair violates check constraint "ordered_named_pair_check"
+DETAIL:  Check constraint expression: ((VALUE).i <= (VALUE).j).
 CONTEXT:  while creating return value
 PL/Python function "build_ordered_named_pair"
 CREATE FUNCTION build_ordered_named_pairs(i int, j int) RETURNS ordered_named_pair[] AS $$
@@ -1022,6 +1037,7 @@ SELECT build_ordered_named_pairs(1,2);
 
 SELECT build_ordered_named_pairs(2,1);  -- fail
 ERROR:  value for domain ordered_named_pair violates check constraint "ordered_named_pair_check"
+DETAIL:  Check constraint expression: ((VALUE).i <= (VALUE).j).
 CONTEXT:  while creating return value
 PL/Python function "build_ordered_named_pairs"
 --

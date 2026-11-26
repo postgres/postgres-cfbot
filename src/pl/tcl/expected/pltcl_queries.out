@@ -51,6 +51,7 @@ select tcl_cdomain_arg(row('tkey', 42, 'ref2')::T_comp1);
 
 select tcl_cdomain_arg(row('tkey', -1, 'ref2'));  -- fail
 ERROR:  value for domain d_comp1 violates check constraint "d_comp1_check"
+DETAIL:  Check constraint expression: ((VALUE).ref1 > 0).
 -- Test argisnull primitive
 select tcl_argisnull('foo');
  tcl_argisnull 
@@ -188,6 +189,7 @@ select * from tcl_dcomposite_result(1002);
 
 select * from tcl_dcomposite_result(-1);  -- fail
 ERROR:  value for domain d_comp1 violates check constraint "d_comp1_check"
+DETAIL:  Check constraint expression: ((VALUE).ref1 > 0).
 create function tcl_record_result(int) returns record as $$
 return [list q1 sometext q2 $1 q3 moretext]
 $$ language pltcl;

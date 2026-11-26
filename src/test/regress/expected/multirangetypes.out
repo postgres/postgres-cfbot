@@ -3173,6 +3173,7 @@ select '{[4,5)}'::restrictedmultirange @> 7;
 
 select '{[4,50)}'::restrictedmultirange @> 7; -- should fail
 ERROR:  value for domain restrictedmultirange violates check constraint "restrictedmultirange_check"
+DETAIL:  Check constraint expression: (upper(VALUE) < 10).
 drop domain restrictedmultirange;
 ---
 -- Check automatic naming of multiranges

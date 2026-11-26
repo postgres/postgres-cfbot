@@ -662,7 +662,7 @@ CREATE TABLE gtest20 (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) STORE
 INSERT INTO gtest20 (a) VALUES (10);  -- ok
 INSERT INTO gtest20 (a) VALUES (30);  -- violates constraint
 ERROR:  new row for relation "gtest20" violates check constraint "gtest20_b_check"
-DETAIL:  Failing row contains (30, 60).
+DETAIL:  Failing row contains (30, 60). Check constraint expression: (b < 50).
 ALTER TABLE gtest20 ALTER COLUMN b SET EXPRESSION AS (a * 100);  -- violates constraint
 ERROR:  check constraint "gtest20_b_check" of relation "gtest20" is violated by some row
 ALTER TABLE gtest20 ALTER COLUMN b SET EXPRESSION AS (a * 3);  -- ok
@@ -687,7 +687,7 @@ ALTER TABLE gtest20c ADD CONSTRAINT whole_row_check CHECK (gtest20c IS NOT NULL)
 INSERT INTO gtest20c VALUES (1);  -- ok
 INSERT INTO gtest20c VALUES (NULL);  -- fails
 ERROR:  new row for relation "gtest20c" violates check constraint "whole_row_check"
-DETAIL:  Failing row contains (null, null).
+DETAIL:  Failing row contains (null, null). Check constraint expression: (gtest20c.* IS NOT NULL).
 ALTER TABLE gtest20c ALTER COLUMN b SET EXPRESSION AS (NULL::int);  -- violates constraint
 ERROR:  check constraint "whole_row_check" of relation "gtest20c" is violated by some row
 -- index with whole-row reference needs rebuild
@@ -938,11 +938,13 @@ CREATE TABLE gtest24 (a int PRIMARY KEY, b gtestdomain1 GENERATED ALWAYS AS (a *
 INSERT INTO gtest24 (a) VALUES (4);  -- ok
 INSERT INTO gtest24 (a) VALUES (6);  -- error
 ERROR:  value for domain gtestdomain1 violates check constraint "gtestdomain1_check"
+DETAIL:  Check constraint expression: (VALUE < 10).
 CREATE TYPE gtestdomain1range AS range (subtype = gtestdomain1);
 CREATE TABLE gtest24r (a int PRIMARY KEY, b gtestdomain1range GENERATED ALWAYS AS (gtestdomain1range(a, a + 5)) STORED);
 INSERT INTO gtest24r (a) VALUES (4);  -- ok
 INSERT INTO gtest24r (a) VALUES (6);  -- error
 ERROR:  value for domain gtestdomain1 violates check constraint "gtestdomain1_check"
+DETAIL:  Check constraint expression: (VALUE < 10).
 CREATE TABLE gtest24at (a int PRIMARY KEY);
 ALTER TABLE gtest24at ADD COLUMN b gtestdomain1 GENERATED ALWAYS AS (a * 2) STORED;  -- ok
 CREATE TABLE gtest24ata (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) STORED);
@@ -952,6 +954,7 @@ CREATE TABLE gtest24nn (a int, b gtestdomainnn GENERATED ALWAYS AS (a * 2) STORE
 INSERT INTO gtest24nn (a) VALUES (4);  -- ok
 INSERT INTO gtest24nn (a) VALUES (NULL);  -- error
 ERROR:  value for domain gtestdomainnn violates check constraint "gtestdomainnn_check"
+DETAIL:  Check constraint expression: (VALUE IS NOT NULL).
 -- typed tables (currently not supported)
 CREATE TYPE gtest_type AS (f1 integer, f2 text, f3 bigint);
 CREATE TABLE gtest28 OF gtest_type (f1 WITH OPTIONS GENERATED ALWAYS AS (f2 *2) STORED);

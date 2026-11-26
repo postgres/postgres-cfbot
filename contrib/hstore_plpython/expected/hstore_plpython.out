@@ -176,6 +176,7 @@ SELECT test2dom('foo');
 
 SELECT test2dom('bar');  -- fail
 ERROR:  value for domain hstore_foo violates check constraint "hstore_foo_check"
+DETAIL:  Check constraint expression: (VALUE ? 'foo'::text).
 CONTEXT:  while creating return value
 PL/Python function "test2dom"
 -- test as part of prepare/execute
