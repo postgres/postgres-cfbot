@@ -131,3 +131,55 @@ begin
   -- overflow during expression evaluation step does get an extra context line
   select x*x*x into y;
 end $$;
+
+-- Check case where the type name passed to pg_input_is_valid() and
+-- pg_input_error_info() changes between evaluations
+do $$
+declare r record;
+begin
+  for r in select * from (values ('42', 'integer'), ('hello', 'text'),
+                                 ('100000', 'smallint'),
+                                 ('abcdefg', 'varchar(5)'),
+                                 ('abcdefg', 'varchar(10)'),
+                                 ('abcdefghijk', 'varchar(10)')) as v(val, typ) loop
+    raise notice '% as %: % %', r.val, r.typ, pg_input_is_valid(r.val, r.typ),
+      (pg_input_error_info(r.val, r.typ)).message;
+  end loop;
+end $$;
+
+-- Check that a type name is resolved again when the type is dropped and
+-- recreated, or when search_path changes
+create domain input_check_dom as int;
+do $$
+declare typ text := 'input_check_dom';
+begin
+  for i in 1..2 loop
+    if i = 2 then
+      drop domain input_check_dom;
+      create domain input_check_dom as text;
+    end if;
+    raise notice 'constant: %, variable: %',
+      pg_input_is_valid('abc', 'input_check_dom'),
+      pg_input_is_valid('abc', typ);
+  end loop;
+end $$;
+drop domain input_check_dom;
+create schema input_check_s1;
+create schema input_check_s2;
+create domain input_check_s1.dom as int;
+create domain input_check_s2.dom as text;
+do $$
+declare
+  c refcursor;
+  v bool;
+begin
+  perform set_config('search_path', 'input_check_s1', true);
+  open c for select pg_input_is_valid('abc', 'dom') from generate_series(1, 2);
+  fetch c into v;
+  raise notice 'input_check_s1: %', v;
+  perform set_config('search_path', 'input_check_s2', true);
+  fetch c into v;
+  raise notice 'input_check_s2: %', v;
+  close c;
+end $$;
+drop schema input_check_s1, input_check_s2 cascade;
