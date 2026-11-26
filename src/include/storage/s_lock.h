@@ -698,6 +698,8 @@ extern void s_unlock(volatile slock_t *lock);
 /* Support for dynamic adjustment of spins_per_delay */
 #define DEFAULT_SPINS_PER_DELAY  100
 
+#define MAX_SPINS_PER_DELAY 1000
+
 extern void set_spins_per_delay(int shared_spins_per_delay);
 extern int	update_spins_per_delay(int shared_spins_per_delay);
 
