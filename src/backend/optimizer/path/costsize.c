@@ -105,6 +105,7 @@
 #include "optimizer/plancat.h"
 #include "optimizer/restrictinfo.h"
 #include "parser/parsetree.h"
+#include "statistics/statistics.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
@@ -5767,9 +5768,11 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 						   List *restrictlist)
 {
 	JoinType	jointype = sjinfo->jointype;
+	List	   *joinclauses = restrictlist;
 	Selectivity fkselec;
 	Selectivity jselec;
 	Selectivity pselec;
+	Selectivity selec;			/* of all the join clauses, corrected */
 	double		nrows;
 
 	/*
@@ -5841,6 +5844,14 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 		pselec = 0.0;			/* not used, keep compiler quiet */
 	}
 
+	selec = fkselec * jselec;
+	if (jointype != JOIN_SEMI && jointype != JOIN_ANTI)
+		selec = join_mcv_join_selectivity(root,
+										  outer_rel->relids,
+										  inner_rel->relids,
+										  joinclauses,
+										  selec);
+
 	/*
 	 * Basically, we multiply size of Cartesian product by selectivity.
 	 *
@@ -5856,17 +5867,17 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 	switch (jointype)
 	{
 		case JOIN_INNER:
-			nrows = outer_rows * inner_rows * fkselec * jselec;
+			nrows = outer_rows * inner_rows * selec;
 			/* pselec not used */
 			break;
 		case JOIN_LEFT:
-			nrows = outer_rows * inner_rows * fkselec * jselec;
+			nrows = outer_rows * inner_rows * selec;
 			if (nrows < outer_rows)
 				nrows = outer_rows;
 			nrows *= pselec;
 			break;
 		case JOIN_FULL:
-			nrows = outer_rows * inner_rows * fkselec * jselec;
+			nrows = outer_rows * inner_rows * selec;
 			if (nrows < outer_rows)
 				nrows = outer_rows;
 			if (nrows < inner_rows)
@@ -5874,11 +5885,11 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 			nrows *= pselec;
 			break;
 		case JOIN_SEMI:
-			nrows = outer_rows * fkselec * jselec;
+			nrows = outer_rows * selec;
 			/* pselec not used */
 			break;
 		case JOIN_ANTI:
-			nrows = outer_rows * (1.0 - fkselec * jselec);
+			nrows = outer_rows * (1.0 - selec);
 			nrows *= pselec;
 			break;
 		default:

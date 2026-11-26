@@ -57,6 +57,7 @@
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteManip.h"
 #include "rewrite/rewriteSupport.h"
+#include "statistics/statistics.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -362,7 +363,7 @@ static char *pg_get_indexdef_worker(Oid indexrelid, int colno,
 									bool showTblSpc, bool inherits,
 									int prettyFlags, bool missing_ok);
 static char *pg_get_statisticsobj_worker(Oid statextid, bool columns_only,
-										 bool missing_ok);
+										 bool missing_ok, int *on_offset);
 static char *pg_get_partkeydef_worker(Oid relid, int prettyFlags,
 									  bool attrsOnly, bool missing_ok);
 static char *pg_get_constraintdef_worker(Oid constraintId, bool fullCommand,
@@ -1613,12 +1614,37 @@ pg_get_statisticsobjdef(PG_FUNCTION_ARGS)
 	Oid			statextid = PG_GETARG_OID(0);
 	char	   *res;
 
-	res = pg_get_statisticsobj_worker(statextid, false, true);
+	res = pg_get_statisticsobj_worker(statextid, false, true, NULL);
 
 	if (res == NULL)
 		PG_RETURN_NULL();
 
 	PG_RETURN_TEXT_P(string_to_text(res));
+}
+
+/*
+ * pg_get_statisticsobjdef_body
+ *		Get the definition of an extended statistics object after its
+ *		"CREATE STATISTICS name (kinds) ON", for psql to print
+ */
+Datum
+pg_get_statisticsobjdef_body(PG_FUNCTION_ARGS)
+{
+	Oid			statextid = PG_GETARG_OID(0);
+	char	   *res;
+	int			on_offset;
+	text	   *result;
+
+	res = pg_get_statisticsobj_worker(statextid, false, true, &on_offset);
+
+	if (res == NULL)
+		PG_RETURN_NULL();
+
+	/* copy, since pfree() needs the start of the allocation */
+	result = cstring_to_text(res + on_offset);
+	pfree(res);
+
+	PG_RETURN_TEXT_P(result);
 }
 
 /*
@@ -1628,7 +1654,7 @@ pg_get_statisticsobjdef(PG_FUNCTION_ARGS)
 char *
 pg_get_statisticsobjdef_string(Oid statextid)
 {
-	return pg_get_statisticsobj_worker(statextid, false, false);
+	return pg_get_statisticsobj_worker(statextid, false, false, NULL);
 }
 
 /*
@@ -1641,7 +1667,7 @@ pg_get_statisticsobjdef_columns(PG_FUNCTION_ARGS)
 	Oid			statextid = PG_GETARG_OID(0);
 	char	   *res;
 
-	res = pg_get_statisticsobj_worker(statextid, true, true);
+	res = pg_get_statisticsobj_worker(statextid, true, true, NULL);
 
 	if (res == NULL)
 		PG_RETURN_NULL();
@@ -1650,10 +1676,171 @@ pg_get_statisticsobjdef_columns(PG_FUNCTION_ARGS)
 }
 
 /*
- * Internal workhorse to decompile an extended statistics object.
+ * Build a deparse context for a join statistics object: a range table with
+ * one entry per table of stxjoinrels, which the varnos of its columns and
+ * conditions index.  set_rtable_names() gives each table a unique name for
+ * the FROM clause to use as its alias.
+ */
+static List *
+deparse_context_for_join_stat(oidvector *joinrels)
+{
+	deparse_namespace *dpns;
+	List	   *rtable = NIL;
+	int			i;
+
+	dpns = palloc0_object(deparse_namespace);
+
+	for (i = 0; i < joinrels->dim1; i++)
+	{
+		RangeTblEntry *rte;
+
+		/* Build a minimal RTE for the rel, as deparse_context_for() does */
+		rte = makeNode(RangeTblEntry);
+		rte->rtekind = RTE_RELATION;
+		rte->relid = joinrels->values[i];
+		rte->relkind = RELKIND_RELATION;	/* no need for exactness here */
+		rte->rellockmode = AccessShareLock;
+		rte->alias = makeAlias(get_relation_name(rte->relid), NIL);
+		rte->eref = rte->alias;
+		rte->lateral = false;
+		rte->inh = false;
+		rte->inFromCl = true;
+
+		rtable = lappend(rtable, rte);
+	}
+
+	dpns->rtable = rtable;
+	dpns->subplans = NIL;
+	dpns->ctes = NIL;
+	dpns->appendrels = NULL;
+	set_rtable_names(dpns, NIL, NULL);
+	set_simple_column_names(dpns);
+
+	/* Return a one-deep namespace stack */
+	return list_make1(dpns);
+}
+
+/*
+ * Append a table of a join statistics object's FROM clause, with the name
+ * set_rtable_names() gave it as its alias.
+ */
+static void
+append_join_stat_rel(StringInfo buf, List *context, int rtindex)
+{
+	deparse_namespace *dpns = (deparse_namespace *) linitial(context);
+	RangeTblEntry *rte = rt_fetch(rtindex, dpns->rtable);
+	char	   *refname = (char *) list_nth(dpns->rtable_names, rtindex - 1);
+
+	appendStringInfoString(buf, generate_relation_name(rte->relid, NIL));
+
+	/*
+	 * No need to print alias if it's same as relation name (this would
+	 * normally be the case, but not if set_rtable_names had to resolve a
+	 * conflict).
+	 */
+	if (strcmp(refname, get_relation_name(rte->relid)) != 0)
+		appendStringInfo(buf, " %s", quote_identifier(refname));
+}
+
+/*
+ * Deparse one column or expression of an extended statistics object into the
+ * text used in its CREATE STATISTICS command.  A column of a join statistics
+ * object is qualified with its table's name in the context.
  */
 static char *
-pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
+deparse_stat_entry(Node *expr, Oid relid, List *context, bool is_join_stat)
+{
+	char	   *str;
+
+	if (is_join_stat && IsA(expr, Var))
+		return deparse_expression(expr, context, true, false);
+
+	if (IsA(expr, Var) && ((Var *) expr)->varattno > 0)
+		return pstrdup(quote_identifier(
+										get_attname(relid, ((Var *) expr)->varattno, false)));
+
+	str = deparse_expression_pretty(expr, context, false, false,
+									PRETTYFLAG_PAREN, 0);
+	if (looks_like_function(expr))
+		return str;
+	return psprintf("(%s)", str);
+}
+
+/*
+ * pg_get_statisticsobjdef_columns_array
+ *		Get columns and expressions for an extended statistics object, as
+ *		a text array
+ */
+Datum
+pg_get_statisticsobjdef_columns_array(PG_FUNCTION_ARGS)
+{
+	Oid			statextid = PG_GETARG_OID(0);
+	Form_pg_statistic_ext statextrec;
+	HeapTuple	statexttup;
+	Datum		datum;
+	bool		isnull;
+	List	   *allexprs = NIL;
+	char	   *tmp;
+	oidvector  *joinrels;
+	List	   *context;
+	ListCell   *lc;
+	ArrayBuildState *astate = NULL;
+
+	statexttup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statextid));
+
+	if (!HeapTupleIsValid(statexttup))
+		PG_RETURN_NULL();
+
+	statextrec = (Form_pg_statistic_ext) GETSTRUCT(statexttup);
+
+	datum = SysCacheGetAttrNotNull(STATEXTOID, statexttup,
+								   Anum_pg_statistic_ext_stxexprs);
+	tmp = TextDatumGetCString(datum);
+	allexprs = (List *) stringToNode(tmp);
+	pfree(tmp);
+
+	datum = SysCacheGetAttr(STATEXTOID, statexttup,
+							Anum_pg_statistic_ext_stxjoinrels, &isnull);
+	if (!isnull)
+	{
+		joinrels = (oidvector *) DatumGetPointer(datum);
+		context = deparse_context_for_join_stat(joinrels);
+	}
+	else
+		context = deparse_context_for(get_relation_name(statextrec->stxrelid),
+									  statextrec->stxrelid);
+
+	foreach(lc, allexprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		char	   *str;
+
+		str = deparse_stat_entry(expr, statextrec->stxrelid, context,
+								 !isnull);
+		astate = accumArrayResult(astate,
+								  PointerGetDatum(cstring_to_text(str)),
+								  false,
+								  TEXTOID,
+								  CurrentMemoryContext);
+	}
+
+	ReleaseSysCache(statexttup);
+
+	if (astate == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_DATUM(makeArrayResult(astate, CurrentMemoryContext));
+}
+
+/*
+ * Internal workhorse to decompile an extended statistics object.
+ *
+ * Unless columns_only is set, a non-NULL on_offset gets the position just
+ * after " ON " in the result, where pg_get_statisticsobjdef_body() starts.
+ */
+static char *
+pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok,
+							int *on_offset)
 {
 	Form_pg_statistic_ext statextrec;
 	HeapTuple	statexttup;
@@ -1663,6 +1850,7 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 	ArrayType  *arr;
 	char	   *enabled;
 	Datum		datum;
+	char	   *exprsString;
 	bool		ndistinct_enabled;
 	bool		dependencies_enabled;
 	bool		mcv_enabled;
@@ -1670,8 +1858,13 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 	List	   *context;
 	ListCell   *lc;
 	List	   *exprs = NIL;
-	bool		has_exprs;
+	bool		is_join_stat;
 	int			ncolumns;
+
+	/* Join stat fields */
+	oidvector  *joinrels = NULL;
+	List	   *joinconds = NIL;
+	int			nrels = 0;
 
 	statexttup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statextid));
 
@@ -1682,32 +1875,54 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 		elog(ERROR, "cache lookup failed for statistics object %u", statextid);
 	}
 
-	/* has the statistics expressions? */
-	has_exprs = !heap_attisnull(statexttup, Anum_pg_statistic_ext_stxexprs, NULL);
-
 	statextrec = (Form_pg_statistic_ext) GETSTRUCT(statexttup);
 
+	/* is this a join statistics object? */
+	is_join_stat = !heap_attisnull(statexttup,
+								   Anum_pg_statistic_ext_stxjoinrels, NULL);
+
 	/*
-	 * Get the statistics expressions, if any.  (NOTE: we do not use the
-	 * relcache versions of the expressions, because we want to display
+	 * For join statistics, load the join-related catalog fields so we can
+	 * emit table-qualified column names and the JOIN ... ON FROM clause.
+	 */
+	if (is_join_stat)
+	{
+		Datum		jdatum;
+		bool		isnull;
+		char	   *str;
+
+		jdatum = SysCacheGetAttr(STATEXTOID, statexttup,
+								 Anum_pg_statistic_ext_stxjoinrels, &isnull);
+		Assert(!isnull);
+		joinrels = (oidvector *) DatumGetPointer(jdatum);
+
+		jdatum = SysCacheGetAttr(STATEXTOID, statexttup,
+								 Anum_pg_statistic_ext_stxjoinconds, &isnull);
+		Assert(!isnull);
+		str = TextDatumGetCString(jdatum);
+		joinconds = (List *) stringToNode(str);
+		pfree(str);
+
+		/*
+		 * stxjoinrels already starts with the anchor (== stxrelid), so it
+		 * lists every participating rel.
+		 */
+		nrels = joinrels->dim1;
+	}
+
+	/*
+	 * Get the statistics expressions.  (NOTE: we do not use the relcache
+	 * versions of the expressions, because we want to display
 	 * non-const-folded expressions.)
 	 */
-	if (has_exprs)
-	{
-		Datum		exprsDatum;
-		char	   *exprsString;
-
-		exprsDatum = SysCacheGetAttrNotNull(STATEXTOID, statexttup,
-											Anum_pg_statistic_ext_stxexprs);
-		exprsString = TextDatumGetCString(exprsDatum);
-		exprs = (List *) stringToNode(exprsString);
-		pfree(exprsString);
-	}
-	else
-		exprs = NIL;
+	datum = SysCacheGetAttrNotNull(STATEXTOID, statexttup,
+								   Anum_pg_statistic_ext_stxexprs);
+	exprsString = TextDatumGetCString(datum);
+	exprs = (List *) stringToNode(exprsString);
+	pfree(exprsString);
 
 	/* count the number of columns (attributes and expressions) */
-	ncolumns = statextrec->stxkeys.dim1 + list_length(exprs);
+	ncolumns = list_length(exprs);
 
 	initStringInfo(&buf);
 
@@ -1759,7 +1974,7 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 		 * kinds.
 		 */
 		if ((!ndistinct_enabled || !dependencies_enabled || !mcv_enabled) &&
-			(ncolumns > 1))
+			(ncolumns > 1 || is_join_stat))
 		{
 			bool		gotone = false;
 
@@ -1784,49 +1999,84 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 		}
 
 		appendStringInfoString(&buf, " ON ");
+
+		if (on_offset != NULL)
+			*on_offset = buf.len;
 	}
 
-	/* decode simple column references */
-	for (colno = 0; colno < statextrec->stxkeys.dim1; colno++)
-	{
-		AttrNumber	attnum = statextrec->stxkeys.values[colno];
-		char	   *attname;
+	if (is_join_stat)
+		context = deparse_context_for_join_stat(joinrels);
+	else
+		context = deparse_context_for(get_relation_name(statextrec->stxrelid),
+									  statextrec->stxrelid);
 
-		if (colno > 0)
-			appendStringInfoString(&buf, ", ");
-
-		attname = get_attname(statextrec->stxrelid, attnum, false);
-
-		appendStringInfoString(&buf, quote_identifier(attname));
-	}
-
-	context = deparse_context_for(get_relation_name(statextrec->stxrelid),
-								  statextrec->stxrelid);
-
+	colno = 0;
 	foreach(lc, exprs)
 	{
 		Node	   *expr = (Node *) lfirst(lc);
-		char	   *str;
-		int			prettyFlags = PRETTYFLAG_PAREN;
-
-		str = deparse_expression_pretty(expr, context, false, false,
-										prettyFlags, 0);
 
 		if (colno > 0)
 			appendStringInfoString(&buf, ", ");
 
-		/* Need parens if it's not a bare function call */
-		if (looks_like_function(expr))
-			appendStringInfoString(&buf, str);
-		else
-			appendStringInfo(&buf, "(%s)", str);
-
+		appendStringInfoString(&buf,
+							   deparse_stat_entry(expr, statextrec->stxrelid,
+												  context, is_join_stat));
 		colno++;
 	}
 
 	if (!columns_only)
-		appendStringInfo(&buf, " FROM %s",
-						 generate_relation_name(statextrec->stxrelid, NIL));
+	{
+		if (is_join_stat)
+		{
+			/*
+			 * Emit FROM ... JOIN ... ON syntax for join statistics.
+			 */
+			appendStringInfoString(&buf, " FROM ");
+			append_join_stat_rel(&buf, context, 1);
+
+			/*
+			 * joinrels->values[0] is the anchor (emitted above); JOIN the
+			 * rest. CREATE STATISTICS stores the tables so that each one
+			 * after the anchor is joined to an earlier one, so attaching each
+			 * condition to the join of its later table gives every join at
+			 * least one condition.
+			 */
+			for (i = 1; i < nrels; i++)
+			{
+				bool		first = true;
+
+				appendStringInfoString(&buf, " JOIN ");
+				append_join_stat_rel(&buf, context, i + 1);
+				appendStringInfoString(&buf, " ON (");
+
+				foreach(lc, joinconds)
+				{
+					Node	   *cond = (Node *) lfirst(lc);
+					Var		   *lvar;
+					Var		   *rvar;
+
+					if (!join_stats_cond_vars(cond, &lvar, &rvar))
+						elog(ERROR, "unexpected join statistics condition");
+					if (Max(lvar->varno, rvar->varno) != i + 1)
+						continue;
+					appendStringInfo(&buf, "%s%s",
+									 first ? "" : " AND ",
+									 deparse_expression_pretty(cond, context,
+															   true, false,
+															   PRETTYFLAG_PAREN,
+															   0));
+					first = false;
+				}
+
+				appendStringInfoChar(&buf, ')');
+			}
+		}
+		else
+		{
+			appendStringInfo(&buf, " FROM %s",
+							 generate_relation_name(statextrec->stxrelid, NIL));
+		}
+	}
 
 	ReleaseSysCache(statexttup);
 
@@ -1843,10 +2093,11 @@ pg_get_statisticsobjdef_expressions(PG_FUNCTION_ARGS)
 	Form_pg_statistic_ext statextrec;
 	HeapTuple	statexttup;
 	Datum		datum;
+	Relation	rel;
 	List	   *context;
 	ListCell   *lc;
-	List	   *exprs = NIL;
-	bool		has_exprs;
+	List	   *rawexprs = NIL;
+	Bitmapset  *columns;
 	char	   *tmp;
 	ArrayBuildState *astate = NULL;
 
@@ -1855,37 +2106,41 @@ pg_get_statisticsobjdef_expressions(PG_FUNCTION_ARGS)
 	if (!HeapTupleIsValid(statexttup))
 		PG_RETURN_NULL();
 
-	/* Does the stats object have expressions? */
-	has_exprs = !heap_attisnull(statexttup, Anum_pg_statistic_ext_stxexprs, NULL);
-
-	/* no expressions? we're done */
-	if (!has_exprs)
-	{
-		ReleaseSysCache(statexttup);
-		PG_RETURN_NULL();
-	}
-
 	statextrec = (Form_pg_statistic_ext) GETSTRUCT(statexttup);
 
 	/*
-	 * Get the statistics expressions, and deparse them into text values.
+	 * Decode stxexprs as originally written; we deparse these, because we
+	 * want to display the expressions without const-folding.
 	 */
 	datum = SysCacheGetAttrNotNull(STATEXTOID, statexttup,
 								   Anum_pg_statistic_ext_stxexprs);
 	tmp = TextDatumGetCString(datum);
-	exprs = (List *) stringToNode(tmp);
+	rawexprs = (List *) stringToNode(tmp);
 	pfree(tmp);
+
+	/*
+	 * Skip the plain columns: their statistics are in pg_statistic, not in
+	 * pg_statistic_ext_data.stxdexpr.  What remains are the expressions, in
+	 * the same order as stxdexpr, which pg_stats_ext_exprs pairs this output
+	 * with.
+	 */
+	rel = table_open(statextrec->stxrelid, AccessShareLock);
+	columns = statext_column_entries(rawexprs, rel);
+	table_close(rel, AccessShareLock);
 
 	context = deparse_context_for(get_relation_name(statextrec->stxrelid),
 								  statextrec->stxrelid);
 
-	foreach(lc, exprs)
+	foreach(lc, rawexprs)
 	{
-		Node	   *expr = (Node *) lfirst(lc);
+		Node	   *rawexpr = (Node *) lfirst(lc);
 		char	   *str;
 		int			prettyFlags = PRETTYFLAG_INDENT;
 
-		str = deparse_expression_pretty(expr, context, false, false,
+		if (bms_is_member(foreach_current_index(lc), columns))
+			continue;
+
+		str = deparse_expression_pretty(rawexpr, context, false, false,
 										prettyFlags, 0);
 
 		astate = accumArrayResult(astate,
@@ -1896,6 +2151,9 @@ pg_get_statisticsobjdef_expressions(PG_FUNCTION_ARGS)
 	}
 
 	ReleaseSysCache(statexttup);
+
+	if (astate == NULL)
+		PG_RETURN_NULL();
 
 	PG_RETURN_DATUM(makeArrayResult(astate, CurrentMemoryContext));
 }

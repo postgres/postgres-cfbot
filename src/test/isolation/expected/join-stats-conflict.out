@@ -1,0 +1,38 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_grant s1_begin s1_lock_exclusive s2_auth s2_create s1_commit s2_reset
+step s2_grant: GRANT SELECT ON dim TO regress_join_stats_conflict;
+step s1_begin: BEGIN;
+step s1_lock_exclusive: LOCK dim IN ACCESS EXCLUSIVE MODE;
+step s2_auth: SET ROLE regress_join_stats_conflict;
+step s2_create: 
+	CREATE STATISTICS join_stat (mcv) ON dim.label
+		FROM fact JOIN dim ON (fact.dim_id = dim.id);
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_create: <... completed>
+step s2_reset: RESET ROLE;
+
+starting permutation: s2_grant s1_begin s1_lock_share_update s2_auth s2_create s1_commit s2_reset
+step s2_grant: GRANT SELECT ON dim TO regress_join_stats_conflict;
+step s1_begin: BEGIN;
+step s1_lock_share_update: LOCK dim IN SHARE UPDATE EXCLUSIVE MODE;
+step s2_auth: SET ROLE regress_join_stats_conflict;
+step s2_create: 
+	CREATE STATISTICS join_stat (mcv) ON dim.label
+		FROM fact JOIN dim ON (fact.dim_id = dim.id);
+
+step s1_commit: COMMIT;
+step s2_reset: RESET ROLE;
+
+starting permutation: s2_grant s2_auth s2_begin s2_create s1_vacuum s2_commit s2_reset
+step s2_grant: GRANT SELECT ON dim TO regress_join_stats_conflict;
+step s2_auth: SET ROLE regress_join_stats_conflict;
+step s2_begin: BEGIN;
+step s2_create: 
+	CREATE STATISTICS join_stat (mcv) ON dim.label
+		FROM fact JOIN dim ON (fact.dim_id = dim.id);
+
+step s1_vacuum: VACUUM dim;
+step s2_commit: COMMIT;
+step s2_reset: RESET ROLE;

@@ -54,6 +54,9 @@ extern void RelationClose(Relation relation);
 extern List *RelationGetFKeyList(Relation relation);
 extern List *RelationGetIndexList(Relation relation);
 extern List *RelationGetStatExtList(Relation relation);
+extern List *RelationGetStatExtExprs(Relation relation, Oid statOid,
+									 Bitmapset **columns,
+									 List **joinrels, List **joinconds);
 extern Oid	RelationGetPrimaryKeyIndex(Relation relation, bool deferrable_ok);
 extern Oid	RelationGetReplicaIndex(Relation relation);
 extern Oid	RelationGetToastChunkIdType(Relation relation);

@@ -112,6 +112,8 @@ test: timeouts
 test: vacuum-concurrent-drop
 test: vacuum-conflict
 test: vacuum-skip-locked
+test: join-stats-analyze
+test: join-stats-conflict
 test: stats
 test: stats-backend
 test: horizons

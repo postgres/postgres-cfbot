@@ -1404,11 +1404,17 @@ JoinCostWorkspace
 JoinDomain
 JoinExpr
 JoinHashEntry
+JoinMCVFilter
 JoinPath
 JoinPathExtraData
+JoinSampleColumn
+JoinStatRel
 JoinState
 JoinTreeItem
 JoinType
+JoinValueGroup
+JoinValueTable_hash
+JoinValueTable_iterator
 JsObject
 JsValue
 JsonAggConstructor
@@ -2996,6 +3002,7 @@ StartupStatusEnum
 StatApproxReadStreamPrivate
 StatEntry
 StatExtEntry
+StatExtExprsCacheEnt
 StateFileChunk
 StatisticExtInfo
 StatsBuildData

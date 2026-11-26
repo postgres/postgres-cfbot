@@ -80,6 +80,7 @@
 #include "storage/fd.h"
 #include "storage/lmgr.h"
 #include "storage/lock.h"
+#include "statistics/statistics.h"
 #include "storage/smgr.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -274,6 +275,19 @@ typedef struct opclasscacheent
 } OpClassCacheEnt;
 
 static HTAB *OpClassCache = NULL;
+
+/*
+ * The parsed entries of an extended statistics object, as cached in its
+ * relation's rd_statexprs by RelationGetStatExtExprs().
+ */
+typedef struct StatExtExprsCacheEnt
+{
+	Oid			statOid;		/* OID of the statistics object */
+	List	   *exprs;			/* all its entries, columns included */
+	Bitmapset  *columns;		/* positions in exprs of plain columns */
+	List	   *joinrels;		/* OIDs of stxjoinrels, NIL if not a join */
+	List	   *joinconds;		/* stxjoinconds, NIL if not a join */
+} StatExtExprsCacheEnt;
 
 
 /* non-export function prototypes */
@@ -2529,6 +2543,8 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 		pfree(relation->rd_fdwroutine);
 	if (relation->rd_indexcxt)
 		MemoryContextDelete(relation->rd_indexcxt);
+	if (relation->rd_statexprcxt)
+		MemoryContextDelete(relation->rd_statexprcxt);
 	if (relation->rd_rulescxt)
 		MemoryContextDelete(relation->rd_rulescxt);
 	if (relation->rd_rsdesc)
@@ -5080,6 +5096,103 @@ RelationGetStatExtList(Relation relation)
 }
 
 /*
+ * RelationGetStatExtExprs
+ *		get the parsed entries of a statistics object on this relation
+ *
+ * Returns the entries as statext_get_stxexprs() prepares them, and sets
+ * *columns to the positions of those that are plain columns, and for join
+ * statistics *joinrels and *joinconds to their tables and join conditions,
+ * which are NIL otherwise.  They are
+ * cached in the relcache entry, as RelationGetIndexExpressions() caches
+ * index expressions, because parsing them on every planning is expensive.
+ * They are found by OID, which ALTER TABLE changes when it re-creates a
+ * statistics object.  The result is copied into the caller's memory
+ * context, since the relcache copy could disappear due to relcache
+ * invalidation.
+ */
+List *
+RelationGetStatExtExprs(Relation relation, Oid statOid, Bitmapset **columns,
+						List **joinrels, List **joinconds)
+{
+	HeapTuple	htup;
+	List	   *exprs;
+	Bitmapset  *cols;
+	List	   *jrels = NIL;
+	List	   *jconds = NIL;
+	Datum		datum;
+	bool		isnull;
+	StatExtExprsCacheEnt *entry;
+	MemoryContext oldcxt;
+
+	/* Quick exit if we already computed the result. */
+	foreach_ptr(StatExtExprsCacheEnt, cached, relation->rd_statexprs)
+	{
+		if (cached->statOid == statOid)
+		{
+			*columns = bms_copy(cached->columns);
+			*joinrels = list_copy(cached->joinrels);
+			*joinconds = copyObject(cached->joinconds);
+			return copyObject(cached->exprs);
+		}
+	}
+
+	/*
+	 * We build the entries we intend to return in the caller's context. After
+	 * successfully completing the work, we copy them into the relcache entry.
+	 * This avoids problems if we get some sort of error partway through.
+	 */
+	htup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statOid));
+	if (!HeapTupleIsValid(htup))
+		elog(ERROR, "cache lookup failed for statistics object %u", statOid);
+	Assert(((Form_pg_statistic_ext) GETSTRUCT(htup))->stxrelid ==
+		   RelationGetRelid(relation));
+	exprs = statext_get_stxexprs(htup, relation, &cols);
+
+	datum = SysCacheGetAttr(STATEXTOID, htup,
+							Anum_pg_statistic_ext_stxjoinrels, &isnull);
+	if (!isnull)
+	{
+		oidvector  *ov = (oidvector *) DatumGetPointer(datum);
+		char	   *condstr;
+
+		for (int i = 0; i < ov->dim1; i++)
+			jrels = lappend_oid(jrels, ov->values[i]);
+
+		datum = SysCacheGetAttrNotNull(STATEXTOID, htup,
+									   Anum_pg_statistic_ext_stxjoinconds);
+		condstr = TextDatumGetCString(datum);
+		jconds = (List *) stringToNode(condstr);
+		pfree(condstr);
+	}
+	ReleaseSysCache(htup);
+
+	if (relation->rd_statexprcxt == NULL)
+	{
+		relation->rd_statexprcxt =
+			AllocSetContextCreate(CacheMemoryContext,
+								  "relation statistics expressions",
+								  ALLOCSET_SMALL_SIZES);
+		MemoryContextCopyAndSetIdentifier(relation->rd_statexprcxt,
+										  RelationGetRelationName(relation));
+	}
+
+	oldcxt = MemoryContextSwitchTo(relation->rd_statexprcxt);
+	entry = palloc_object(StatExtExprsCacheEnt);
+	entry->statOid = statOid;
+	entry->exprs = copyObject(exprs);
+	entry->columns = bms_copy(cols);
+	entry->joinrels = list_copy(jrels);
+	entry->joinconds = copyObject(jconds);
+	relation->rd_statexprs = lappend(relation->rd_statexprs, entry);
+	MemoryContextSwitchTo(oldcxt);
+
+	*columns = cols;
+	*joinrels = jrels;
+	*joinconds = jconds;
+	return exprs;
+}
+
+/*
  * RelationGetPrimaryKeyIndex -- get OID of the relation's primary key index
  *
  * Returns InvalidOid if there is no such index, or if the primary key is
@@ -6604,6 +6717,8 @@ load_relcache_init_file(bool shared)
 		rel->rd_pubdesc = NULL;
 		rel->rd_statvalid = false;
 		rel->rd_statlist = NIL;
+		rel->rd_statexprcxt = NULL;
+		rel->rd_statexprs = NIL;
 		rel->rd_fkeyvalid = false;
 		rel->rd_fkeylist = NIL;
 		rel->rd_createSubid = InvalidSubTransactionId;

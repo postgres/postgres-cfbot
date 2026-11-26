@@ -78,7 +78,7 @@ SELECT COUNT(*) FROM pg_attribute
     attnum > 0;
  count 
 -------
-    17
+    16
 (1 row)
 
 -- Create a view that is used purely for the type based on pg_stats_ext.
@@ -4155,6 +4155,119 @@ FROM stats_import.pg_stats_ext_exprs_get_difference('test_mr_stat', 'test_mr_sta
 \gx
 (0 rows)
 
+-- import of extended statistics that include a virtual generated column
+CREATE TABLE stats_import.test_virtual_gen(
+    a int,
+    b int,
+    c int GENERATED ALWAYS AS (a + b) VIRTUAL
+);
+INSERT INTO stats_import.test_virtual_gen(a, b)
+    SELECT mod(i, 10), mod(i, 7) FROM generate_series(1, 1000) s(i);
+CREATE STATISTICS stats_import.test_virtual_gen_stat ON a, c
+    FROM stats_import.test_virtual_gen;
+ANALYZE stats_import.test_virtual_gen;
+CREATE TABLE stats_import.test_virtual_gen_clone(
+    a int,
+    b int,
+    c int GENERATED ALWAYS AS (a + b) VIRTUAL
+);
+CREATE STATISTICS stats_import.test_virtual_gen_stat_clone ON a, c
+    FROM stats_import.test_virtual_gen_clone;
+-- Import stats from test_virtual_gen_stat to test_virtual_gen_stat_clone
+SELECT e.statistics_name,
+  pg_catalog.pg_restore_extended_stats(
+    'schemaname', e.statistics_schemaname::text,
+    'relname', 'test_virtual_gen_clone',
+    'statistics_schemaname', e.statistics_schemaname::text,
+    'statistics_name', 'test_virtual_gen_stat_clone',
+    'inherited', e.inherited,
+    'n_distinct', e.n_distinct,
+    'dependencies', e.dependencies,
+    'most_common_vals', e.most_common_vals,
+    'most_common_freqs', e.most_common_freqs,
+    'most_common_base_freqs', e.most_common_base_freqs,
+    'exprs', x.exprs)
+FROM pg_stats_ext AS e
+CROSS JOIN LATERAL (
+  SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+            'null_frac', ee.null_frac::text,
+            'avg_width', ee.avg_width::text,
+            'n_distinct', ee.n_distinct::text,
+            'most_common_vals', ee.most_common_vals::text,
+            'most_common_freqs', ee.most_common_freqs::text,
+            'histogram_bounds', ee.histogram_bounds::text,
+            'correlation', ee.correlation::text)))
+    FROM pg_stats_ext_exprs AS ee
+    WHERE ee.statistics_schemaname = e.statistics_schemaname AND
+      ee.statistics_name = e.statistics_name AND
+      ee.inherited = e.inherited
+    ) AS x(exprs)
+WHERE e.statistics_schemaname = 'stats_import'
+AND e.statistics_name = 'test_virtual_gen_stat';
+    statistics_name    | pg_restore_extended_stats 
+-----------------------+---------------------------
+ test_virtual_gen_stat | t
+(1 row)
+
+SELECT statname, (stats).*
+FROM stats_import.pg_stats_ext_get_difference('test_virtual_gen_stat', 'test_virtual_gen_stat_clone')
+\gx
+(0 rows)
+
+SELECT statname, (stats).*
+FROM stats_import.pg_stats_ext_exprs_get_difference('test_virtual_gen_stat', 'test_virtual_gen_stat_clone')
+\gx
+(0 rows)
+
+-- round-trip an MCV that interleaves a column and an expression of different types
+CREATE STATISTICS stats_import.test_stat_interleave (mcv)
+  ON name, lower(arange), comp
+  FROM stats_import.test;
+CREATE STATISTICS stats_import.test_stat_interleave_clone (mcv)
+  ON name, lower(arange), comp
+  FROM stats_import.test_clone;
+ANALYZE stats_import.test;
+-- Copy stats from test_stat_interleave to test_stat_interleave_clone
+SELECT e.statistics_name,
+  pg_catalog.pg_restore_extended_stats(
+    'schemaname', e.statistics_schemaname::text,
+    'relname', 'test_clone',
+    'statistics_schemaname', e.statistics_schemaname::text,
+    'statistics_name', 'test_stat_interleave_clone',
+    'inherited', e.inherited,
+    'n_distinct', e.n_distinct,
+    'dependencies', e.dependencies,
+    'most_common_vals', e.most_common_vals,
+    'most_common_freqs', e.most_common_freqs,
+    'most_common_base_freqs', e.most_common_base_freqs,
+    'exprs', x.exprs)
+FROM pg_stats_ext AS e
+CROSS JOIN LATERAL (
+  SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+            'null_frac', ee.null_frac::text,
+            'avg_width', ee.avg_width::text,
+            'n_distinct', ee.n_distinct::text,
+            'most_common_vals', ee.most_common_vals::text,
+            'most_common_freqs', ee.most_common_freqs::text,
+            'histogram_bounds', ee.histogram_bounds::text,
+            'correlation', ee.correlation::text)))
+    FROM pg_stats_ext_exprs AS ee
+    WHERE ee.statistics_schemaname = e.statistics_schemaname AND
+      ee.statistics_name = e.statistics_name AND
+      ee.inherited = e.inherited
+    ) AS x(exprs)
+WHERE e.statistics_schemaname = 'stats_import'
+AND e.statistics_name = 'test_stat_interleave';
+   statistics_name    | pg_restore_extended_stats 
+----------------------+---------------------------
+ test_stat_interleave | t
+(1 row)
+
+SELECT statname, (stats).*
+FROM stats_import.pg_stats_ext_get_difference('test_stat_interleave', 'test_stat_interleave_clone')
+\gx
+(0 rows)
+
 -- range_length_histogram, range_empty_frac, and range_bounds_histogram
 -- have been added to pg_stats_ext_exprs in PostgreSQL 19.  When dumping
 -- expression statistics in a cluster with an older version, these fields
@@ -4482,8 +4595,195 @@ WARNING:  "most_common_elems" must be an empty or one-dimensional array
  f
 (1 row)
 
+-- Statistics data from a server before version 20, for an object with an
+-- entry that const-folds to a plain column.  Those versions number such an
+-- entry among the expressions, here as -2, with its own element in "exprs".
+CREATE TABLE stats_import.test_fold (a int, b int);
+CREATE STATISTICS stats_import.test_fold_stat
+  ON (a + b), (CASE WHEN true THEN a ELSE b END) FROM stats_import.test_fold;
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_fold',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'test_fold_stat',
+  'inherited', false,
+  'version', 190000::integer,
+  'n_distinct', '[{"attributes": [-1, -2], "ndistinct": 4}]'::pg_ndistinct,
+  'exprs', '[{"null_frac": "0", "avg_width": "4", "n_distinct": "3"},
+             {"null_frac": "0", "avg_width": "4", "n_distinct": "2"}]'::jsonb);
+ pg_restore_extended_stats 
+---------------------------
+ t
+(1 row)
+
+SELECT n_distinct FROM pg_stats_ext
+WHERE statistics_schemaname = 'stats_import' AND statistics_name = 'test_fold_stat';
+                 n_distinct                 
+--------------------------------------------
+ [{"attributes": [-1, -2], "ndistinct": 4}]
+(1 row)
+
+SELECT expr, n_distinct FROM pg_stats_ext_exprs
+WHERE statistics_schemaname = 'stats_import' AND statistics_name = 'test_fold_stat'
+ORDER BY expr;
+         expr         | n_distinct 
+----------------------+------------
+                     +|          2
+ CASE                +| 
+     WHEN true THEN a+| 
+     ELSE b          +| 
+ END                  | 
+ (a + b)              |          3
+(2 rows)
+
+-- Join statistics: copy their statistics to clones and compare, like for
+-- test_stat above.  The columns of join statistics can come from the joined
+-- table rather than from the table the statistics belong to.
+CREATE TABLE stats_import.tail_dim (
+    id    INTEGER PRIMARY KEY,
+    label TEXT NOT NULL
+) WITH (autovacuum_enabled = false);
+CREATE TABLE stats_import.tail_fact (
+    dim_id INTEGER NOT NULL
+) WITH (autovacuum_enabled = false);
+INSERT INTO stats_import.tail_dim VALUES
+    (1, 'common_a'), (2, 'common_b'),
+    (3, 'other_a'), (4, 'other_b'),
+    (5, 'extra_1'), (6, 'extra_2');
+INSERT INTO stats_import.tail_fact (dim_id)
+SELECT 1 FROM generate_series(1, 90)
+UNION ALL SELECT 2 FROM generate_series(1, 70)
+UNION ALL SELECT 3 FROM generate_series(1, 25)
+UNION ALL SELECT 4 FROM generate_series(1, 15);
+ANALYZE stats_import.tail_dim;
+ANALYZE stats_import.tail_fact;
+-- tail_dim.label is column 2, and tail_fact has only one column
+CREATE STATISTICS stats_import.jstats_tail (mcv) ON d.label
+FROM stats_import.tail_fact f JOIN stats_import.tail_dim d ON (f.dim_id = d.id);
+ALTER STATISTICS stats_import.jstats_tail SET STATISTICS 2;
+ANALYZE stats_import.tail_fact;
+CREATE TABLE stats_import.test_orders (id int, test_id int, qty int)
+  WITH (autovacuum_enabled = false);
+INSERT INTO stats_import.test_orders
+  SELECT g, g % 4 + 1, g % 2 FROM generate_series(1, 80) g;
+-- Columns from both tables; test.name is column 2, which in test_orders is
+-- the integer test_id
+CREATE STATISTICS stats_import.test_orders_stat (mcv) ON o.qty, t.name
+FROM stats_import.test_orders o JOIN stats_import.test t ON (o.test_id = t.id);
+ANALYZE stats_import.test_orders;
+CREATE TABLE stats_import.tail_fact_clone (LIKE stats_import.tail_fact)
+  WITH (autovacuum_enabled = false);
+CREATE TABLE stats_import.tail_dim_clone (LIKE stats_import.tail_dim)
+  WITH (autovacuum_enabled = false);
+CREATE TABLE stats_import.test_orders_clone (LIKE stats_import.test_orders)
+  WITH (autovacuum_enabled = false);
+-- Join statistics need an index on the joined table's join column
+CREATE INDEX ON stats_import.tail_dim_clone (id);
+CREATE INDEX ON stats_import.test_clone (id);
+CREATE STATISTICS stats_import.jstats_tail_clone (mcv) ON d.label
+FROM stats_import.tail_fact_clone f JOIN stats_import.tail_dim_clone d
+  ON (f.dim_id = d.id);
+CREATE STATISTICS stats_import.test_orders_stat_clone (mcv) ON o.qty, t.name
+FROM stats_import.test_orders_clone o JOIN stats_import.test_clone t
+  ON (o.test_id = t.id);
+-- The statistics to copy
+SELECT statistics_name, most_common_vals, most_common_freqs FROM pg_stats_ext
+WHERE statistics_schemaname = 'stats_import'
+  AND statistics_name IN ('jstats_tail', 'test_orders_stat')
+ORDER BY statistics_name;
+ statistics_name  |          most_common_vals          |   most_common_freqs   
+------------------+------------------------------------+-----------------------
+ jstats_tail      | {{common_a},{common_b}}            | {0.45,0.35}
+ test_orders_stat | {{0,one},{0,tre},{1,four},{1,two}} | {0.25,0.25,0.25,0.25}
+(2 rows)
+
+SELECT pg_catalog.pg_restore_extended_stats(
+    'schemaname', 'stats_import',
+    'relname', 'tail_fact_clone',
+    'statistics_schemaname', 'stats_import',
+    'statistics_name', 'jstats_tail_clone',
+    'inherited', e.inherited,
+    'most_common_vals', e.most_common_vals,
+    'most_common_freqs', e.most_common_freqs,
+    'most_common_base_freqs', e.most_common_base_freqs)
+FROM pg_stats_ext AS e
+WHERE e.statistics_schemaname = 'stats_import'
+  AND e.statistics_name = 'jstats_tail';
+ pg_restore_extended_stats 
+---------------------------
+ t
+(1 row)
+
+SELECT pg_catalog.pg_restore_extended_stats(
+    'schemaname', 'stats_import',
+    'relname', 'test_orders_clone',
+    'statistics_schemaname', 'stats_import',
+    'statistics_name', 'test_orders_stat_clone',
+    'inherited', e.inherited,
+    'most_common_vals', e.most_common_vals,
+    'most_common_freqs', e.most_common_freqs,
+    'most_common_base_freqs', e.most_common_base_freqs)
+FROM pg_stats_ext AS e
+WHERE e.statistics_schemaname = 'stats_import'
+  AND e.statistics_name = 'test_orders_stat';
+ pg_restore_extended_stats 
+---------------------------
+ t
+(1 row)
+
+-- The clones have the same statistics: no differences
+SELECT statname, (stats).*
+FROM stats_import.pg_stats_ext_get_difference('jstats_tail', 'jstats_tail_clone')
+\gx
+(0 rows)
+
+SELECT statname, (stats).*
+FROM stats_import.pg_stats_ext_get_difference('test_orders_stat',
+                                              'test_orders_stat_clone')
+\gx
+(0 rows)
+
+-- Restoring join statistics needs MAINTAIN on the anchor table only: it
+-- writes the given values and reads nothing from the other tables
+CREATE ROLE regress_test_join_restore;
+GRANT USAGE ON SCHEMA stats_import TO regress_test_join_restore;
+GRANT MAINTAIN ON stats_import.tail_fact_clone TO regress_test_join_restore;
+SET ROLE regress_test_join_restore;
+SELECT has_table_privilege('stats_import.tail_dim_clone', 'SELECT, MAINTAIN')
+  AS dim_privileges;
+ dim_privileges 
+----------------
+ f
+(1 row)
+
+SELECT pg_catalog.pg_restore_extended_stats(
+    'schemaname', 'stats_import',
+    'relname', 'tail_fact_clone',
+    'statistics_schemaname', 'stats_import',
+    'statistics_name', 'jstats_tail_clone',
+    'inherited', false,
+    'most_common_vals', '{{common_a}}'::text[],
+    'most_common_freqs', '{1}'::double precision[],
+    'most_common_base_freqs', '{1}'::double precision[]);
+ pg_restore_extended_stats 
+---------------------------
+ t
+(1 row)
+
+RESET ROLE;
+SELECT most_common_vals FROM pg_stats_ext
+WHERE statistics_schemaname = 'stats_import'
+  AND statistics_name = 'jstats_tail_clone';
+ most_common_vals 
+------------------
+ {{common_a}}
+(1 row)
+
+REVOKE MAINTAIN ON stats_import.tail_fact_clone FROM regress_test_join_restore;
+REVOKE USAGE ON SCHEMA stats_import FROM regress_test_join_restore;
+DROP ROLE regress_test_join_restore;
 DROP SCHEMA stats_import CASCADE;
-NOTICE:  drop cascades to 39 other objects
+NOTICE:  drop cascades to 48 other objects
 DETAIL:  drop cascades to view stats_import.pg_stats_stable
 drop cascades to view stats_import.pg_statistic_flat_t
 drop cascades to function stats_import.pg_statistic_flat(text)
@@ -4510,6 +4810,8 @@ drop cascades to table stats_import.test_dom_ts
 drop cascades to table stats_import.test_dom_ts_clone
 drop cascades to table stats_import.test_clone
 drop cascades to table stats_import.test_mr_clone
+drop cascades to table stats_import.test_virtual_gen
+drop cascades to table stats_import.test_virtual_gen_clone
 drop cascades to table stats_import.test_range_expr_null
 drop cascades to table stats_import.test_reentrant
 drop cascades to function stats_import.alter_during_import(uuid)
@@ -4523,3 +4825,10 @@ drop cascades to type stats_import.reentrant_dom_ext2
 drop cascades to table stats_import.test_reentrant_attr2
 drop cascades to function stats_import.drop_during_import_attr(uuid)
 drop cascades to type stats_import.reentrant_dom_attr2
+drop cascades to table stats_import.test_fold
+drop cascades to table stats_import.tail_dim
+drop cascades to table stats_import.tail_fact
+drop cascades to table stats_import.test_orders
+drop cascades to table stats_import.tail_fact_clone
+drop cascades to table stats_import.tail_dim_clone
+drop cascades to table stats_import.test_orders_clone
