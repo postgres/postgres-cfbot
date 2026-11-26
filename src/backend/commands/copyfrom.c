@@ -467,6 +467,16 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 		Assert(resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert);
 		Assert(batch_size > 1);
 
+		/* Triggers on foreign tables should not have transition tables */
+		Assert(resultRelInfo->ri_TrigDesc == NULL ||
+			   resultRelInfo->ri_TrigDesc->trig_insert_new_table == false);
+
+		/* Batching does not allow BEFORE ROW or AFTER ROW INSERT triggers */
+		Assert(resultRelInfo->ri_TrigDesc == NULL ||
+			   resultRelInfo->ri_TrigDesc->trig_insert_before_row == false);
+		Assert(resultRelInfo->ri_TrigDesc == NULL ||
+			   resultRelInfo->ri_TrigDesc->trig_insert_after_row == false);
+
 		/*
 		 * We suppress error context information other than the relation name,
 		 * if one of the operations below fails.
@@ -478,15 +488,13 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 		{
 			int			size = (batch_size < nused - sent) ? batch_size : (nused - sent);
 			int			inserted = size;
-			TupleTableSlot **rslots;
 
 			/* insert into foreign table: let the FDW do it */
-			rslots =
-				resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert(estate,
-																	 resultRelInfo,
-																	 &slots[sent],
-																	 NULL,
-																	 &inserted);
+			resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert(estate,
+																 resultRelInfo,
+																 &slots[sent],
+																 NULL,
+																 &inserted);
 
 			/* XXX See the comment in ExecBatchInsert() */
 			inserted = Min(inserted, size);
@@ -496,32 +504,6 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 			/* No need to do anything if there are no inserted rows */
 			if (inserted <= 0)
 				continue;
-
-			/* Triggers on foreign tables should not have transition tables */
-			Assert(resultRelInfo->ri_TrigDesc == NULL ||
-				   resultRelInfo->ri_TrigDesc->trig_insert_new_table == false);
-
-			/* Run AFTER ROW INSERT triggers */
-			if (resultRelInfo->ri_TrigDesc != NULL &&
-				resultRelInfo->ri_TrigDesc->trig_insert_after_row)
-			{
-				Oid			relid = RelationGetRelid(resultRelInfo->ri_RelationDesc);
-
-				for (i = 0; i < inserted; i++)
-				{
-					TupleTableSlot *slot = rslots[i];
-
-					/*
-					 * AFTER ROW Triggers might reference the tableoid column,
-					 * so (re-)initialize tts_tableOid before evaluating them.
-					 */
-					slot->tts_tableOid = relid;
-
-					ExecARInsertTriggers(estate, resultRelInfo,
-										 slot, NULL, NIL,
-										 cstate->transition_capture);
-				}
-			}
 
 			/* Update the row counter and progress of the COPY command */
 			*processed += inserted;
@@ -949,18 +931,8 @@ CopyFrom(CopyFromState cstate)
 	 * Also, if the named relation is a foreign table, determine if the FDW
 	 * supports batch insert and determine the batch size (a FDW may support
 	 * batching, but it may be disabled for the server/table).
-	 *
-	 * If the FDW does not support batching, we set the batch size to 1.
 	 */
-	if (resultRelInfo->ri_FdwRoutine != NULL &&
-		resultRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize &&
-		resultRelInfo->ri_FdwRoutine->ExecForeignBatchInsert)
-		resultRelInfo->ri_BatchSize =
-			resultRelInfo->ri_FdwRoutine->GetForeignModifyBatchSize(resultRelInfo);
-	else
-		resultRelInfo->ri_BatchSize = 1;
-
-	Assert(resultRelInfo->ri_BatchSize >= 1);
+	ExecInitInsertBatchSize(resultRelInfo, NULL);
 
 	/* Prepare to catch AFTER triggers. */
 	AfterTriggerBeginQuery();

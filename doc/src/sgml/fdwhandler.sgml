@@ -661,22 +661,26 @@ ExecForeignBatchInsert(EState *estate,
     </para>
 
     <para>
-     The return value is an array of slots containing the data that was
-     actually inserted (this might differ from the data supplied, for
-     example as a result of trigger actions.)
-     The passed-in <literal>slots</literal> can be re-used for this purpose.
-     The number of successfully inserted tuples is returned in
-     <literal>*numSlots</literal>.
+     The function must set <literal>*numSlots</literal> to the number of
+     successfully inserted tuples.  This can be fewer than the number of
+     tuples passed in, or even zero, for example when
+     <literal>ON CONFLICT DO NOTHING</literal> skips conflicting tuples.
+     The executor ignores the returned slot array, so the function can return
+     <literal>NULL</literal>.  It need not populate slots with the data that
+     was actually inserted.
     </para>
 
     <para>
-     The data in the returned slot is used only if the <command>INSERT</command>
-     statement involves a view
-     <literal>WITH CHECK OPTION</literal>; or if the foreign table has
-     an <literal>AFTER ROW</literal> trigger.  Triggers require all columns,
-     but the FDW could choose to optimize away returning some or all columns
-     depending on the contents of the
-     <literal>WITH CHECK OPTION</literal> constraints.
+     The executor uses <function>ExecForeignInsert</function> instead when
+     the statement has a <literal>RETURNING</literal> clause, there are
+     <literal>WITH CHECK OPTION</literal> constraints to check, or the foreign
+     table has <literal>BEFORE ROW</literal> or <literal>AFTER ROW</literal>
+     <command>INSERT</command> triggers.  Batching is also disabled for tuples
+     routed to a foreign-table partition when they may have to be captured in
+     a <literal>NEW TABLE</literal> transition relation of a parent table.
+     Statement-level triggers without transition tables, or with only
+     <literal>OLD TABLE</literal> transition relations, do not prevent
+     batching.
     </para>
 
     <para>
@@ -684,8 +688,6 @@ ExecForeignBatchInsert(EState *estate,
      <function>GetForeignModifyBatchSize</function> pointer is set to
      <literal>NULL</literal>, attempts to insert into the foreign table will
      use <function>ExecForeignInsert</function>.
-     This function is not used if the <command>INSERT</command> has the
-     <literal>RETURNING</literal> clause.
     </para>
 
     <para>
@@ -710,6 +712,13 @@ GetForeignModifyBatchSize(ResultRelInfo *rinfo);
      the target foreign table.
      The FDW is expected to provide a foreign server and/or foreign
      table option for the user to set this value, or some hard-coded value.
+     The return value must be at least one; returning one disables batching.
+    </para>
+
+    <para>
+     This function is not called when the executor has disabled batching for
+     one of the reasons described for
+     <function>ExecForeignBatchInsert</function>.
     </para>
 
     <para>
