@@ -42,6 +42,9 @@ ERROR:  gen_salt: Incorrect number of rounds
 -- should fail, exceeds supported maximum rounds value
 UPDATE ctest SET salt = gen_salt('sha256crypt', 1000000000);
 ERROR:  gen_salt: Incorrect number of rounds
+-- should fail, empty rounds value
+SELECT crypt('password', '$5$rounds=$salt');
+ERROR:  could not parse salt options
 TRUNCATE ctest;
 -- $6$ is sha512crypt
 SELECT crypt('', '$6$Szzz0yzz');
@@ -83,6 +86,9 @@ ERROR:  gen_salt: Incorrect number of rounds
 -- should fail, exceeds supported maximum rounds value
 UPDATE ctest SET salt = gen_salt('sha512crypt', 1000000000);
 ERROR:  gen_salt: Incorrect number of rounds
+-- should fail, empty rounds value
+SELECT crypt('password', '$6$rounds=$salt');
+ERROR:  could not parse salt options
 -- Extended tests taken from public domain code at
 -- https://www.akkadia.org/drepper/SHA-crypt.txt
 --
