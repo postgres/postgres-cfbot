@@ -625,3 +625,36 @@ SELECT JSON_VALUE(x, '$' RETURNING json) FROM (VALUES ('1'::json), ('null'), ('2
 SELECT JSON_VALUE(x, '$.a' RETURNING jsonb) FROM (VALUES ('{"a": 1}'::jsonb), ('{}'), ('{"a": 2}')) v(x);
 SELECT JSON_VALUE(x, 'strict $.a' RETURNING jsonb) FROM (VALUES ('{"a": 1}'::jsonb), ('[]'), ('{"a": 2}')) v(x);
 SELECT JSON_VALUE(x, '$' RETURNING jsonb) FROM (VALUES ('1'::jsonb), (NULL), ('2')) v(x);
+
+-- Test deparsing of a DEFAULT expression that was coerced to a length-limited
+-- RETURNING type.  The assignment cast made by the parser raises an error for
+-- a too long value, so it must not be deparsed as an explicit cast, which
+-- would truncate the value instead.  A cast written by the user must be kept.
+CREATE VIEW queryfuncs_view_default AS
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING varchar(3)
+				  DEFAULT lower('ABCDEF'::text) ON EMPTY) AS r;
+\sv queryfuncs_view_default;
+SELECT * FROM queryfuncs_view_default;
+SELECT pg_get_viewdef('queryfuncs_view_default'::regclass) AS def \gset
+CREATE VIEW queryfuncs_view_default_re AS :def
+SELECT * FROM queryfuncs_view_default_re;
+CREATE VIEW queryfuncs_view_default_cast AS
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING varchar(3)
+				  DEFAULT lower('ABCDEF'::text)::varchar(3) ON EMPTY) AS r;
+\sv queryfuncs_view_default_cast;
+SELECT * FROM queryfuncs_view_default_cast;
+-- same for a domain over a length-limited type
+CREATE DOMAIN queryfuncs_d_varchar3 AS varchar(3);
+CREATE VIEW queryfuncs_view_default_dom AS
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING queryfuncs_d_varchar3
+				  DEFAULT lower('ABCDEF'::text) ON EMPTY) AS r;
+\sv queryfuncs_view_default_dom;
+SELECT * FROM queryfuncs_view_default_dom;
+SELECT pg_get_viewdef('queryfuncs_view_default_dom'::regclass) AS def \gset
+CREATE VIEW queryfuncs_view_default_dom_re AS :def
+SELECT * FROM queryfuncs_view_default_dom_re;
+
+DROP VIEW queryfuncs_view_default, queryfuncs_view_default_re,
+	queryfuncs_view_default_cast, queryfuncs_view_default_dom,
+	queryfuncs_view_default_dom_re;
+DROP DOMAIN queryfuncs_d_varchar3;
