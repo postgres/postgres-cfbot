@@ -779,10 +779,20 @@ perform_rewind(filemap_t *filemap, rewind_source *source,
 	{
 		/*
 		 * Source is a local data directory. It should've shut down cleanly,
-		 * and we must replay to the latest shutdown checkpoint.
+		 * and we must replay to the latest shutdown checkpoint, or to
+		 * minRecoveryPoint if it was a standby.
 		 */
-		endrec = ControlFile_source_after.checkPoint;
-		endtli = ControlFile_source_after.checkPointCopy.ThisTimeLineID;
+		if (ControlFile_source_after.minRecoveryPoint >
+			ControlFile_source_after.checkPoint)
+		{
+			endrec = ControlFile_source_after.minRecoveryPoint;
+			endtli = ControlFile_source_after.minRecoveryPointTLI;
+		}
+		else
+		{
+			endrec = ControlFile_source_after.checkPoint;
+			endtli = ControlFile_source_after.checkPointCopy.ThisTimeLineID;
+		}
 	}
 
 	memcpy(&ControlFile_new, &ControlFile_source_after, sizeof(ControlFileData));
