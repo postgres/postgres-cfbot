@@ -22,6 +22,7 @@
 #include "pgtz.h"
 #include "storage/fd.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 
 
 /* Current session timezone (controlled by TimeZone GUC) */
@@ -201,15 +202,9 @@ static HTAB *timezone_cache = NULL;
 static bool
 init_timezone_hashtable(void)
 {
-	HASHCTL		hash_ctl;
-
-	hash_ctl.keysize = TZ_STRLEN_MAX + 1;
-	hash_ctl.entrysize = sizeof(pg_tz_cache);
-
-	timezone_cache = hash_create("Timezones",
-								 4,
-								 &hash_ctl,
-								 HASH_ELEM | HASH_STRINGS);
+	timezone_cache = hash_make(pg_tz_cache, tznameupper,
+							   "Timezones", 4,
+							   .mcxt = TopMemoryContext);
 	if (!timezone_cache)
 		return false;
 

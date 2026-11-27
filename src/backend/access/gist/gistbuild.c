@@ -1515,15 +1515,8 @@ typedef struct
 static void
 gistInitParentMap(GISTBuildState *buildstate)
 {
-	HASHCTL		hashCtl;
-
-	hashCtl.keysize = sizeof(BlockNumber);
-	hashCtl.entrysize = sizeof(ParentMapEntry);
-	hashCtl.hcxt = CurrentMemoryContext;
-	buildstate->parentMap = hash_create("gistbuild parent map",
-										1024,
-										&hashCtl,
-										HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	buildstate->parentMap = hash_make(ParentMapEntry, childblkno,
+									  "gistbuild parent map", 1024);
 }
 
 static void

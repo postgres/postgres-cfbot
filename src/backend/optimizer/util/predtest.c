@@ -2119,12 +2119,9 @@ lookup_proof_cache(Oid pred_op, Oid clause_op, bool refute_it)
 	if (OprProofCacheHash == NULL)
 	{
 		/* First time through: initialize the hash table */
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(OprProofCacheKey);
-		ctl.entrysize = sizeof(OprProofCacheEntry);
-		OprProofCacheHash = hash_create("Btree proof lookup cache", 256,
-										&ctl, HASH_ELEM | HASH_BLOBS);
+		OprProofCacheHash = hash_make(OprProofCacheEntry, key,
+									  "Btree proof lookup cache", 256,
+									  .mcxt = TopMemoryContext);
 
 		/* Arrange to flush cache on pg_amop changes */
 		CacheRegisterSyscacheCallback(AMOPOPID,
@@ -2348,15 +2345,10 @@ static void
 InvalidateOprProofCacheCallBack(Datum arg, SysCacheIdentifier cacheid,
 								uint32 hashvalue)
 {
-	HASH_SEQ_STATUS status;
-	OprProofCacheEntry *hentry;
-
 	Assert(OprProofCacheHash != NULL);
 
 	/* Currently we just reset all entries; hard to be smarter ... */
-	hash_seq_init(&status, OprProofCacheHash);
-
-	while ((hentry = (OprProofCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(OprProofCacheEntry, hentry, OprProofCacheHash)
 	{
 		hentry->have_implic = false;
 		hentry->have_refute = false;

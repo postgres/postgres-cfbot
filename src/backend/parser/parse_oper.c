@@ -28,6 +28,7 @@
 #include "utils/hsearch.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -1058,12 +1059,9 @@ find_oper_cache_entry(OprCacheKey *key)
 	if (OprCacheHash == NULL)
 	{
 		/* First time through: initialize the hash table */
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(OprCacheKey);
-		ctl.entrysize = sizeof(OprCacheEntry);
-		OprCacheHash = hash_create("Operator lookup cache", 256,
-								   &ctl, HASH_ELEM | HASH_BLOBS);
+		OprCacheHash = hash_make(OprCacheEntry, key,
+								 "Operator lookup cache", 256,
+								 .mcxt = TopMemoryContext);
 
 		/* Arrange to flush cache on pg_operator and pg_cast changes */
 		CacheRegisterSyscacheCallback(OPERNAMENSP,
@@ -1109,15 +1107,10 @@ static void
 InvalidateOprCacheCallBack(Datum arg, SysCacheIdentifier cacheid,
 						   uint32 hashvalue)
 {
-	HASH_SEQ_STATUS status;
-	OprCacheEntry *hentry;
-
 	Assert(OprCacheHash != NULL);
 
 	/* Currently we just flush all entries; hard to be smarter ... */
-	hash_seq_init(&status, OprCacheHash);
-
-	while ((hentry = (OprCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(OprCacheEntry, hentry, OprCacheHash)
 	{
 		if (hash_search(OprCacheHash,
 						&hentry->key,

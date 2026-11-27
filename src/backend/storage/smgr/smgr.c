@@ -73,6 +73,7 @@
 #include "storage/smgr.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
+#include "utils/memutils.h"
 
 
 /*
@@ -250,12 +251,9 @@ smgropen(RelFileLocator rlocator, ProcNumber backend)
 	if (SMgrRelationHash == NULL)
 	{
 		/* First time through: initialize the hash table */
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(RelFileLocatorBackend);
-		ctl.entrysize = sizeof(SMgrRelationData);
-		SMgrRelationHash = hash_create("smgr relation table", 400,
-									   &ctl, HASH_ELEM | HASH_BLOBS);
+		SMgrRelationHash = hash_make(SMgrRelationData, smgr_rlocator,
+									 "smgr relation table", 400,
+									 .mcxt = TopMemoryContext);
 		dlist_init(&unpinned_relns);
 	}
 
@@ -411,9 +409,6 @@ smgrdestroyall(void)
 void
 smgrreleaseall(void)
 {
-	HASH_SEQ_STATUS status;
-	SMgrRelation reln;
-
 	/* Nothing to do if hashtable not set up */
 	if (SMgrRelationHash == NULL)
 		return;
@@ -421,9 +416,7 @@ smgrreleaseall(void)
 	/* seems unsafe to accept interrupts while iterating */
 	HOLD_INTERRUPTS();
 
-	hash_seq_init(&status, SMgrRelationHash);
-
-	while ((reln = (SMgrRelation) hash_seq_search(&status)) != NULL)
+	foreach_hash(SMgrRelationData, reln, SMgrRelationHash)
 	{
 		smgrrelease(reln);
 	}

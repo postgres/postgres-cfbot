@@ -3703,6 +3703,23 @@ my_shmem_init(void *arg)
       is required.
      </para>
      <para>
+      A hash table in shared memory can be requested in the same way, by
+      calling <function>ShmemRequestHashMake()</function> from the
+      <function>request_fn</function> callback.  Its first two arguments are
+      the entry type and the name of its key member, which must be the first
+      member:
+<programlisting>
+    ShmemRequestHashMake(MyHashEntry, key,
+                         .name = "My hash table",
+                         .nelems = 1024,
+                         .ptr = &amp;MyHash);
+</programlisting>
+      <literal>.nelems</literal> is the maximum number of entries.  The hash
+      table does no locking of its own, so access to it has to be protected
+      with a lock, such as an
+      <link linkend="xfunc-addin-lwlocks">LWLock</link>.
+     </para>
+     <para>
       On Windows, the <function>attach_fn</function> callback, if any, is
       additionally called at every backend startup.  It can be used to
       initialize additional per-backend state related to the shared memory

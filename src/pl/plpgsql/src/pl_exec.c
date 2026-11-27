@@ -4038,8 +4038,6 @@ plpgsql_estate_setup(PLpgSQL_execstate *estate,
 					 EState *simple_eval_estate,
 					 ResourceOwner simple_eval_resowner)
 {
-	HASHCTL		ctl;
-
 	/* this link will be restored at exit from plpgsql_call_handler */
 	func->cur_estate = estate;
 
@@ -4094,12 +4092,10 @@ plpgsql_estate_setup(PLpgSQL_execstate *estate,
 	/* Create the session-wide cast-expression hash if we didn't already */
 	if (cast_expr_hash == NULL)
 	{
-		ctl.keysize = sizeof(plpgsql_CastHashKey);
-		ctl.entrysize = sizeof(plpgsql_CastExprHashEntry);
-		cast_expr_hash = hash_create("PLpgSQL cast expressions",
-									 16,	/* start small and extend */
-									 &ctl,
-									 HASH_ELEM | HASH_BLOBS);
+		cast_expr_hash = hash_make(plpgsql_CastExprHashEntry, key,
+								   "PLpgSQL cast expressions",
+								   16,	/* start small and extend */
+								   .mcxt = TopMemoryContext);
 	}
 
 	/* set up for use of appropriate simple-expression EState and cast hash */
@@ -4107,13 +4103,9 @@ plpgsql_estate_setup(PLpgSQL_execstate *estate,
 	{
 		estate->simple_eval_estate = simple_eval_estate;
 		/* Private cast hash just lives in function's main context */
-		ctl.keysize = sizeof(plpgsql_CastHashKey);
-		ctl.entrysize = sizeof(plpgsql_CastHashEntry);
-		ctl.hcxt = CurrentMemoryContext;
-		estate->cast_hash = hash_create("PLpgSQL private cast cache",
-										16, /* start small and extend */
-										&ctl,
-										HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		estate->cast_hash = hash_make(plpgsql_CastHashEntry, key,
+									  "PLpgSQL private cast cache",
+									  16);	/* start small and extend */
 	}
 	else
 	{
@@ -4121,12 +4113,10 @@ plpgsql_estate_setup(PLpgSQL_execstate *estate,
 		/* Create the session-wide cast-info hash table if we didn't already */
 		if (shared_cast_hash == NULL)
 		{
-			ctl.keysize = sizeof(plpgsql_CastHashKey);
-			ctl.entrysize = sizeof(plpgsql_CastHashEntry);
-			shared_cast_hash = hash_create("PLpgSQL cast cache",
-										   16,	/* start small and extend */
-										   &ctl,
-										   HASH_ELEM | HASH_BLOBS);
+			shared_cast_hash = hash_make(plpgsql_CastHashEntry, key,
+										 "PLpgSQL cast cache",
+										 16,	/* start small and extend */
+										 .mcxt = TopMemoryContext);
 		}
 		estate->cast_hash = shared_cast_hash;
 	}

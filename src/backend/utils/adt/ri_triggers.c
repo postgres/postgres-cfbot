@@ -3665,13 +3665,10 @@ ri_NullCheck(TupleDesc tupDesc,
 static void
 ri_InitHashTables(void)
 {
-	HASHCTL		ctl;
-
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(RI_ConstraintInfo);
-	ri_constraint_cache = hash_create("RI constraint cache",
-									  RI_INIT_CONSTRAINTHASHSIZE,
-									  &ctl, HASH_ELEM | HASH_BLOBS);
+	ri_constraint_cache = hash_make(RI_ConstraintInfo, constraint_id,
+									"RI constraint cache",
+									RI_INIT_CONSTRAINTHASHSIZE,
+									.mcxt = TopMemoryContext);
 
 	/* Arrange to flush cache on pg_constraint, pg_amop or pg_cast changes */
 	CacheRegisterSyscacheCallback(CONSTROID,
@@ -3684,17 +3681,15 @@ ri_InitHashTables(void)
 								  InvalidateConstraintCacheCallBack,
 								  (Datum) 0);
 
-	ctl.keysize = sizeof(RI_QueryKey);
-	ctl.entrysize = sizeof(RI_QueryHashEntry);
-	ri_query_cache = hash_create("RI query cache",
-								 RI_INIT_QUERYHASHSIZE,
-								 &ctl, HASH_ELEM | HASH_BLOBS);
+	ri_query_cache = hash_make(RI_QueryHashEntry, key,
+							   "RI query cache",
+							   RI_INIT_QUERYHASHSIZE,
+							   .mcxt = TopMemoryContext);
 
-	ctl.keysize = sizeof(RI_CompareKey);
-	ctl.entrysize = sizeof(RI_CompareHashEntry);
-	ri_compare_cache = hash_create("RI compare cache",
-								   RI_INIT_QUERYHASHSIZE,
-								   &ctl, HASH_ELEM | HASH_BLOBS);
+	ri_compare_cache = hash_make(RI_CompareHashEntry, key,
+								 "RI compare cache",
+								 RI_INIT_QUERYHASHSIZE,
+								 .mcxt = TopMemoryContext);
 }
 
 

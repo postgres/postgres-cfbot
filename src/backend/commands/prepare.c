@@ -48,7 +48,6 @@
  */
 static HTAB *prepared_queries = NULL;
 
-static void InitQueryHashTable(void);
 static ParamListInfo EvaluateParams(ParseState *pstate,
 									PreparedStatement *pstmt, List *params,
 									EState *estate);
@@ -366,24 +365,6 @@ EvaluateParams(ParseState *pstate, PreparedStatement *pstmt, List *params,
 	return paramLI;
 }
 
-
-/*
- * Initialize query hash table upon first use.
- */
-static void
-InitQueryHashTable(void)
-{
-	HASHCTL		hash_ctl;
-
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(PreparedStatement);
-
-	prepared_queries = hash_create("Prepared Queries",
-								   32,
-								   &hash_ctl,
-								   HASH_ELEM | HASH_STRINGS);
-}
-
 /*
  * Store all the data pertaining to a query in the hash table using
  * the specified key.  The passed CachedPlanSource should be "unsaved"
@@ -401,7 +382,9 @@ StorePreparedStatement(const char *stmt_name,
 
 	/* Initialize the hash table, if necessary */
 	if (!prepared_queries)
-		InitQueryHashTable();
+		prepared_queries = hash_make(PreparedStatement, stmt_name,
+									"Prepared Queries", 32,
+									.mcxt = TopMemoryContext);
 
 	/* Add entry to hash table */
 	entry = (PreparedStatement *) hash_search(prepared_queries,
@@ -541,16 +524,12 @@ DropPreparedStatement(const char *stmt_name, bool showError)
 void
 DropAllPreparedStatements(void)
 {
-	HASH_SEQ_STATUS seq;
-	PreparedStatement *entry;
-
 	/* nothing cached */
 	if (!prepared_queries)
 		return;
 
 	/* walk over cache */
-	hash_seq_init(&seq, prepared_queries);
-	while ((entry = hash_seq_search(&seq)) != NULL)
+	foreach_hash(PreparedStatement, entry, prepared_queries)
 	{
 		/* Release the plancache entry */
 		DropCachedPlan(entry->plansource);
@@ -697,11 +676,7 @@ pg_prepared_statement(PG_FUNCTION_ARGS)
 	/* hash table might be uninitialized */
 	if (prepared_queries)
 	{
-		HASH_SEQ_STATUS hash_seq;
-		PreparedStatement *prep_stmt;
-
-		hash_seq_init(&hash_seq, prepared_queries);
-		while ((prep_stmt = hash_seq_search(&hash_seq)) != NULL)
+		foreach_hash(PreparedStatement, prep_stmt, prepared_queries)
 		{
 			TupleDesc	result_desc;
 			Datum		values[8];

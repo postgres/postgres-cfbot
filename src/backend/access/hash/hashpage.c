@@ -1363,7 +1363,6 @@ void
 _hash_finish_split(Relation rel, Buffer metabuf, Buffer obuf, Bucket obucket,
 				   uint32 maxbucket, uint32 highmask, uint32 lowmask)
 {
-	HASHCTL		hash_ctl;
 	HTAB	   *tidhtab;
 	Buffer		bucket_nbuf = InvalidBuffer;
 	Buffer		nbuf;
@@ -1374,16 +1373,8 @@ _hash_finish_split(Relation rel, Buffer metabuf, Buffer obuf, Bucket obucket,
 	Bucket		nbucket;
 	bool		found;
 
-	/* Initialize hash tables used to track TIDs */
-	hash_ctl.keysize = sizeof(ItemPointerData);
-	hash_ctl.entrysize = sizeof(ItemPointerData);
-	hash_ctl.hcxt = CurrentMemoryContext;
-
-	tidhtab =
-		hash_create("bucket ctids",
-					256,		/* arbitrary initial size */
-					&hash_ctl,
-					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	/* Initialize hash tables used to track TIDs (with arbitrary initial size) */
+	tidhtab = hashset_make(ItemPointerData, "bucket ctids", 256);
 
 	bucket_nblkno = nblkno = _hash_get_newblock_from_oldbucket(rel, obucket);
 

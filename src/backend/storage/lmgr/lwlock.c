@@ -303,7 +303,6 @@ static lwlock_stats * get_lwlock_stats_entry(LWLock *lock);
 static void
 init_lwlock_stats(void)
 {
-	HASHCTL		ctl;
 	static MemoryContext lwlock_stats_cxt = NULL;
 	static bool exit_registered = false;
 
@@ -323,11 +322,9 @@ init_lwlock_stats(void)
 											 ALLOCSET_DEFAULT_SIZES);
 	MemoryContextAllowInCriticalSection(lwlock_stats_cxt, true);
 
-	ctl.keysize = sizeof(lwlock_stats_key);
-	ctl.entrysize = sizeof(lwlock_stats);
-	ctl.hcxt = lwlock_stats_cxt;
-	lwlock_stats_htab = hash_create("lwlock stats", 16384, &ctl,
-									HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	lwlock_stats_htab = hash_make(lwlock_stats, key,
+								  "lwlock stats", 16384,
+								  .mcxt = lwlock_stats_cxt);
 	if (!exit_registered)
 	{
 		on_shmem_exit(print_lwlock_stats, 0);
@@ -338,15 +335,10 @@ init_lwlock_stats(void)
 static void
 print_lwlock_stats(int code, Datum arg)
 {
-	HASH_SEQ_STATUS scan;
-	lwlock_stats *lwstats;
-
-	hash_seq_init(&scan, lwlock_stats_htab);
-
 	/* Grab an LWLock to keep different backends from mixing reports */
 	LWLockAcquire(&MainLWLockArray[0].lock, LW_EXCLUSIVE);
 
-	while ((lwstats = (lwlock_stats *) hash_seq_search(&scan)) != NULL)
+	foreach_hash(lwlock_stats, lwstats, lwlock_stats_htab)
 	{
 		fprintf(stderr,
 				"PID %d lwlock %s %p: shacq %u exacq %u blk %u spindelay %u dequeue self %u\n",

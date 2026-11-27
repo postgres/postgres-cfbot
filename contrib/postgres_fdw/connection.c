@@ -238,17 +238,13 @@ GetConnection(UserMapping *user, bool will_prep_stmt, PgFdwConnState **state)
 	/* First time through, initialize connection cache hashtable */
 	if (ConnectionHash == NULL)
 	{
-		HASHCTL		ctl;
-
 		if (pgfdw_we_get_result == 0)
 			pgfdw_we_get_result =
 				WaitEventExtensionNew("PostgresFdwGetResult");
 
-		ctl.keysize = sizeof(ConnCacheKey);
-		ctl.entrysize = sizeof(ConnCacheEntry);
-		ConnectionHash = hash_create("postgres_fdw connections", 8,
-									 &ctl,
-									 HASH_ELEM | HASH_BLOBS);
+		ConnectionHash = hash_make(ConnCacheEntry, key,
+								   "postgres_fdw connections", 8,
+								   .mcxt = TopMemoryContext);
 
 		/*
 		 * Register some callback functions that manage connection cleanup.
@@ -1202,8 +1198,6 @@ pgfdw_report_internal(int elevel, PGresult *res, PGconn *conn,
 static void
 pgfdw_xact_callback(XactEvent event, void *arg)
 {
-	HASH_SEQ_STATUS scan;
-	ConnCacheEntry *entry;
 	List	   *pending_entries = NIL;
 	List	   *cancel_requested = NIL;
 
@@ -1233,8 +1227,7 @@ pgfdw_xact_callback(XactEvent event, void *arg)
 	 * Scan all connection cache entries to find open remote transactions, and
 	 * close them.
 	 */
-	hash_seq_init(&scan, ConnectionHash);
-	while ((entry = (ConnCacheEntry *) hash_seq_search(&scan)))
+	foreach_hash(ConnCacheEntry, entry, ConnectionHash)
 	{
 		PGresult   *res;
 
@@ -1379,8 +1372,6 @@ static void
 pgfdw_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 					   SubTransactionId parentSubid, void *arg)
 {
-	HASH_SEQ_STATUS scan;
-	ConnCacheEntry *entry;
 	int			curlevel;
 	List	   *pending_entries = NIL;
 	List	   *cancel_requested = NIL;
@@ -1399,8 +1390,7 @@ pgfdw_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 	 * of the current level, and close them.
 	 */
 	curlevel = GetCurrentTransactionNestLevel();
-	hash_seq_init(&scan, ConnectionHash);
-	while ((entry = (ConnCacheEntry *) hash_seq_search(&scan)))
+	foreach_hash(ConnCacheEntry, entry, ConnectionHash)
 	{
 		char		sql[100];
 
@@ -1495,14 +1485,10 @@ pgfdw_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 static void
 pgfdw_inval_callback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 {
-	HASH_SEQ_STATUS scan;
-	ConnCacheEntry *entry;
-
 	Assert(cacheid == FOREIGNSERVEROID || cacheid == USERMAPPINGOID);
 
 	/* ConnectionHash must exist already, if we're registered */
-	hash_seq_init(&scan, ConnectionHash);
-	while ((entry = (ConnCacheEntry *) hash_seq_search(&scan)))
+	foreach_hash(ConnCacheEntry, entry, ConnectionHash)
 	{
 		/* Ignore invalid entries */
 		if (entry->conn == NULL)
@@ -2367,8 +2353,6 @@ postgres_fdw_get_connections_internal(FunctionCallInfo fcinfo,
 									  enum pgfdwVersion api_version)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	HASH_SEQ_STATUS scan;
-	ConnCacheEntry *entry;
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -2391,8 +2375,7 @@ postgres_fdw_get_connections_internal(FunctionCallInfo fcinfo,
 			elog(ERROR, "incorrect number of output arguments");
 	}
 
-	hash_seq_init(&scan, ConnectionHash);
-	while ((entry = (ConnCacheEntry *) hash_seq_search(&scan)))
+	foreach_hash(ConnCacheEntry, entry, ConnectionHash)
 	{
 		ForeignServer *server;
 		Datum		values[POSTGRES_FDW_GET_CONNECTIONS_COLS] = {0};
@@ -2656,8 +2639,6 @@ postgres_fdw_disconnect_all(PG_FUNCTION_ARGS)
 static bool
 disconnect_cached_connections(Oid serverid)
 {
-	HASH_SEQ_STATUS scan;
-	ConnCacheEntry *entry;
 	bool		all = !OidIsValid(serverid);
 	bool		result = false;
 
@@ -2668,8 +2649,7 @@ disconnect_cached_connections(Oid serverid)
 	if (!ConnectionHash)
 		return false;
 
-	hash_seq_init(&scan, ConnectionHash);
-	while ((entry = (ConnCacheEntry *) hash_seq_search(&scan)))
+	foreach_hash(ConnCacheEntry, entry, ConnectionHash)
 	{
 		/* Ignore cache entry if no open connection right now. */
 		if (!entry->conn)

@@ -26,6 +26,7 @@
 #include "storage/fd.h"
 #include "storage/shmem.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 
 
 /* signature for PostgreSQL-specific library init function */
@@ -671,14 +672,9 @@ find_rendezvous_variable(const char *varName)
 	/* Create a hashtable if we haven't already done so in this process */
 	if (rendezvousHash == NULL)
 	{
-		HASHCTL		ctl;
-
-		ctl.keysize = NAMEDATALEN;
-		ctl.entrysize = sizeof(rendezvousHashEntry);
-		rendezvousHash = hash_create("Rendezvous variable hash",
-									 16,
-									 &ctl,
-									 HASH_ELEM | HASH_STRINGS);
+		rendezvousHash = hash_make(rendezvousHashEntry, varName,
+								   "Rendezvous variable hash", 16,
+								   .mcxt = TopMemoryContext);
 	}
 
 	/* Find or create the hashtable entry for this varName */

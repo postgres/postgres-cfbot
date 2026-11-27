@@ -180,7 +180,7 @@ static int	in_progress_list_maxlen;
  * eoxact_list[] stores the OIDs of relations that (might) need AtEOXact
  * cleanup work.  This list intentionally has limited size; if it overflows,
  * we fall back to scanning the whole hashtable.  There is no value in a very
- * large list because (1) at some point, a hash_seq_search scan is faster than
+ * large list because (1) at some point, a foreach_hash scan is faster than
  * retail lookups, and (2) the value of this is to reduce EOXact work for
  * short transactions, which can't have dirtied all that many tables anyway.
  * EOXactListAdd() does not bother to prevent duplicate list entries, so the
@@ -1712,17 +1712,14 @@ LookupOpclassInfo(Oid operatorClassOid,
 
 	if (OpClassCache == NULL)
 	{
-		/* First time through: initialize the opclass cache */
-		HASHCTL		ctl;
-
 		/* Also make sure CacheMemoryContext exists */
 		if (!CacheMemoryContext)
 			CreateCacheMemoryContext();
 
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(OpClassCacheEnt);
-		OpClassCache = hash_create("Operator class cache", 64,
-								   &ctl, HASH_ELEM | HASH_BLOBS);
+		/* First time through: initialize the opclass cache */
+		OpClassCache = hash_make(OpClassCacheEnt, opclassoid,
+								 "Operator class cache", 64,
+								 .mcxt = TopMemoryContext);
 	}
 
 	opcentry = (OpClassCacheEnt *) hash_search(OpClassCache,
@@ -3005,13 +3002,13 @@ RelationCacheInvalidateEntry(Oid relationId)
  *
  *	 We do this in two phases: the first pass deletes deletable items, and
  *	 the second one rebuilds the rebuildable items.  This is essential for
- *	 safety, because hash_seq_search only copes with concurrent deletion of
+ *	 safety, because foreach_hash only copes with concurrent deletion of
  *	 the element it is currently visiting.  If a second SI overflow were to
  *	 occur while we are walking the table, resulting in recursive entry to
  *	 this routine, we could crash because the inner invocation blows away
  *	 the entry next to be visited by the outer scan.  But this way is OK,
  *	 because (a) during the first pass we won't process any more SI messages,
- *	 so hash_seq_search will complete safely; (b) during the second pass we
+ *	 so foreach_hash will complete safely; (b) during the second pass we
  *	 only hold onto pointers to nondeletable entries.
  *
  *	 The two-phase approach also makes it easy to update relfilenumbers for
@@ -3028,8 +3025,6 @@ RelationCacheInvalidateEntry(Oid relationId)
 void
 RelationCacheInvalidate(bool debug_discard)
 {
-	HASH_SEQ_STATUS status;
-	RelIdCacheEnt *idhentry;
 	Relation	relation;
 	List	   *rebuildFirstList = NIL;
 	List	   *rebuildList = NIL;
@@ -3042,9 +3037,7 @@ RelationCacheInvalidate(bool debug_discard)
 	RelationMapInvalidateAll();
 
 	/* Phase 1 */
-	hash_seq_init(&status, RelationIdCache);
-
-	while ((idhentry = (RelIdCacheEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(RelIdCacheEnt, idhentry, RelationIdCache)
 	{
 		relation = idhentry->reldesc;
 
@@ -3188,12 +3181,9 @@ AssertPendingSyncConsistency(Relation relation)
 void
 AssertPendingSyncs_RelationCache(void)
 {
-	HASH_SEQ_STATUS status;
-	LOCALLOCK  *locallock;
 	Relation   *rels;
 	int			maxrels;
 	int			nrels;
-	RelIdCacheEnt *idhentry;
 	int			i;
 
 	/*
@@ -3207,8 +3197,7 @@ AssertPendingSyncs_RelationCache(void)
 	maxrels = 1;
 	rels = palloc_array(Relation, maxrels);
 	nrels = 0;
-	hash_seq_init(&status, GetLockMethodLocalHash());
-	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
+	foreach_hash(LOCALLOCK, locallock, GetLockMethodLocalHash())
 	{
 		Oid			relid;
 		Relation	r;
@@ -3230,8 +3219,7 @@ AssertPendingSyncs_RelationCache(void)
 		rels[nrels++] = r;
 	}
 
-	hash_seq_init(&status, RelationIdCache);
-	while ((idhentry = (RelIdCacheEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(RelIdCacheEnt, idhentry, RelationIdCache)
 		AssertPendingSyncConsistency(idhentry->reldesc);
 
 	for (i = 0; i < nrels; i++)
@@ -3259,8 +3247,6 @@ AssertPendingSyncs_RelationCache(void)
 void
 AtEOXact_RelationCache(bool isCommit)
 {
-	HASH_SEQ_STATUS status;
-	RelIdCacheEnt *idhentry;
 	int			i;
 
 	/*
@@ -3272,7 +3258,7 @@ AtEOXact_RelationCache(bool isCommit)
 
 	/*
 	 * Unless the eoxact_list[] overflowed, we only need to examine the rels
-	 * listed in it.  Otherwise fall back on a hash_seq_search scan.
+	 * listed in it.  Otherwise fall back on a foreach_hash scan.
 	 *
 	 * For simplicity, eoxact_list[] entries are not deleted till end of
 	 * top-level transaction, even though we could remove them at
@@ -3283,8 +3269,7 @@ AtEOXact_RelationCache(bool isCommit)
 	 */
 	if (eoxact_list_overflowed)
 	{
-		hash_seq_init(&status, RelationIdCache);
-		while ((idhentry = (RelIdCacheEnt *) hash_seq_search(&status)) != NULL)
+		foreach_hash(RelIdCacheEnt, idhentry, RelationIdCache)
 		{
 			AtEOXact_cleanup(idhentry->reldesc, isCommit);
 		}
@@ -3293,10 +3278,11 @@ AtEOXact_RelationCache(bool isCommit)
 	{
 		for (i = 0; i < eoxact_list_len; i++)
 		{
-			idhentry = (RelIdCacheEnt *) hash_search(RelationIdCache,
-													 &eoxact_list[i],
-													 HASH_FIND,
-													 NULL);
+			RelIdCacheEnt *idhentry = hash_search(RelationIdCache,
+												  &eoxact_list[i],
+												  HASH_FIND,
+												  NULL);
+
 			if (idhentry != NULL)
 				AtEOXact_cleanup(idhentry->reldesc, isCommit);
 		}
@@ -3412,8 +3398,6 @@ void
 AtEOSubXact_RelationCache(bool isCommit, SubTransactionId mySubid,
 						  SubTransactionId parentSubid)
 {
-	HASH_SEQ_STATUS status;
-	RelIdCacheEnt *idhentry;
 	int			i;
 
 	/*
@@ -3426,13 +3410,12 @@ AtEOSubXact_RelationCache(bool isCommit, SubTransactionId mySubid,
 
 	/*
 	 * Unless the eoxact_list[] overflowed, we only need to examine the rels
-	 * listed in it.  Otherwise fall back on a hash_seq_search scan.  Same
-	 * logic as in AtEOXact_RelationCache.
+	 * listed in it.  Otherwise fall back on a foreach_hash scan.  Same logic
+	 * as in AtEOXact_RelationCache.
 	 */
 	if (eoxact_list_overflowed)
 	{
-		hash_seq_init(&status, RelationIdCache);
-		while ((idhentry = (RelIdCacheEnt *) hash_seq_search(&status)) != NULL)
+		foreach_hash(RelIdCacheEnt, idhentry, RelationIdCache)
 		{
 			AtEOSubXact_cleanup(idhentry->reldesc, isCommit,
 								mySubid, parentSubid);
@@ -3442,6 +3425,8 @@ AtEOSubXact_RelationCache(bool isCommit, SubTransactionId mySubid,
 	{
 		for (i = 0; i < eoxact_list_len; i++)
 		{
+			RelIdCacheEnt *idhentry;
+
 			idhentry = (RelIdCacheEnt *) hash_search(RelationIdCache,
 													 &eoxact_list[i],
 													 HASH_FIND,
@@ -4037,7 +4022,6 @@ RelationAssumeNewRelfilelocator(Relation relation)
 void
 RelationCacheInitialize(void)
 {
-	HASHCTL		ctl;
 	int			allocsize;
 
 	/*
@@ -4049,10 +4033,9 @@ RelationCacheInitialize(void)
 	/*
 	 * create hashtable that indexes the relcache
 	 */
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(RelIdCacheEnt);
-	RelationIdCache = hash_create("Relcache by OID", INITRELCACHESIZE,
-								  &ctl, HASH_ELEM | HASH_BLOBS);
+	RelationIdCache = hash_make(RelIdCacheEnt, reloid,
+								"Relcache by OID", INITRELCACHESIZE,
+								.mcxt = TopMemoryContext);
 
 	/*
 	 * reserve enough in_progress_list slots for many cases
@@ -4144,8 +4127,6 @@ RelationCacheInitializePhase2(void)
 void
 RelationCacheInitializePhase3(void)
 {
-	HASH_SEQ_STATUS status;
-	RelIdCacheEnt *idhentry;
 	MemoryContext oldcxt;
 	bool		needNewCacheFile = !criticalSharedRelcachesBuilt;
 
@@ -4281,15 +4262,13 @@ RelationCacheInitializePhase3(void)
 	 *
 	 * Whenever we access the catalogs to read data, there is a possibility of
 	 * a shared-inval cache flush causing relcache entries to be removed.
-	 * Since hash_seq_search only guarantees to still work after the *current*
+	 * Since foreach_hash only guarantees to still work after the *current*
 	 * entry is removed, it's unsafe to continue the hashtable scan afterward.
 	 * We handle this by restarting the scan from scratch after each access.
 	 * This is theoretically O(N^2), but the number of entries that actually
 	 * need to be fixed is small enough that it doesn't matter.
 	 */
-	hash_seq_init(&status, RelationIdCache);
-
-	while ((idhentry = (RelIdCacheEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(RelIdCacheEnt, idhentry, RelationIdCache)
 	{
 		Relation	relation = idhentry->reldesc;
 		bool		restart = false;
@@ -4399,10 +4378,7 @@ RelationCacheInitializePhase3(void)
 
 		/* Now, restart the hashtable scan if needed */
 		if (restart)
-		{
-			hash_seq_term(&status);
-			hash_seq_init(&status, RelationIdCache);
-		}
+			foreach_hash_restart(idhentry, RelationIdCache);
 	}
 
 	/*
@@ -6708,8 +6684,6 @@ write_relcache_init_file(bool shared)
 	char		tempfilename[MAXPGPATH];
 	char		finalfilename[MAXPGPATH];
 	int			magic;
-	HASH_SEQ_STATUS status;
-	RelIdCacheEnt *idhentry;
 	int			i;
 
 	/*
@@ -6769,9 +6743,7 @@ write_relcache_init_file(bool shared)
 	/*
 	 * Write all the appropriate reldescs (in no particular order).
 	 */
-	hash_seq_init(&status, RelationIdCache);
-
-	while ((idhentry = (RelIdCacheEnt *) hash_seq_search(&status)) != NULL)
+	foreach_hash(RelIdCacheEnt, idhentry, RelationIdCache)
 	{
 		Relation	rel = idhentry->reldesc;
 		Form_pg_class relform = rel->rd_rel;

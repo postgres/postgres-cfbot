@@ -423,17 +423,13 @@ CreatePartitionDirectory(MemoryContext mcxt, bool omit_detached)
 {
 	MemoryContext oldcontext = MemoryContextSwitchTo(mcxt);
 	PartitionDirectory pdir;
-	HASHCTL		ctl;
 
 	pdir = palloc_object(PartitionDirectoryData);
 	pdir->pdir_mcxt = mcxt;
 
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(PartitionDirectoryEntry);
-	ctl.hcxt = mcxt;
-
-	pdir->pdir_hash = hash_create("partition directory", 256, &ctl,
-								  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	pdir->pdir_hash = hash_make(PartitionDirectoryEntry, reloid,
+								"partition directory", 256,
+								.mcxt = mcxt);
 	pdir->omit_detached = omit_detached;
 
 	MemoryContextSwitchTo(oldcontext);
@@ -482,11 +478,7 @@ PartitionDirectoryLookup(PartitionDirectory pdir, Relation rel)
 void
 DestroyPartitionDirectory(PartitionDirectory pdir)
 {
-	HASH_SEQ_STATUS status;
-	PartitionDirectoryEntry *pde;
-
-	hash_seq_init(&status, pdir->pdir_hash);
-	while ((pde = hash_seq_search(&status)) != NULL)
+	foreach_hash(PartitionDirectoryEntry, pde, pdir->pdir_hash)
 		RelationDecrementReferenceCount(pde->rel);
 }
 

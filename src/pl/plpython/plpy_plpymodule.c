@@ -16,6 +16,7 @@
 #include "plpy_subxactobject.h"
 #include "plpy_util.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 
 HTAB	   *PLy_spi_exceptions = NULL;
 
@@ -145,7 +146,6 @@ static void
 PLy_add_exceptions(PyObject *plpy)
 {
 	PyObject   *excmod;
-	HASHCTL		hash_ctl;
 
 	PLy_exc_error = PLy_create_exception("plpy.Error", NULL, NULL,
 										 "Error", plpy);
@@ -158,10 +158,9 @@ PLy_add_exceptions(PyObject *plpy)
 	if (excmod == NULL)
 		PLy_elog(ERROR, "could not create the spiexceptions module");
 
-	hash_ctl.keysize = sizeof(int);
-	hash_ctl.entrysize = sizeof(PLyExceptionEntry);
-	PLy_spi_exceptions = hash_create("PL/Python SPI exceptions", 256,
-									 &hash_ctl, HASH_ELEM | HASH_BLOBS);
+	PLy_spi_exceptions = hash_make(PLyExceptionEntry, sqlstate,
+								   "PL/Python SPI exceptions", 256,
+								   .mcxt = TopMemoryContext);
 
 	PLy_generate_spi_exceptions(excmod, PLy_exc_spi_error);
 

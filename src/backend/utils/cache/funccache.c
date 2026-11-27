@@ -51,29 +51,6 @@ static int	cfunc_match(const void *key1, const void *key2, Size keysize);
 
 
 /*
- * Initialize the hash table on first use.
- *
- * The hash table will be in TopMemoryContext regardless of caller's context.
- */
-static void
-cfunc_hashtable_init(void)
-{
-	HASHCTL		ctl;
-
-	/* don't allow double-initialization */
-	Assert(cfunc_hashtable == NULL);
-
-	ctl.keysize = sizeof(CachedFunctionHashKey);
-	ctl.entrysize = sizeof(CachedFunctionHashEntry);
-	ctl.hash = cfunc_hash;
-	ctl.match = cfunc_match;
-	cfunc_hashtable = hash_create("Cached function hash",
-								  FUNCS_PER_USER,
-								  &ctl,
-								  HASH_ELEM | HASH_FUNCTION | HASH_COMPARE);
-}
-
-/*
  * cfunc_hash: hash function for cfunc hash table
  *
  * We need special hash and match functions to deal with the optional
@@ -171,7 +148,11 @@ cfunc_hashtable_insert(CachedFunction *function,
 	bool		found;
 
 	if (cfunc_hashtable == NULL)
-		cfunc_hashtable_init();
+		cfunc_hashtable = hash_make(CachedFunctionHashEntry, key,
+									"Cached function hash", FUNCS_PER_USER,
+									.hash = cfunc_hash,
+									.match = cfunc_match,
+									.mcxt = TopMemoryContext);
 
 	hentry = (CachedFunctionHashEntry *) hash_search(cfunc_hashtable,
 													 func_key,

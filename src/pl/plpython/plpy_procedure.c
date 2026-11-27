@@ -503,14 +503,9 @@ PLy_procedure_get_statics(Oid fn_oid, Oid fn_rel)
 	bool		found;
 
 	if (PLy_statics_hash == NULL)
-	{
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(PLyStaticsKey);
-		ctl.entrysize = sizeof(PLyStaticsEntry);
-		PLy_statics_hash = hash_create("PL/Python SD dictionaries", 32,
-									   &ctl, HASH_ELEM | HASH_BLOBS);
-	}
+		PLy_statics_hash = hash_make(PLyStaticsEntry, key,
+									 "PL/Python SD dictionaries", 32,
+									 .mcxt = TopMemoryContext);
 
 	key.fn_oid = fn_oid;
 	key.fn_rel = fn_rel;

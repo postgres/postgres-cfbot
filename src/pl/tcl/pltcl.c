@@ -421,7 +421,6 @@ void
 _PG_init(void)
 {
 	Tcl_NotifierProcs notifier;
-	HASHCTL		hash_ctl;
 
 	/* Be sure we do initialization only once (should be redundant now) */
 	if (pltcl_pm_init_done)
@@ -459,22 +458,16 @@ _PG_init(void)
 	/************************************************************
 	 * Create the hash table for working interpreters
 	 ************************************************************/
-	hash_ctl.keysize = sizeof(Oid);
-	hash_ctl.entrysize = sizeof(pltcl_interp_desc);
-	pltcl_interp_htab = hash_create("PL/Tcl interpreters",
-									8,
-									&hash_ctl,
-									HASH_ELEM | HASH_BLOBS);
+	pltcl_interp_htab = hash_make(pltcl_interp_desc, user_id,
+								  "PL/Tcl interpreters", 8,
+								  .mcxt = TopMemoryContext);
 
 	/************************************************************
 	 * Create the hash table for function lookup
 	 ************************************************************/
-	hash_ctl.keysize = sizeof(pltcl_proc_key);
-	hash_ctl.entrysize = sizeof(pltcl_proc_ptr);
-	pltcl_proc_htab = hash_create("PL/Tcl functions",
-								  100,
-								  &hash_ctl,
-								  HASH_ELEM | HASH_BLOBS);
+	pltcl_proc_htab = hash_make(pltcl_proc_ptr, proc_key,
+								"PL/Tcl functions", 100,
+								.mcxt = TopMemoryContext);
 
 	/************************************************************
 	 * Define PL/Tcl's custom GUCs

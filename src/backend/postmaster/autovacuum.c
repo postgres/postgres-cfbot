@@ -929,7 +929,6 @@ rebuild_database_list(Oid newdb)
 	MemoryContext newcxt;
 	MemoryContext oldcxt;
 	MemoryContext tmpcxt;
-	HASHCTL		hctl;
 	int			score;
 	int			nelems;
 	HTAB	   *dbhash;
@@ -959,12 +958,10 @@ rebuild_database_list(Oid newdb)
 	 * score, and finally put the array elements into the new doubly linked
 	 * list.
 	 */
-	hctl.keysize = sizeof(Oid);
-	hctl.entrysize = sizeof(avl_dbase);
-	hctl.hcxt = tmpcxt;
-	dbhash = hash_create("autovacuum db hash", 20, &hctl,	/* magic number here
-															 * FIXME */
-						 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	dbhash = hash_make(avl_dbase, adl_datid,
+					   "autovacuum db hash",
+					   20,		/* magic number here FIXME */
+					   .mcxt = tmpcxt);
 
 	/* start by inserting the new database */
 	score = 0;
@@ -1046,8 +1043,6 @@ rebuild_database_list(Oid newdb)
 		TimestampTz current_time;
 		int			millis_increment;
 		avl_dbase  *dbary;
-		avl_dbase  *db;
-		HASH_SEQ_STATUS seq;
 		int			i;
 
 		/* put all the hash elements into an array */
@@ -1058,8 +1053,7 @@ rebuild_database_list(Oid newdb)
 #endif
 
 		i = 0;
-		hash_seq_init(&seq, dbhash);
-		while ((db = hash_seq_search(&seq)) != NULL)
+		foreach_hash(avl_dbase, db, dbhash)
 			memcpy(&(dbary[i++]), db, sizeof(avl_dbase));
 
 		/* sort the array */
@@ -1084,7 +1078,7 @@ rebuild_database_list(Oid newdb)
 		 */
 		for (i = 0; i < nelems; i++)
 		{
-			db = &(dbary[i]);
+			avl_dbase  *db = &(dbary[i]);
 
 			current_time = TimestampTzPlusMilliseconds(current_time,
 													   millis_increment);
@@ -1990,7 +1984,6 @@ do_autovacuum(void)
 	Form_pg_database dbForm;
 	List	   *tables_to_process = NIL;
 	List	   *orphan_oids = NIL;
-	HASHCTL		ctl;
 	HTAB	   *table_toast_map;
 	ListCell   *volatile cell;
 	BufferAccessStrategy bstrategy;
@@ -2063,13 +2056,9 @@ do_autovacuum(void)
 	pg_class_desc = CreateTupleDescCopy(RelationGetDescr(classRel));
 
 	/* create hash table for toast <-> main relid mapping */
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(av_relation);
-
-	table_toast_map = hash_create("TOAST to main relid map",
-								  100,
-								  &ctl,
-								  HASH_ELEM | HASH_BLOBS);
+	table_toast_map = hash_make(av_relation, ar_toastrelid,
+								"TOAST to main relid map", 100,
+								.mcxt = TopMemoryContext);
 
 	/*
 	 * Scan pg_class to determine which tables to vacuum.
@@ -3666,7 +3655,6 @@ pg_stat_get_autovacuum_scores(PG_FUNCTION_ARGS)
 	HeapTuple	tup;
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	HTAB	   *table_toast_map;
-	HASHCTL		ctl;
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -3676,13 +3664,8 @@ pg_stat_get_autovacuum_scores(PG_FUNCTION_ARGS)
 	recentMulti = ReadNextMultiXactId();
 
 	/* create hash table for toast <-> main relid mapping */
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(av_relation);
-	ctl.hcxt = CurrentMemoryContext;
-	table_toast_map = hash_create("TOAST to main relid map",
-								  100,
-								  &ctl,
-								  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	table_toast_map = hash_make(av_relation, ar_toastrelid,
+								"TOAST to main relid map", 100);
 
 	/*
 	 * Do an initial pass over pg_class to collect the main relations'

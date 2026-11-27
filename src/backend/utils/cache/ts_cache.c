@@ -95,11 +95,8 @@ static void
 InvalidateTSCacheCallBack(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 {
 	HTAB	   *hash = (HTAB *) DatumGetPointer(arg);
-	HASH_SEQ_STATUS status;
-	TSAnyCacheEntry *entry;
 
-	hash_seq_init(&status, hash);
-	while ((entry = (TSAnyCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(TSAnyCacheEntry, entry, hash)
 		entry->isvalid = false;
 
 	/* Also invalidate the current-config cache if it's pg_ts_config */
@@ -118,12 +115,9 @@ lookup_ts_parser_cache(Oid prsId)
 	if (TSParserCacheHash == NULL)
 	{
 		/* First time through: initialize the hash table */
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(TSParserCacheEntry);
-		TSParserCacheHash = hash_create("Tsearch parser cache", 4,
-										&ctl, HASH_ELEM | HASH_BLOBS);
+		TSParserCacheHash = hash_make(TSParserCacheEntry, prsId,
+									  "Tsearch parser cache", 4,
+									  .mcxt = TopMemoryContext);
 		/* Flush cache on pg_ts_parser changes */
 		CacheRegisterSyscacheCallback(TSPARSEROID, InvalidateTSCacheCallBack,
 									  PointerGetDatum(TSParserCacheHash));
@@ -213,12 +207,9 @@ lookup_ts_dictionary_cache(Oid dictId)
 	if (TSDictionaryCacheHash == NULL)
 	{
 		/* First time through: initialize the hash table */
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(TSDictionaryCacheEntry);
-		TSDictionaryCacheHash = hash_create("Tsearch dictionary cache", 8,
-											&ctl, HASH_ELEM | HASH_BLOBS);
+		TSDictionaryCacheHash = hash_make(TSDictionaryCacheEntry, dictId,
+										  "Tsearch dictionary cache", 8,
+										  .mcxt = TopMemoryContext);
 		/* Flush cache on pg_ts_dict and pg_ts_template changes */
 		CacheRegisterSyscacheCallback(TSDICTOID, InvalidateTSCacheCallBack,
 									  PointerGetDatum(TSDictionaryCacheHash));
@@ -377,12 +368,9 @@ lookup_ts_dictionary_cache(Oid dictId)
 static void
 init_ts_config_cache(void)
 {
-	HASHCTL		ctl;
-
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(TSConfigCacheEntry);
-	TSConfigCacheHash = hash_create("Tsearch configuration cache", 16,
-									&ctl, HASH_ELEM | HASH_BLOBS);
+	TSConfigCacheHash = hash_make(TSConfigCacheEntry, cfgId,
+								  "Tsearch configuration cache", 16,
+								  .mcxt = TopMemoryContext);
 	/* Flush cache on pg_ts_config and pg_ts_config_map changes */
 	CacheRegisterSyscacheCallback(TSCONFIGOID, InvalidateTSCacheCallBack,
 								  PointerGetDatum(TSConfigCacheHash));

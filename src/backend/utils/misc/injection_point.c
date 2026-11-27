@@ -131,16 +131,10 @@ injection_point_cache_add(const char *name,
 	/* If first time, initialize */
 	if (InjectionPointCache == NULL)
 	{
-		HASHCTL		hash_ctl;
-
-		hash_ctl.keysize = sizeof(char[INJ_NAME_MAXLEN]);
-		hash_ctl.entrysize = sizeof(InjectionPointCacheEntry);
-		hash_ctl.hcxt = TopMemoryContext;
-
-		InjectionPointCache = hash_create("InjectionPoint cache hash",
-										  MAX_INJECTION_POINTS,
-										  &hash_ctl,
-										  HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+		InjectionPointCache = hash_make(InjectionPointCacheEntry, name,
+										"InjectionPoint cache hash",
+										MAX_INJECTION_POINTS,
+										.mcxt = TopMemoryContext);
 	}
 
 	entry = (InjectionPointCacheEntry *)

@@ -524,13 +524,10 @@ _PG_init(void)
 static void
 pgss_shmem_request(void *arg)
 {
-	ShmemRequestHash(.name = "pg_stat_statements hash",
-					 .nelems = (int64) pgss_max,
-					 .hash_info.keysize = sizeof(pgssHashKey),
-					 .hash_info.entrysize = sizeof(pgssEntry),
-					 .hash_flags = HASH_ELEM | HASH_BLOBS,
-					 .ptr = &pgss_hash,
-		);
+	ShmemRequestHashMake(pgssEntry, key,
+						 .name = "pg_stat_statements hash",
+						 .nelems = (int64) pgss_max,
+						 .ptr = &pgss_hash);
 	ShmemRequestStruct(.name = "pg_stat_statements",
 					   .size = sizeof(pgssSharedState),
 					   .ptr = (void **) &pgss,
@@ -754,9 +751,7 @@ pgss_shmem_shutdown(int code, Datum arg)
 	FILE	   *file;
 	char	   *qbuffer = NULL;
 	Size		qbuffer_size = 0;
-	HASH_SEQ_STATUS hash_seq;
 	int64		num_entries;
-	pgssEntry  *entry;
 
 	/* Don't try to dump during a crash. */
 	if (code)
@@ -790,8 +785,7 @@ pgss_shmem_shutdown(int code, Datum arg)
 	 * When serializing to disk, we store query texts immediately after their
 	 * entry data.  Any orphaned query texts are thereby excluded.
 	 */
-	hash_seq_init(&hash_seq, pgss_hash);
-	while ((entry = hash_seq_search(&hash_seq)) != NULL)
+	foreach_hash(pgssEntry, entry, pgss_hash)
 	{
 		int			len = entry->query_len;
 		char	   *qstr = qtext_fetch(entry->query_offset, len,
@@ -803,8 +797,8 @@ pgss_shmem_shutdown(int code, Datum arg)
 		if (fwrite(entry, sizeof(pgssEntry), 1, file) != 1 ||
 			fwrite(qstr, 1, len + 1, file) != len + 1)
 		{
-			/* note: we assume hash_seq_term won't change errno */
-			hash_seq_term(&hash_seq);
+			/* note: we assume foreach_hash_term won't change errno */
+			foreach_hash_term(entry);
 			goto error;
 		}
 	}
@@ -1714,8 +1708,6 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 	Size		qbuffer_size = 0;
 	Size		extent = 0;
 	int			gc_count = 0;
-	HASH_SEQ_STATUS hash_seq;
-	pgssEntry  *entry;
 
 	/*
 	 * Superusers or roles with the privileges of pg_read_all_stats members
@@ -1845,8 +1837,7 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 		}
 	}
 
-	hash_seq_init(&hash_seq, pgss_hash);
-	while ((entry = hash_seq_search(&hash_seq)) != NULL)
+	foreach_hash(pgssEntry, entry, pgss_hash)
 	{
 		Datum		values[PG_STAT_STATEMENTS_COLS];
 		bool		nulls[PG_STAT_STATEMENTS_COLS];
@@ -2177,9 +2168,7 @@ entry_cmp(const void *lhs, const void *rhs)
 static void
 entry_dealloc(void)
 {
-	HASH_SEQ_STATUS hash_seq;
 	pgssEntry **entries;
-	pgssEntry  *entry;
 	int			nvictims;
 	int			i;
 	Size		tottextlen;
@@ -2203,8 +2192,7 @@ entry_dealloc(void)
 	tottextlen = 0;
 	nvalidtexts = 0;
 
-	hash_seq_init(&hash_seq, pgss_hash);
-	while ((entry = hash_seq_search(&hash_seq)) != NULL)
+	foreach_hash(pgssEntry, entry, pgss_hash)
 	{
 		entries[i++] = entry;
 		/* "Sticky" entries get a different usage decay rate. */
@@ -2516,8 +2504,6 @@ gc_qtexts(void)
 	char	   *qbuffer;
 	Size		qbuffer_size;
 	FILE	   *qfile = NULL;
-	HASH_SEQ_STATUS hash_seq;
-	pgssEntry  *entry;
 	Size		extent;
 	int			nentries;
 
@@ -2559,8 +2545,7 @@ gc_qtexts(void)
 	extent = 0;
 	nentries = 0;
 
-	hash_seq_init(&hash_seq, pgss_hash);
-	while ((entry = hash_seq_search(&hash_seq)) != NULL)
+	foreach_hash(pgssEntry, entry, pgss_hash)
 	{
 		int			query_len = entry->query_len;
 		char	   *qry = qtext_fetch(entry->query_offset,
@@ -2583,7 +2568,7 @@ gc_qtexts(void)
 					(errcode_for_file_access(),
 					 errmsg("could not write file \"%s\": %m",
 							PGSS_TEXT_FILE)));
-			hash_seq_term(&hash_seq);
+			foreach_hash_term(entry);
 			goto gc_fail;
 		}
 
@@ -2651,8 +2636,7 @@ gc_fail:
 	 * Since the contents of the external file are now uncertain, mark all
 	 * hashtable entries as having invalid texts.
 	 */
-	hash_seq_init(&hash_seq, pgss_hash);
-	while ((entry = hash_seq_search(&hash_seq)) != NULL)
+	foreach_hash(pgssEntry, entry, pgss_hash)
 	{
 		entry->query_offset = 0;
 		entry->query_len = -1;
@@ -2716,8 +2700,6 @@ if (e) { \
 static TimestampTz
 entry_reset(Oid userid, Oid dbid, int64 queryid, bool minmax_only)
 {
-	HASH_SEQ_STATUS hash_seq;
-	pgssEntry  *entry;
 	FILE	   *qfile;
 	int64		num_entries;
 	int64		num_remove = 0;
@@ -2737,6 +2719,8 @@ entry_reset(Oid userid, Oid dbid, int64 queryid, bool minmax_only)
 	if (userid != 0 && dbid != 0 && queryid != INT64CONST(0))
 	{
 		/* If all the parameters are available, use the fast path. */
+		pgssEntry  *entry;
+
 		memset(&key, 0, sizeof(pgssHashKey));
 		key.userid = userid;
 		key.dbid = dbid;
@@ -2760,8 +2744,7 @@ entry_reset(Oid userid, Oid dbid, int64 queryid, bool minmax_only)
 	else if (userid != 0 || dbid != 0 || queryid != INT64CONST(0))
 	{
 		/* Reset entries corresponding to valid parameters. */
-		hash_seq_init(&hash_seq, pgss_hash);
-		while ((entry = hash_seq_search(&hash_seq)) != NULL)
+		foreach_hash(pgssEntry, entry, pgss_hash)
 		{
 			if ((!userid || entry->key.userid == userid) &&
 				(!dbid || entry->key.dbid == dbid) &&
@@ -2774,8 +2757,7 @@ entry_reset(Oid userid, Oid dbid, int64 queryid, bool minmax_only)
 	else
 	{
 		/* Reset all entries. */
-		hash_seq_init(&hash_seq, pgss_hash);
-		while ((entry = hash_seq_search(&hash_seq)) != NULL)
+		foreach_hash(pgssEntry, entry, pgss_hash)
 		{
 			SINGLE_ENTRY_RESET(entry);
 		}

@@ -488,16 +488,10 @@ pa_allocate_worker(TransactionId xid)
 	/* First time through, initialize parallel apply worker state hashtable. */
 	if (!ParallelApplyTxnHash)
 	{
-		HASHCTL		ctl;
-
-		MemSet(&ctl, 0, sizeof(ctl));
-		ctl.keysize = sizeof(TransactionId);
-		ctl.entrysize = sizeof(ParallelApplyWorkerEntry);
-		ctl.hcxt = ApplyContext;
-
-		ParallelApplyTxnHash = hash_create("logical replication parallel apply workers hash",
-										   16, &ctl,
-										   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		ParallelApplyTxnHash = hash_make(ParallelApplyWorkerEntry, xid,
+										 "logical replication parallel apply workers hash",
+										 16,
+										 .mcxt = ApplyContext);
 	}
 
 	/* Create an entry for the requested transaction. */

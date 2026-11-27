@@ -149,8 +149,6 @@ compute_tsvector_stats(VacAttrStats *stats,
 
 	/* This is D from the LC algorithm. */
 	HTAB	   *lexemes_tab;
-	HASHCTL		hash_ctl;
-	HASH_SEQ_STATUS scan_status;
 
 	/* This is the current bucket number from the LC algorithm */
 	int			b_current;
@@ -180,15 +178,10 @@ compute_tsvector_stats(VacAttrStats *stats,
 	 * worry about overflowing the initial size. Also we don't need to pay any
 	 * attention to locking and memory management.
 	 */
-	hash_ctl.keysize = sizeof(LexemeHashKey);
-	hash_ctl.entrysize = sizeof(TrackItem);
-	hash_ctl.hash = lexeme_hash;
-	hash_ctl.match = lexeme_match;
-	hash_ctl.hcxt = CurrentMemoryContext;
-	lexemes_tab = hash_create("Analyzed lexemes table",
-							  num_mcelem,
-							  &hash_ctl,
-							  HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
+	lexemes_tab = hash_make(TrackItem, key,
+							"Analyzed lexemes table", num_mcelem,
+							.hash = lexeme_hash,
+							.match = lexeme_match);
 
 	/* Initialize counters. */
 	b_current = 1;
@@ -295,7 +288,6 @@ compute_tsvector_stats(VacAttrStats *stats,
 		int			nonnull_cnt = samplerows - null_cnt;
 		int			i;
 		TrackItem **sort_table;
-		TrackItem  *item;
 		int			track_len;
 		int			cutoff_freq;
 		int			minfreq,
@@ -322,10 +314,9 @@ compute_tsvector_stats(VacAttrStats *stats,
 		i = hash_get_num_entries(lexemes_tab);	/* surely enough space */
 		sort_table = palloc_array(TrackItem *, i);
 
-		hash_seq_init(&scan_status, lexemes_tab);
 		track_len = 0;
 		maxfreq = 0;
-		while ((item = (TrackItem *) hash_seq_search(&scan_status)) != NULL)
+		foreach_hash(TrackItem, item, lexemes_tab)
 		{
 			if (item->frequency > cutoff_freq)
 			{
@@ -469,11 +460,7 @@ compute_tsvector_stats(VacAttrStats *stats,
 static void
 prune_lexemes_hashtable(HTAB *lexemes_tab, int b_current)
 {
-	HASH_SEQ_STATUS scan_status;
-	TrackItem  *item;
-
-	hash_seq_init(&scan_status, lexemes_tab);
-	while ((item = (TrackItem *) hash_seq_search(&scan_status)) != NULL)
+	foreach_hash(TrackItem, item, lexemes_tab)
 	{
 		if (item->frequency + item->delta <= b_current)
 		{

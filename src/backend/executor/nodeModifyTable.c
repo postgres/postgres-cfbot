@@ -5470,15 +5470,9 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 #endif
 	if (nrels >= MT_NRELS_HASH)
 	{
-		HASHCTL		hash_ctl;
-
-		hash_ctl.keysize = sizeof(Oid);
-		hash_ctl.entrysize = sizeof(MTTargetRelLookup);
-		hash_ctl.hcxt = CurrentMemoryContext;
 		mtstate->mt_resultOidHash =
-			hash_create("ModifyTable target hash",
-						nrels, &hash_ctl,
-						HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+			hash_make(MTTargetRelLookup, relationOid,
+					  "ModifyTable target hash", nrels);
 		for (i = 0; i < nrels; i++)
 		{
 			Oid			hashkey;

@@ -626,19 +626,13 @@ static void
 build_join_rel_hash(PlannerInfo *root)
 {
 	HTAB	   *hashtab;
-	HASHCTL		hash_ctl;
 	ListCell   *l;
 
 	/* Create the hash table */
-	hash_ctl.keysize = sizeof(Relids);
-	hash_ctl.entrysize = sizeof(JoinHashEntry);
-	hash_ctl.hash = bitmap_hash;
-	hash_ctl.match = bitmap_match;
-	hash_ctl.hcxt = CurrentMemoryContext;
-	hashtab = hash_create("JoinRelHashTable",
-						  256L,
-						  &hash_ctl,
-						  HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
+	hashtab = hash_make(JoinHashEntry, join_relids,
+						"JoinRelHashTable", 256,
+						.hash = bitmap_hash,
+						.match = bitmap_match);
 
 	/* Insert all the already-existing joinrels */
 	foreach(l, root->join_rel_list)

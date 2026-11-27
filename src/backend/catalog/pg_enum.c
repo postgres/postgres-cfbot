@@ -267,15 +267,9 @@ EnumValuesDelete(Oid enumTypeOid)
 static void
 init_uncommitted_enum_types(void)
 {
-	HASHCTL		hash_ctl;
-
-	hash_ctl.keysize = sizeof(Oid);
-	hash_ctl.entrysize = sizeof(Oid);
-	hash_ctl.hcxt = TopTransactionContext;
-	uncommitted_enum_types = hash_create("Uncommitted enum types",
-										 32,
-										 &hash_ctl,
-										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	uncommitted_enum_types = hashset_make(Oid,
+										  "Uncommitted enum types", 32,
+										  .mcxt = TopTransactionContext);
 }
 
 /*
@@ -284,15 +278,9 @@ init_uncommitted_enum_types(void)
 static void
 init_uncommitted_enum_values(void)
 {
-	HASHCTL		hash_ctl;
-
-	hash_ctl.keysize = sizeof(Oid);
-	hash_ctl.entrysize = sizeof(Oid);
-	hash_ctl.hcxt = TopTransactionContext;
-	uncommitted_enum_values = hash_create("Uncommitted enum values",
-										  32,
-										  &hash_ctl,
-										  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	uncommitted_enum_values = hashset_make(Oid,
+										   "Uncommitted enum values", 32,
+										   .mcxt = TopTransactionContext);
 }
 
 /*
@@ -850,12 +838,10 @@ SerializeUncommittedEnums(void *space, Size size)
 	/* Write out all the OIDs from the types hash table, if there is one. */
 	if (uncommitted_enum_types)
 	{
-		HASH_SEQ_STATUS status;
-		Oid		   *value;
-
-		hash_seq_init(&status, uncommitted_enum_types);
-		while ((value = (Oid *) hash_seq_search(&status)))
+		foreach_hash(Oid, value, uncommitted_enum_types)
+		{
 			*serialized++ = *value;
+		}
 	}
 
 	/* Write out the terminator. */
@@ -864,12 +850,10 @@ SerializeUncommittedEnums(void *space, Size size)
 	/* Write out all the OIDs from the values hash table, if there is one. */
 	if (uncommitted_enum_values)
 	{
-		HASH_SEQ_STATUS status;
-		Oid		   *value;
-
-		hash_seq_init(&status, uncommitted_enum_values);
-		while ((value = (Oid *) hash_seq_search(&status)))
+		foreach_hash(Oid, value, uncommitted_enum_values)
+		{
 			*serialized++ = *value;
+		}
 	}
 
 	/* Write out the terminator. */

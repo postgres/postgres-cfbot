@@ -169,6 +169,7 @@
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
 #include "utils/guc_hooks.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/wait_event.h"
@@ -1087,14 +1088,11 @@ PredicateLockShmemRequest(void *arg)
 	 */
 	max_predicate_lock_targets = NPREDICATELOCKTARGETENTS();
 
-	ShmemRequestHash(.name = "PREDICATELOCKTARGET hash",
-					 .nelems = max_predicate_lock_targets,
-					 .ptr = &PredicateLockTargetHash,
-					 .hash_info.keysize = sizeof(PREDICATELOCKTARGETTAG),
-					 .hash_info.entrysize = sizeof(PREDICATELOCKTARGET),
-					 .hash_info.num_partitions = NUM_PREDICATELOCK_PARTITIONS,
-					 .hash_flags = HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_FIXED_SIZE,
-		);
+	ShmemRequestHashMake(PREDICATELOCKTARGET, tag,
+						 .name = "PREDICATELOCKTARGET hash",
+						 .nelems = max_predicate_lock_targets,
+						 .ptr = &PredicateLockTargetHash,
+						 .num_partitions = NUM_PREDICATELOCK_PARTITIONS);
 
 	/*
 	 * Allocate hash table for PREDICATELOCK structs.  This stores per
@@ -1104,15 +1102,12 @@ PredicateLockShmemRequest(void *arg)
 	 */
 	max_predicate_locks = max_predicate_lock_targets * 2;
 
-	ShmemRequestHash(.name = "PREDICATELOCK hash",
-					 .nelems = max_predicate_locks,
-					 .ptr = &PredicateLockHash,
-					 .hash_info.keysize = sizeof(PREDICATELOCKTAG),
-					 .hash_info.entrysize = sizeof(PREDICATELOCK),
-					 .hash_info.hash = predicatelock_hash,
-					 .hash_info.num_partitions = NUM_PREDICATELOCK_PARTITIONS,
-					 .hash_flags = HASH_ELEM | HASH_FUNCTION | HASH_PARTITION | HASH_FIXED_SIZE,
-		);
+	ShmemRequestHashMake(PREDICATELOCK, tag,
+						 .name = "PREDICATELOCK hash",
+						 .nelems = max_predicate_locks,
+						 .ptr = &PredicateLockHash,
+						 .hash = predicatelock_hash,
+						 .num_partitions = NUM_PREDICATELOCK_PARTITIONS);
 
 	/*
 	 * Compute size for serializable transaction hashtable.
@@ -1138,13 +1133,10 @@ PredicateLockShmemRequest(void *arg)
 	 * Register hash table for SERIALIZABLEXID structs.  This stores per-xid
 	 * information for serializable transactions which have accessed data.
 	 */
-	ShmemRequestHash(.name = "SERIALIZABLEXID hash",
-					 .nelems = max_serializable_xacts,
-					 .ptr = &SerializableXidHash,
-					 .hash_info.keysize = sizeof(SERIALIZABLEXIDTAG),
-					 .hash_info.entrysize = sizeof(SERIALIZABLEXID),
-					 .hash_flags = HASH_ELEM | HASH_BLOBS | HASH_FIXED_SIZE,
-		);
+	ShmemRequestHashMake(SERIALIZABLEXID, tag,
+						 .name = "SERIALIZABLEXID hash",
+						 .nelems = max_serializable_xacts,
+						 .ptr = &SerializableXidHash);
 
 	/*
 	 * Allocate space for tracking rw-conflicts in lists attached to the
@@ -1338,8 +1330,6 @@ GetPredicateLockStatusData(void)
 	int			i;
 	int			els,
 				el;
-	HASH_SEQ_STATUS seqstat;
-	PREDICATELOCK *predlock;
 
 	data = palloc_object(PredicateLockData);
 
@@ -1359,11 +1349,9 @@ GetPredicateLockStatusData(void)
 
 
 	/* Scan through PredicateLockHash and copy contents */
-	hash_seq_init(&seqstat, PredicateLockHash);
-
 	el = 0;
 
-	while ((predlock = (PREDICATELOCK *) hash_seq_search(&seqstat)))
+	foreach_hash(PREDICATELOCK, predlock, PredicateLockHash)
 	{
 		data->locktags[el] = predlock->tag.myTarget->tag;
 		data->xacts[el] = *predlock->tag.myXact;
@@ -1827,16 +1815,12 @@ GetSerializableTransactionSnapshotInt(Snapshot snapshot,
 static void
 CreateLocalPredicateLockHash(void)
 {
-	HASHCTL		hash_ctl;
-
 	/* Initialize the backend-local hash table of parent locks */
 	Assert(LocalPredicateLockHash == NULL);
-	hash_ctl.keysize = sizeof(PREDICATELOCKTARGETTAG);
-	hash_ctl.entrysize = sizeof(LOCALPREDICATELOCK);
-	LocalPredicateLockHash = hash_create("Local predicate lock",
-										 max_predicate_locks_per_xact,
-										 &hash_ctl,
-										 HASH_ELEM | HASH_BLOBS);
+	LocalPredicateLockHash = hash_make(LOCALPREDICATELOCK, tag,
+									   "Local predicate lock",
+									   max_predicate_locks_per_xact,
+									   .mcxt = TopMemoryContext);
 }
 
 /*
@@ -2785,8 +2769,6 @@ exit:
 static void
 DropAllPredicateLocksFromTable(Relation relation, bool transfer)
 {
-	HASH_SEQ_STATUS seqstat;
-	PREDICATELOCKTARGET *oldtarget;
 	PREDICATELOCKTARGET *heaptarget;
 	Oid			dbId;
 	Oid			relId;
@@ -2842,9 +2824,7 @@ DropAllPredicateLocksFromTable(Relation relation, bool transfer)
 		RemoveScratchTarget(true);
 
 	/* Scan through target map */
-	hash_seq_init(&seqstat, PredicateLockTargetHash);
-
-	while ((oldtarget = (PREDICATELOCKTARGET *) hash_seq_search(&seqstat)))
+	foreach_hash(PREDICATELOCKTARGET, oldtarget, PredicateLockTargetHash)
 	{
 		dlist_mutable_iter iter;
 
@@ -4267,8 +4247,6 @@ CheckForSerializableConflictIn(Relation relation, const ItemPointerData *tid, Bl
 void
 CheckTableForSerializableConflictIn(Relation relation)
 {
-	HASH_SEQ_STATUS seqstat;
-	PREDICATELOCKTARGET *target;
 	Oid			dbId;
 	Oid			heapId;
 	int			i;
@@ -4302,9 +4280,7 @@ CheckTableForSerializableConflictIn(Relation relation)
 	LWLockAcquire(SerializableXactHashLock, LW_EXCLUSIVE);
 
 	/* Scan through target list */
-	hash_seq_init(&seqstat, PredicateLockTargetHash);
-
-	while ((target = (PREDICATELOCKTARGET *) hash_seq_search(&seqstat)))
+	foreach_hash(PREDICATELOCKTARGET, target, PredicateLockTargetHash)
 	{
 		dlist_mutable_iter iter;
 

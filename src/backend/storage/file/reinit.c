@@ -175,7 +175,6 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 	if ((op & UNLOGGED_RELATION_CLEANUP) != 0)
 	{
 		HTAB	   *hash;
-		HASHCTL		ctl;
 
 		/*
 		 * It's possible that someone could create a ton of unlogged relations
@@ -184,11 +183,8 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 		 * need to be reset.  Otherwise, this cleanup operation would be
 		 * O(n^2).
 		 */
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(unlogged_relation_entry);
-		ctl.hcxt = CurrentMemoryContext;
-		hash = hash_create("unlogged relation OIDs", 32, &ctl,
-						   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		hash = hash_make(unlogged_relation_entry, relnumber,
+						 "unlogged relation OIDs", 32);
 
 		/* Scan the directory. */
 		dbspace_dir = AllocateDir(dbspacedirname);

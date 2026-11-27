@@ -2207,19 +2207,9 @@ ExecuteTruncateGuts(List *explicit_rels,
 
 			/* First time through, initialize hashtable for foreign tables */
 			if (!ft_htab)
-			{
-				HASHCTL		hctl;
-
-				memset(&hctl, 0, sizeof(HASHCTL));
-				hctl.keysize = sizeof(Oid);
-				hctl.entrysize = sizeof(ForeignTruncateInfo);
-				hctl.hcxt = CurrentMemoryContext;
-
-				ft_htab = hash_create("TRUNCATE for Foreign Tables",
-									  32,	/* start small and extend */
-									  &hctl,
-									  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-			}
+				ft_htab = hash_make(ForeignTruncateInfo, serverid,
+									"TRUNCATE for Foreign Tables",
+									32);	/* start small and extend */
 
 			/* Find or create cached entry for the foreign table */
 			ft_info = hash_search(ft_htab, &serverid, HASH_ENTER, &found);
@@ -2299,14 +2289,9 @@ ExecuteTruncateGuts(List *explicit_rels,
 	/* Now go through the hash table, and truncate foreign tables */
 	if (ft_htab)
 	{
-		ForeignTruncateInfo *ft_info;
-		HASH_SEQ_STATUS seq;
-
-		hash_seq_init(&seq, ft_htab);
-
 		PG_TRY();
 		{
-			while ((ft_info = hash_seq_search(&seq)) != NULL)
+			foreach_hash(ForeignTruncateInfo, ft_info, ft_htab)
 			{
 				FdwRoutine *routine = GetFdwRoutineByServerId(ft_info->serverid);
 
@@ -7034,18 +7019,10 @@ void
 find_composite_type_dependencies(Oid typeOid, Relation origRelation,
 								 const char *origTypeName)
 {
-	HASHCTL		hctl;
 	HTAB	   *visited;
 
-	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize = sizeof(Oid);
-	hctl.entrysize = sizeof(Oid);
-	hctl.hcxt = CurrentMemoryContext;
-
-	visited = hash_create("visited types",
-						  32,	/* start small and extend */
-						  &hctl,
-						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	visited = hashset_make(Oid, "visited types",
+						   32); /* start small and extend */
 
 	find_composite_type_dependencies_recurse(typeOid, origRelation, origTypeName,
 											 visited);

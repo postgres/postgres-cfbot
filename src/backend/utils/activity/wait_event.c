@@ -106,21 +106,14 @@ WaitEventCustomShmemRequest(void *arg)
 					   .size = sizeof(int),
 					   .ptr = (void **) &WaitEventCustomCounter,
 		);
-	ShmemRequestHash(.name = "WaitEventCustom hash by wait event information",
-					 .ptr = &WaitEventCustomHashByInfo,
-					 .nelems = WAIT_EVENT_CUSTOM_HASH_SIZE,
-					 .hash_info.keysize = sizeof(uint32),
-					 .hash_info.entrysize = sizeof(WaitEventCustomEntryByInfo),
-					 .hash_flags = HASH_ELEM | HASH_BLOBS,
-		);
-	ShmemRequestHash(.name = "WaitEventCustom hash by name",
-					 .ptr = &WaitEventCustomHashByName,
-					 .nelems = WAIT_EVENT_CUSTOM_HASH_SIZE,
-	/* key is a NULL-terminated string */
-					 .hash_info.keysize = sizeof(char[NAMEDATALEN]),
-					 .hash_info.entrysize = sizeof(WaitEventCustomEntryByName),
-					 .hash_flags = HASH_ELEM | HASH_STRINGS,
-		);
+	ShmemRequestHashMake(WaitEventCustomEntryByInfo, wait_event_info,
+						 .name = "WaitEventCustom hash by wait event information",
+						 .ptr = &WaitEventCustomHashByInfo,
+						 .nelems = WAIT_EVENT_CUSTOM_HASH_SIZE);
+	ShmemRequestHashMake(WaitEventCustomEntryByName, wait_event_name,
+						 .name = "WaitEventCustom hash by name",
+						 .ptr = &WaitEventCustomHashByName,
+						 .nelems = WAIT_EVENT_CUSTOM_HASH_SIZE);
 }
 
 static void
@@ -276,8 +269,6 @@ char	  **
 GetWaitEventCustomNames(uint32 classId, int *nwaitevents)
 {
 	char	  **waiteventnames;
-	WaitEventCustomEntryByName *hentry;
-	HASH_SEQ_STATUS hash_seq;
 	int			index;
 	int			els;
 
@@ -290,10 +281,8 @@ GetWaitEventCustomNames(uint32 classId, int *nwaitevents)
 	waiteventnames = palloc_array(char *, els);
 
 	/* Now scan the hash table to copy the data */
-	hash_seq_init(&hash_seq, WaitEventCustomHashByName);
-
 	index = 0;
-	while ((hentry = (WaitEventCustomEntryByName *) hash_seq_search(&hash_seq)) != NULL)
+	foreach_hash(WaitEventCustomEntryByName, hentry, WaitEventCustomHashByName)
 	{
 		if ((hentry->wait_event_info & WAIT_EVENT_CLASS_MASK) != classId)
 			continue;

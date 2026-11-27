@@ -51,14 +51,10 @@ typedef struct
 static void
 RelfilenumberMapInvalidateCallback(Datum arg, Oid relid)
 {
-	HASH_SEQ_STATUS status;
-	RelfilenumberMapEntry *entry;
-
 	/* callback only gets registered after creating the hash */
 	Assert(RelfilenumberMapHash != NULL);
 
-	hash_seq_init(&status, RelfilenumberMapHash);
-	while ((entry = (RelfilenumberMapEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(RelfilenumberMapEntry, entry, RelfilenumberMapHash)
 	{
 		/*
 		 * If relid is InvalidOid, signaling a complete reset, we must remove
@@ -85,7 +81,6 @@ RelfilenumberMapInvalidateCallback(Datum arg, Oid relid)
 static void
 InitializeRelfilenumberMap(void)
 {
-	HASHCTL		ctl;
 	int			i;
 
 	/* Make sure we've initialized CacheMemoryContext. */
@@ -113,13 +108,10 @@ InitializeRelfilenumberMap(void)
 	 * initialized when fmgr_info_cxt() above ERRORs out with an out of memory
 	 * error.
 	 */
-	ctl.keysize = sizeof(RelfilenumberMapKey);
-	ctl.entrysize = sizeof(RelfilenumberMapEntry);
-	ctl.hcxt = CacheMemoryContext;
-
 	RelfilenumberMapHash =
-		hash_create("RelfilenumberMap cache", 64, &ctl,
-					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		hash_make(RelfilenumberMapEntry, key,
+				  "RelfilenumberMap cache", 64,
+				  .mcxt = CacheMemoryContext);
 
 	/* Watch for invalidation events. */
 	CacheRegisterRelcacheCallback(RelfilenumberMapInvalidateCallback,

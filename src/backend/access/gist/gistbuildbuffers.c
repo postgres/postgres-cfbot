@@ -44,7 +44,6 @@ GISTBuildBuffers *
 gistInitBuildBuffers(int pagesPerBuffer, int levelStep, int maxLevel)
 {
 	GISTBuildBuffers *gfbb;
-	HASHCTL		hashCtl;
 
 	gfbb = palloc_object(GISTBuildBuffers);
 	gfbb->pagesPerBuffer = pagesPerBuffer;
@@ -72,13 +71,8 @@ gistInitBuildBuffers(int pagesPerBuffer, int levelStep, int maxLevel)
 	 * nodeBuffersTab hash is association between index blocks and it's
 	 * buffers.
 	 */
-	hashCtl.keysize = sizeof(BlockNumber);
-	hashCtl.entrysize = sizeof(GISTNodeBuffer);
-	hashCtl.hcxt = CurrentMemoryContext;
-	gfbb->nodeBuffersTab = hash_create("gistbuildbuffers",
-									   1024,
-									   &hashCtl,
-									   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	gfbb->nodeBuffersTab = hash_make(GISTNodeBuffer, nodeBlocknum,
+									 "gistbuildbuffers", 1024);
 
 	gfbb->bufferEmptyingQueue = NIL;
 

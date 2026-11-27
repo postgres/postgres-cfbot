@@ -32,6 +32,7 @@
 #include "storage/standby.h"
 #include "utils/hsearch.h"
 #include "utils/injection_point.h"
+#include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
@@ -96,7 +97,6 @@ void
 InitRecoveryTransactionEnvironment(void)
 {
 	VirtualTransactionId vxid;
-	HASHCTL		hash_ctl;
 
 	Assert(RecoveryLockHash == NULL);	/* don't run this twice */
 
@@ -104,18 +104,12 @@ InitRecoveryTransactionEnvironment(void)
 	 * Initialize the hash tables for tracking the locks held by each
 	 * transaction.
 	 */
-	hash_ctl.keysize = sizeof(xl_standby_lock);
-	hash_ctl.entrysize = sizeof(RecoveryLockEntry);
-	RecoveryLockHash = hash_create("RecoveryLockHash",
-								   64,
-								   &hash_ctl,
-								   HASH_ELEM | HASH_BLOBS);
-	hash_ctl.keysize = sizeof(TransactionId);
-	hash_ctl.entrysize = sizeof(RecoveryLockXidEntry);
-	RecoveryLockXidHash = hash_create("RecoveryLockXidHash",
-									  64,
-									  &hash_ctl,
-									  HASH_ELEM | HASH_BLOBS);
+	RecoveryLockHash = hash_make(RecoveryLockEntry, key,
+								 "RecoveryLockHash", 64,
+								 .mcxt = TopMemoryContext);
+	RecoveryLockXidHash = hash_make(RecoveryLockXidEntry, xid,
+									"RecoveryLockXidHash", 64,
+									.mcxt = TopMemoryContext);
 
 	/*
 	 * Initialize shared invalidation management for Startup process, being
@@ -1107,13 +1101,9 @@ StandbyReleaseLockTree(TransactionId xid, int nsubxids, TransactionId *subxids)
 void
 StandbyReleaseAllLocks(void)
 {
-	HASH_SEQ_STATUS status;
-	RecoveryLockXidEntry *entry;
-
 	elog(DEBUG2, "release all standby locks");
 
-	hash_seq_init(&status, RecoveryLockXidHash);
-	while ((entry = hash_seq_search(&status)))
+	foreach_hash(RecoveryLockXidEntry, entry, RecoveryLockXidHash)
 	{
 		StandbyReleaseXidEntryLocks(entry);
 		hash_search(RecoveryLockXidHash, entry, HASH_REMOVE, NULL);
@@ -1131,11 +1121,7 @@ StandbyReleaseAllLocks(void)
 void
 StandbyReleaseOldLocks(TransactionId oldxid)
 {
-	HASH_SEQ_STATUS status;
-	RecoveryLockXidEntry *entry;
-
-	hash_seq_init(&status, RecoveryLockXidHash);
-	while ((entry = hash_seq_search(&status)))
+	foreach_hash(RecoveryLockXidEntry, entry, RecoveryLockXidHash)
 	{
 		Assert(TransactionIdIsValid(entry->xid));
 

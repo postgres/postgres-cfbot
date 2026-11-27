@@ -89,7 +89,6 @@ static SeqTableData *last_used_seq = NULL;
 static void fill_seq_with_data(Relation rel, HeapTuple tuple);
 static void fill_seq_fork_with_data(Relation rel, HeapTuple tuple, ForkNumber forkNum);
 static Relation lock_and_open_sequence(SeqTable seq);
-static void create_seq_hashtable(void);
 static void init_sequence(Oid relid, SeqTable *p_elm, Relation *p_rel);
 static Form_pg_sequence_data read_seq_tuple(Relation rel,
 											Buffer *buf, HeapTuple seqdatatuple);
@@ -1120,21 +1119,6 @@ lock_and_open_sequence(SeqTable seq)
 }
 
 /*
- * Creates the hash table for storing sequence data
- */
-static void
-create_seq_hashtable(void)
-{
-	HASHCTL		ctl;
-
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(SeqTableData);
-
-	seqhashtab = hash_create("Sequence values", 16, &ctl,
-							 HASH_ELEM | HASH_BLOBS);
-}
-
-/*
  * Given a relation OID, open and lock the sequence.  p_elm and p_rel are
  * output parameters.
  */
@@ -1147,7 +1131,9 @@ init_sequence(Oid relid, SeqTable *p_elm, Relation *p_rel)
 
 	/* Find or create a hash table entry for this sequence */
 	if (seqhashtab == NULL)
-		create_seq_hashtable();
+		seqhashtab = hash_make(SeqTableData, relid,
+							"Sequence values", 16,
+							.mcxt = TopMemoryContext);
 
 	elm = (SeqTable) hash_search(seqhashtab, &relid, HASH_ENTER, &found);
 

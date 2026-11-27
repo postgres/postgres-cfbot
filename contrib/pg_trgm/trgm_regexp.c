@@ -895,7 +895,6 @@ convertPgWchar(pg_wchar c, trgm_mb_char *result)
 static void
 transformGraph(TrgmNFA *trgmNFA)
 {
-	HASHCTL		hashCtl;
 	TrgmStateKey initkey;
 	TrgmState  *initstate;
 	ListCell   *lc;
@@ -907,13 +906,7 @@ transformGraph(TrgmNFA *trgmNFA)
 	trgmNFA->overflowed = false;
 
 	/* Create hashtable for states */
-	hashCtl.keysize = sizeof(TrgmStateKey);
-	hashCtl.entrysize = sizeof(TrgmState);
-	hashCtl.hcxt = CurrentMemoryContext;
-	trgmNFA->states = hash_create("Trigram NFA",
-								  1024,
-								  &hashCtl,
-								  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	trgmNFA->states = hash_make(TrgmState, stateKey, "Trigram NFA", 1024);
 	trgmNFA->nstates = 0;
 
 	/* Create initial state: ambiguous prefix, NFA's initial state */
@@ -1458,10 +1451,8 @@ prefixContains(TrgmPrefix *prefix1, TrgmPrefix *prefix2)
 static bool
 selectColorTrigrams(TrgmNFA *trgmNFA)
 {
-	HASH_SEQ_STATUS scan_status;
 	int			arcsCount = trgmNFA->arcsCount,
 				i;
-	TrgmState  *state;
 	ColorTrgmInfo *colorTrgms;
 	int64		totalTrgmCount;
 	float4		totalTrgmPenalty;
@@ -1472,8 +1463,7 @@ selectColorTrigrams(TrgmNFA *trgmNFA)
 	trgmNFA->colorTrgms = colorTrgms;
 
 	i = 0;
-	hash_seq_init(&scan_status, trgmNFA->states);
-	while ((state = (TrgmState *) hash_seq_search(&scan_status)) != NULL)
+	foreach_hash(TrgmState, state, trgmNFA->states)
 	{
 		ListCell   *cell;
 
@@ -1935,8 +1925,6 @@ packGraph(TrgmNFA *trgmNFA, MemoryContext rcontext)
 	int			snumber = 2,
 				arcIndex,
 				arcsCount;
-	HASH_SEQ_STATUS scan_status;
-	TrgmState  *state;
 	TrgmPackArcInfo *arcs;
 	TrgmPackedArc *packedArcs;
 	TrgmPackedGraph *result;
@@ -1944,8 +1932,7 @@ packGraph(TrgmNFA *trgmNFA, MemoryContext rcontext)
 				j;
 
 	/* Enumerate surviving states, giving init and fin reserved numbers */
-	hash_seq_init(&scan_status, trgmNFA->states);
-	while ((state = (TrgmState *) hash_seq_search(&scan_status)) != NULL)
+	foreach_hash(TrgmState, state, trgmNFA->states)
 	{
 		while (state->parent)
 			state = state->parent;
@@ -1967,8 +1954,7 @@ packGraph(TrgmNFA *trgmNFA, MemoryContext rcontext)
 	/* Collect array of all arcs */
 	arcs = palloc_array(TrgmPackArcInfo, trgmNFA->arcsCount);
 	arcIndex = 0;
-	hash_seq_init(&scan_status, trgmNFA->states);
-	while ((state = (TrgmState *) hash_seq_search(&scan_status)) != NULL)
+	foreach_hash(TrgmState, state, trgmNFA->states)
 	{
 		TrgmState  *source = state;
 		ListCell   *cell;
@@ -2207,16 +2193,13 @@ static void
 printTrgmNFA(TrgmNFA *trgmNFA)
 {
 	StringInfoData buf;
-	HASH_SEQ_STATUS scan_status;
-	TrgmState  *state;
 	TrgmState  *initstate = NULL;
 
 	initStringInfo(&buf);
 
 	appendStringInfoString(&buf, "\ndigraph transformedNFA {\n");
 
-	hash_seq_init(&scan_status, trgmNFA->states);
-	while ((state = (TrgmState *) hash_seq_search(&scan_status)) != NULL)
+	foreach_hash(TrgmState, state, trgmNFA->states)
 	{
 		ListCell   *cell;
 

@@ -28,6 +28,7 @@
 #include "postgres_fdw.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
+#include "utils/memutils.h"
 #include "utils/syscache.h"
 
 /* Hash table for caching the results of shippability lookups */
@@ -65,17 +66,13 @@ static void
 InvalidateShippableCacheCallback(Datum arg, SysCacheIdentifier cacheid,
 								 uint32 hashvalue)
 {
-	HASH_SEQ_STATUS status;
-	ShippableCacheEntry *entry;
-
 	/*
 	 * In principle we could flush only cache entries relating to the
 	 * pg_foreign_server entry being outdated; but that would be more
 	 * complicated, and it's probably not worth the trouble.  So for now, just
 	 * flush all entries.
 	 */
-	hash_seq_init(&status, ShippableCacheHash);
-	while ((entry = (ShippableCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(ShippableCacheEntry, entry, ShippableCacheHash)
 	{
 		if (hash_search(ShippableCacheHash,
 						&entry->key,
@@ -91,13 +88,10 @@ InvalidateShippableCacheCallback(Datum arg, SysCacheIdentifier cacheid,
 static void
 InitializeShippableCache(void)
 {
-	HASHCTL		ctl;
-
 	/* Create the hash table. */
-	ctl.keysize = sizeof(ShippableCacheKey);
-	ctl.entrysize = sizeof(ShippableCacheEntry);
-	ShippableCacheHash =
-		hash_create("Shippability cache", 256, &ctl, HASH_ELEM | HASH_BLOBS);
+	ShippableCacheHash = hash_make(ShippableCacheEntry, key,
+								   "Shippability cache", 256,
+								   .mcxt = TopMemoryContext);
 
 	/* Set up invalidation callback on pg_foreign_server. */
 	CacheRegisterSyscacheCallback(FOREIGNSERVEROID,

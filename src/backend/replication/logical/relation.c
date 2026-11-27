@@ -64,25 +64,19 @@ static Oid	FindLogicalRepLocalIndex(Relation localrel, LogicalRepRelation *remot
 static void
 logicalrep_relmap_invalidate_cb(Datum arg, Oid reloid)
 {
-	LogicalRepRelMapEntry *entry;
-
 	/* Just to be sure. */
 	if (LogicalRepRelMap == NULL)
 		return;
 
 	if (reloid != InvalidOid)
 	{
-		HASH_SEQ_STATUS status;
-
-		hash_seq_init(&status, LogicalRepRelMap);
-
 		/* TODO, use inverse lookup hashtable? */
-		while ((entry = (LogicalRepRelMapEntry *) hash_seq_search(&status)) != NULL)
+		foreach_hash(LogicalRepRelMapEntry, entry, LogicalRepRelMap)
 		{
 			if (entry->localreloid == reloid)
 			{
 				entry->localrelvalid = false;
-				hash_seq_term(&status);
+				foreach_hash_term(entry);
 				break;
 			}
 		}
@@ -90,11 +84,7 @@ logicalrep_relmap_invalidate_cb(Datum arg, Oid reloid)
 	else
 	{
 		/* invalidate all cache entries */
-		HASH_SEQ_STATUS status;
-
-		hash_seq_init(&status, LogicalRepRelMap);
-
-		while ((entry = (LogicalRepRelMapEntry *) hash_seq_search(&status)) != NULL)
+		foreach_hash(LogicalRepRelMapEntry, entry, LogicalRepRelMap)
 			entry->localrelvalid = false;
 	}
 }
@@ -105,8 +95,6 @@ logicalrep_relmap_invalidate_cb(Datum arg, Oid reloid)
 static void
 logicalrep_relmap_init(void)
 {
-	HASHCTL		ctl;
-
 	if (!LogicalRepRelMapContext)
 		LogicalRepRelMapContext =
 			AllocSetContextCreate(CacheMemoryContext,
@@ -114,12 +102,9 @@ logicalrep_relmap_init(void)
 								  ALLOCSET_DEFAULT_SIZES);
 
 	/* Initialize the relation hash table. */
-	ctl.keysize = sizeof(LogicalRepRelId);
-	ctl.entrysize = sizeof(LogicalRepRelMapEntry);
-	ctl.hcxt = LogicalRepRelMapContext;
-
-	LogicalRepRelMap = hash_create("logicalrep relation map cache", 128, &ctl,
-								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	LogicalRepRelMap = hash_make(LogicalRepRelMapEntry, remoterel.remoteid,
+								 "logicalrep relation map cache", 128,
+								 .mcxt = LogicalRepRelMapContext);
 
 	/* Watch for invalidation events. */
 	CacheRegisterRelcacheCallback(logicalrep_relmap_invalidate_cb,
@@ -535,14 +520,14 @@ logicalrep_rel_close(LogicalRepRelMapEntry *rel, LOCKMODE lockmode)
 static void
 logicalrep_partmap_invalidate_cb(Datum arg, Oid reloid)
 {
-	LogicalRepPartMapEntry *entry;
-
 	/* Just to be sure. */
 	if (LogicalRepPartMap == NULL)
 		return;
 
 	if (reloid != InvalidOid)
 	{
+		LogicalRepPartMapEntry *entry;
+
 		/*
 		 * LogicalRepPartMap is keyed by partition OID, matching with
 		 * entry->relmapentry.localreloid (see logicalrep_partition_open), so
@@ -555,11 +540,7 @@ logicalrep_partmap_invalidate_cb(Datum arg, Oid reloid)
 	else
 	{
 		/* invalidate all cache entries */
-		HASH_SEQ_STATUS status;
-
-		hash_seq_init(&status, LogicalRepPartMap);
-
-		while ((entry = (LogicalRepPartMapEntry *) hash_seq_search(&status)) != NULL)
+		foreach_hash(LogicalRepPartMapEntry, entry, LogicalRepPartMap)
 			entry->relmapentry.localrelvalid = false;
 	}
 }
@@ -577,15 +558,12 @@ logicalrep_partmap_invalidate_cb(Datum arg, Oid reloid)
 void
 logicalrep_partmap_reset_relmap(LogicalRepRelation *remoterel)
 {
-	HASH_SEQ_STATUS status;
-	LogicalRepPartMapEntry *part_entry;
 	LogicalRepRelMapEntry *entry;
 
 	if (LogicalRepPartMap == NULL)
 		return;
 
-	hash_seq_init(&status, LogicalRepPartMap);
-	while ((part_entry = (LogicalRepPartMapEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(LogicalRepPartMapEntry, part_entry, LogicalRepPartMap)
 	{
 		entry = &part_entry->relmapentry;
 
@@ -604,8 +582,6 @@ logicalrep_partmap_reset_relmap(LogicalRepRelation *remoterel)
 static void
 logicalrep_partmap_init(void)
 {
-	HASHCTL		ctl;
-
 	if (!LogicalRepPartMapContext)
 		LogicalRepPartMapContext =
 			AllocSetContextCreate(CacheMemoryContext,
@@ -613,12 +589,9 @@ logicalrep_partmap_init(void)
 								  ALLOCSET_DEFAULT_SIZES);
 
 	/* Initialize the relation hash table. */
-	ctl.keysize = sizeof(Oid);	/* partition OID */
-	ctl.entrysize = sizeof(LogicalRepPartMapEntry);
-	ctl.hcxt = LogicalRepPartMapContext;
-
-	LogicalRepPartMap = hash_create("logicalrep partition map cache", 64, &ctl,
-									HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	LogicalRepPartMap = hash_make(LogicalRepPartMapEntry, partoid,
+								  "logicalrep partition map cache", 64,
+								  .mcxt = LogicalRepPartMapContext);
 
 	/* Watch for invalidation events. */
 	CacheRegisterRelcacheCallback(logicalrep_partmap_invalidate_cb,

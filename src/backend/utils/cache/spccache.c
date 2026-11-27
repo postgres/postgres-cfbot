@@ -27,6 +27,7 @@
 #include "utils/catcache.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
+#include "utils/memutils.h"
 #include "utils/spccache.h"
 #include "utils/syscache.h"
 #include "varatt.h"
@@ -55,11 +56,7 @@ static void
 InvalidateTableSpaceCacheCallback(Datum arg, SysCacheIdentifier cacheid,
 								  uint32 hashvalue)
 {
-	HASH_SEQ_STATUS status;
-	TableSpaceCacheEntry *spc;
-
-	hash_seq_init(&status, TableSpaceCacheHash);
-	while ((spc = (TableSpaceCacheEntry *) hash_seq_search(&status)) != NULL)
+	foreach_hash(TableSpaceCacheEntry, spc, TableSpaceCacheHash)
 	{
 		if (spc->opts)
 			pfree(spc->opts);
@@ -78,14 +75,11 @@ InvalidateTableSpaceCacheCallback(Datum arg, SysCacheIdentifier cacheid,
 static void
 InitializeTableSpaceCache(void)
 {
-	HASHCTL		ctl;
-
 	/* Initialize the hash table. */
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(TableSpaceCacheEntry);
 	TableSpaceCacheHash =
-		hash_create("TableSpace cache", 16, &ctl,
-					HASH_ELEM | HASH_BLOBS);
+		hash_make(TableSpaceCacheEntry, oid,
+				  "TableSpace cache", 16,
+				  .mcxt = TopMemoryContext);
 
 	/* Make sure we've initialized CacheMemoryContext. */
 	if (!CacheMemoryContext)

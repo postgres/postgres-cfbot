@@ -1413,14 +1413,11 @@ PG_FUNCTION_INFO_V1(dblink_get_connections);
 Datum
 dblink_get_connections(PG_FUNCTION_ARGS)
 {
-	HASH_SEQ_STATUS status;
-	remoteConnHashEnt *hentry;
 	ArrayBuildState *astate = NULL;
 
 	if (remoteConnHash)
 	{
-		hash_seq_init(&status, remoteConnHash);
-		while ((hentry = (remoteConnHashEnt *) hash_seq_search(&status)) != NULL)
+		foreach_hash(remoteConnHashEnt, hentry, remoteConnHash)
 		{
 			/* ignore it if it's not an open connection */
 			if (hentry->rconn.conn == NULL)
@@ -2693,13 +2690,9 @@ getConnectionByName(const char *name)
 static HTAB *
 createConnHash(void)
 {
-	HASHCTL		ctl;
-
-	ctl.keysize = NAMEDATALEN;
-	ctl.entrysize = sizeof(remoteConnHashEnt);
-
-	return hash_create("Remote Con hash", NUMCONN, &ctl,
-					   HASH_ELEM | HASH_STRINGS);
+	return hash_make(remoteConnHashEnt, name,
+					 "Remote Con hash", NUMCONN,
+					 .mcxt = TopMemoryContext);
 }
 
 static remoteConn *

@@ -750,21 +750,15 @@ initGlobalChannelTable(void)
 static void
 initLocalChannelTable(void)
 {
-	HASHCTL		hash_ctl;
-
 	/* Quick exit if we already did this */
 	if (localChannelTable != NULL)
 		return;
 
 	/* Initialize local hash table for this backend's listened channels */
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(ChannelName);
-
 	localChannelTable =
-		hash_create("Local Listen Channels",
-					64,
-					&hash_ctl,
-					HASH_ELEM | HASH_STRINGS);
+		hash_make(ChannelName, channel, "Local Listen Channels",
+				  64,
+				  .mcxt = TopMemoryContext);
 }
 
 /*
@@ -776,20 +770,13 @@ initLocalChannelTable(void)
 static void
 initPendingListenActions(void)
 {
-	HASHCTL		hash_ctl;
-
 	if (pendingListenActions != NULL)
 		return;
 
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(PendingListenEntry);
-	hash_ctl.hcxt = CurTransactionContext;
-
 	pendingListenActions =
-		hash_create("Pending Listen Actions",
-					list_length(pendingActions->actions),
-					&hash_ctl,
-					HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+		hash_make(PendingListenEntry, channel, "Pending Listen Actions",
+				  list_length(pendingActions->actions),
+				  .mcxt = CurTransactionContext);
 }
 
 /*
@@ -1103,11 +1090,7 @@ pg_listening_channels(PG_FUNCTION_ARGS)
 	 */
 	if (localChannelTable != NULL)
 	{
-		HASH_SEQ_STATUS status;
-		ChannelName *channelEntry;
-
-		hash_seq_init(&status, localChannelTable);
-		while ((channelEntry = (ChannelName *) hash_seq_search(&status)) != NULL)
+		foreach_hash(ChannelName, channelEntry, localChannelTable)
 		{
 			Datum		values[1];
 			bool		nulls[1];
@@ -1225,14 +1208,10 @@ PreCommit_Notify(void)
 		pendingNotifies->uniqueChannelNames = NIL;
 		if (pendingNotifies->uniqueChannelHash != NULL)
 		{
-			HASH_SEQ_STATUS status;
-			ChannelName *channelEntry;
-
-			hash_seq_init(&status, pendingNotifies->uniqueChannelHash);
-			while ((channelEntry = (ChannelName *) hash_seq_search(&status)) != NULL)
+			foreach_hash(ChannelName, channelEntry, pendingNotifies->uniqueChannelHash)
 				pendingNotifies->uniqueChannelNames =
-					lappend(pendingNotifies->uniqueChannelNames,
-							channelEntry->channel);
+				lappend(pendingNotifies->uniqueChannelNames,
+						channelEntry->channel);
 		}
 		else
 		{
@@ -1647,8 +1626,6 @@ PrepareTableEntriesForUnlisten(const char *channel)
 static void
 PrepareTableEntriesForUnlistenAll(void)
 {
-	HASH_SEQ_STATUS seq;
-	ChannelName *channelEntry;
 	PendingListenEntry *pending;
 
 	/*
@@ -1656,8 +1633,7 @@ PrepareTableEntriesForUnlistenAll(void)
 	 * we are listening on or have prepared to listen on.  Record an UNLISTEN
 	 * action for each one, overwriting any earlier attempt to LISTEN.
 	 */
-	hash_seq_init(&seq, localChannelTable);
-	while ((channelEntry = (ChannelName *) hash_seq_search(&seq)) != NULL)
+	foreach_hash(ChannelName, channelEntry, localChannelTable)
 	{
 		pending = (PendingListenEntry *)
 			hash_search(pendingListenActions, channelEntry->channel, HASH_ENTER, NULL);
@@ -1704,9 +1680,6 @@ RemoveListenerFromChannel(GlobalChannelEntry **entry_ptr,
 static void
 ApplyPendingListenActions(bool isCommit)
 {
-	HASH_SEQ_STATUS seq;
-	PendingListenEntry *pending;
-
 	/* Quick exit if nothing to do */
 	if (pendingListenActions == NULL)
 		return;
@@ -1716,8 +1689,7 @@ ApplyPendingListenActions(bool isCommit)
 		elog(PANIC, "global channel table missing post-commit/abort");
 
 	/* For each staged action ... */
-	hash_seq_init(&seq, pendingListenActions);
-	while ((pending = (PendingListenEntry *) hash_seq_search(&seq)) != NULL)
+	foreach_hash(PendingListenEntry, pending, pendingListenActions)
 	{
 		GlobalChannelKey key;
 		GlobalChannelEntry *entry;
@@ -3171,31 +3143,22 @@ AddEventToPendingNotifies(Notification *n)
 	if (list_length(pendingNotifies->events) >= MIN_HASHABLE_NOTIFIES &&
 		pendingNotifies->hashtab == NULL)
 	{
-		HASHCTL		hash_ctl;
 		ListCell   *l;
 
 		/* Create the hash table */
-		hash_ctl.keysize = sizeof(Notification *);
-		hash_ctl.entrysize = sizeof(struct NotificationHash);
-		hash_ctl.hash = notification_hash;
-		hash_ctl.match = notification_match;
-		hash_ctl.hcxt = CurTransactionContext;
 		pendingNotifies->hashtab =
-			hash_create("Pending Notifies",
-						256L,
-						&hash_ctl,
-						HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
+			hash_make(struct NotificationHash, event,
+					  "Pending Notifies", 256,
+					  .hash = notification_hash,
+					  .match = notification_match,
+					  .mcxt = CurTransactionContext);
 
 		/* Create the unique channel name table */
 		Assert(pendingNotifies->uniqueChannelHash == NULL);
-		hash_ctl.keysize = NAMEDATALEN;
-		hash_ctl.entrysize = sizeof(ChannelName);
-		hash_ctl.hcxt = CurTransactionContext;
 		pendingNotifies->uniqueChannelHash =
-			hash_create("Pending Notify Channel Names",
-						64L,
-						&hash_ctl,
-						HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+			hash_make(ChannelName, channel, "Pending Notify Channel Names",
+					  64L,
+					  .mcxt = CurTransactionContext);
 
 		/* Insert all the already-existing events */
 		foreach(l, pendingNotifies->events)
