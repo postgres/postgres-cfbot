@@ -21,6 +21,8 @@
 #include "utils/wait_event.h"
 
 static bool IsWalSummaryFilename(char *filename);
+static bool WalSummaryMatchesFilter(const WalSummaryFile *ws, TimeLineID tli,
+									XLogRecPtr start_lsn, XLogRecPtr end_lsn);
 static int	ListComparatorForWalSummaryFiles(const ListCell *a,
 											 const ListCell *b);
 
@@ -49,34 +51,26 @@ GetWalSummaries(TimeLineID tli, XLogRecPtr start_lsn, XLogRecPtr end_lsn)
 	sdir = AllocateDir(XLOGDIR "/summaries");
 	while ((dent = ReadDir(sdir, XLOGDIR "/summaries")) != NULL)
 	{
+		WalSummaryFile candidate;
 		WalSummaryFile *ws;
 		uint32		tmp[5];
-		TimeLineID	file_tli;
-		XLogRecPtr	file_start_lsn;
-		XLogRecPtr	file_end_lsn;
 
 		/* Decode filename, or skip if it's not in the expected format. */
 		if (!IsWalSummaryFilename(dent->d_name))
 			continue;
 		sscanf(dent->d_name, "%08X%08X%08X%08X%08X",
 			   &tmp[0], &tmp[1], &tmp[2], &tmp[3], &tmp[4]);
-		file_tli = tmp[0];
-		file_start_lsn = ((uint64) tmp[1]) << 32 | tmp[2];
-		file_end_lsn = ((uint64) tmp[3]) << 32 | tmp[4];
+		candidate.tli = tmp[0];
+		candidate.start_lsn = ((uint64) tmp[1]) << 32 | tmp[2];
+		candidate.end_lsn = ((uint64) tmp[3]) << 32 | tmp[4];
 
 		/* Skip if it doesn't match the filter criteria. */
-		if (tli != 0 && tli != file_tli)
-			continue;
-		if (XLogRecPtrIsValid(start_lsn) && start_lsn >= file_end_lsn)
-			continue;
-		if (XLogRecPtrIsValid(end_lsn) && end_lsn <= file_start_lsn)
+		if (!WalSummaryMatchesFilter(&candidate, tli, start_lsn, end_lsn))
 			continue;
 
 		/* Add it to the list. */
 		ws = palloc_object(WalSummaryFile);
-		ws->tli = file_tli;
-		ws->start_lsn = file_start_lsn;
-		ws->end_lsn = file_end_lsn;
+		*ws = candidate;
 		result = lappend(result, ws);
 	}
 	FreeDir(sdir);
@@ -109,11 +103,7 @@ FilterWalSummaries(List *wslist, TimeLineID tli,
 		WalSummaryFile *ws = lfirst(lc);
 
 		/* Skip if it doesn't match the filter criteria. */
-		if (tli != 0 && tli != ws->tli)
-			continue;
-		if (XLogRecPtrIsValid(start_lsn) && start_lsn >= ws->end_lsn)
-			continue;
-		if (XLogRecPtrIsValid(end_lsn) && end_lsn <= ws->start_lsn)
+		if (!WalSummaryMatchesFilter(ws, tli, start_lsn, end_lsn))
 			continue;
 
 		/* Add it to the result list. */
@@ -264,6 +254,27 @@ IsWalSummaryFilename(char *filename)
 {
 	return strspn(filename, "0123456789ABCDEF") == 40 &&
 		strcmp(filename + 40, ".summary") == 0;
+}
+
+/*
+ * Check whether a WAL summary matches the filter criteria used by
+ * GetWalSummaries() and FilterWalSummaries().
+ *
+ * A summary that ends exactly at start_lsn, or starts exactly at end_lsn,
+ * doesn't overlap the requested range, so it doesn't match.
+ */
+static bool
+WalSummaryMatchesFilter(const WalSummaryFile *ws, TimeLineID tli,
+						XLogRecPtr start_lsn, XLogRecPtr end_lsn)
+{
+	if (tli != 0 && tli != ws->tli)
+		return false;
+	if (XLogRecPtrIsValid(start_lsn) && start_lsn >= ws->end_lsn)
+		return false;
+	if (XLogRecPtrIsValid(end_lsn) && end_lsn <= ws->start_lsn)
+		return false;
+
+	return true;
 }
 
 /*
