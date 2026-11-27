@@ -1911,6 +1911,13 @@
   check_hook => 'check_log_stats',
 },
 
+{ name => 'log_table_recovery_lsn', type => 'bool', context => 'PGC_SUSET', group => 'LOGGING_WHAT',
+  short_desc => 'Logs LSN for DROP TABLE and TRUNCATE TABLE operations.',
+  long_desc => 'When enabled, the system will log the LSN (Log Sequence Number) whenever a DROP TABLE or TRUNCATE TABLE command is committed.',
+  variable => 'log_table_recovery_lsn',
+  boot_val => 'false',
+},
+
 { name => 'log_temp_files', type => 'int', context => 'PGC_SUSET', group => 'LOGGING_WHAT',
   short_desc => 'Log the use of temporary files larger than this number of kilobytes.',
   long_desc => '-1 disables logging temporary files. 0 means log all temporary files.',
