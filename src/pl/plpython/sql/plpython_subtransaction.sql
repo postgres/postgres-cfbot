@@ -260,3 +260,35 @@ SELECT cursor_in_subxact();
 SELECT cursor_aborted_subxact();
 SELECT cursor_plan_aborted_subxact();
 SELECT cursor_close_aborted_subxact();
+
+-- A value compressed with a TOAST dictionary that a rolled-back
+-- subtransaction trained must still read back afterwards.  The
+-- language copies values out of SPI results into its own type (a
+-- Python str here), which decompresses them, so unlike a PL/pgSQL record
+-- this does not depend on toast_flatten_tuple_dict(); the test guards
+-- that the copy keeps happening before the dictionary row goes away.
+SELECT NOT (enumvals @> '{zstd}') AS skip_zstd FROM pg_settings
+  WHERE name = 'default_toast_compression' \gset
+\if :skip_zstd
+\else
+CREATE TABLE subxact_dict (id int, f text COMPRESSION zstd_dict);
+INSERT INTO subxact_dict
+  SELECT g, repeat('{"id": ' || g || ', "status": "active"} ', 80)
+  FROM generate_series(1, 300) g;
+CREATE FUNCTION subxact_dict_rollback() RETURNS boolean AS $$
+v = None
+try:
+    with plpy.subtransaction():
+        plpy.execute("SELECT pg_train_toast_dictionary('subxact_dict', 'f', 4096)")
+        plpy.execute("UPDATE subxact_dict SET f = f || '' WHERE id = 8")
+        v = plpy.execute("SELECT f FROM subxact_dict WHERE id = 8")[0]["f"]
+        plpy.error("roll back")
+except plpy.Error:
+    pass
+return v == '{"id": 8, "status": "active"} ' * 80
+$$ LANGUAGE plpython3u;
+SELECT subxact_dict_rollback();
+SELECT count(*) FROM pg_toast_dictionary
+  WHERE tdrelid = 'subxact_dict'::regclass;
+DROP TABLE subxact_dict;
+\endif

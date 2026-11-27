@@ -17,6 +17,7 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/toast_compression.h"
+#include "access/toast_dictionary.h"
 #include "access/toast_internals.h"
 #include "common/int.h"
 #include "common/pg_lzcompress.h"
@@ -62,6 +63,15 @@ detoast_external_attr(varlena *attr)
 		 * This is an external stored plain value
 		 */
 		result = toast_fetch_datum(attr);
+
+		/* see below about values compressed with a dictionary */
+		if (VARATT_IS_COMPRESSED_DICT(result))
+		{
+			varlena    *tmp = result;
+
+			result = toast_dict_decompress_datum(tmp);
+			pfree(tmp);
+		}
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{
@@ -79,6 +89,16 @@ detoast_external_attr(varlena *attr)
 		/* recurse if value is still external in some other way */
 		if (VARATT_IS_EXTERNAL(attr))
 			return detoast_external_attr(attr);
+
+		/*
+		 * The indirect pointer may reference an inline dictionary-compressed
+		 * datum, which is not VARATT_IS_EXTERNAL but still depends on a
+		 * catalog row of its owning column, so it must be decompressed here
+		 * too; otherwise a still-compressed datum would be returned and read
+		 * after its dictionary could be retired.
+		 */
+		if (VARATT_IS_COMPRESSED_DICT(attr))
+			return toast_dict_decompress_datum(attr);
 
 		/*
 		 * Copy into the caller's memory context, in case caller tries to
@@ -99,6 +119,16 @@ detoast_external_attr(varlena *attr)
 		resultsize = EOH_get_flat_size(eoh);
 		result = (varlena *) palloc(resultsize);
 		EOH_flatten_into(eoh, result, resultsize);
+	}
+	else if (VARATT_IS_COMPRESSED_DICT(attr))
+	{
+		/*
+		 * A value compressed with a dictionary depends on a catalog row of
+		 * the column it came from, so for anything that wants a value
+		 * independent of its source it counts as external; see
+		 * toast_dictionary.c.
+		 */
+		result = toast_dict_decompress_datum(attr);
 	}
 	else
 	{
@@ -237,13 +267,13 @@ detoast_attr_slice(varlena *attr,
 	{
 		toast_external_data toast_ext_data;
 		int32		extsize;
-		uint32		compress_method;
+		ToastCompressionId compress_method;
 		bool		is_compressed;
 
 		toast_external_info_get(attr, &toast_ext_data);
-		extsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
-		compress_method = VARATT_EXTINFO_GET_COMPRESS_METHOD(toast_ext_data.extinfo);
-		is_compressed = VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize);
+		extsize = toast_ext_data.extsize;
+		compress_method = toast_ext_data.compress_method;
+		is_compressed = toast_ext_data.is_compressed;
 
 		/* fast path for non-compressed external datums */
 		if (!is_compressed)
@@ -262,10 +292,10 @@ detoast_attr_slice(varlena *attr,
 			 * Determine maximum amount of compressed data needed for a prefix
 			 * of a given length (after decompression).
 			 *
-			 * At least for now, if it's LZ4 data, we'll have to fetch the
-			 * whole thing, because there doesn't seem to be an API call to
-			 * determine how much compressed data we need to be sure of being
-			 * able to decompress the required slice.
+			 * At least for now, if it's LZ4 or zstd data, we'll have to fetch
+			 * the whole thing, because there doesn't seem to be an API call
+			 * to determine how much compressed data we need to be sure of
+			 * being able to decompress the required slice.
 			 */
 			if (compress_method == TOAST_PGLZ_COMPRESSION_ID)
 				max_size = pglz_maximum_compressed_size(slicelimit, max_size);
@@ -347,6 +377,23 @@ detoast_attr_slice(varlena *attr,
 	return result;
 }
 
+/*
+ * Only compressed values get the long form of a TOAST pointer, which carries
+ * the compression method.  A long pointer to an uncompressed value is
+ * corrupt; returning its data as if uncompressed could hand compressed bytes
+ * to the caller as the value.
+ */
+void
+toast_check_external_form(const toast_external_data *toast_ext_data)
+{
+	if (!toast_ext_data->is_compressed &&
+		VARTAG_IS_ONDISK_LONG(toast_ext_data->tag))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg_internal("toast value %" PRIu64 " is not compressed but has a long TOAST pointer",
+								 toast_ext_data->valueid)));
+}
+
 /* ----------
  * toast_fetch_datum -
  *
@@ -368,13 +415,14 @@ toast_fetch_datum(varlena *attr)
 		elog(ERROR, "toast_fetch_datum shouldn't be called for non-ondisk datums");
 
 	toast_external_info_get(attr, &toast_ext_data);
-	attrsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
+	toast_check_external_form(&toast_ext_data);
+	attrsize = toast_ext_data.extsize;
 	toastrelid = toast_ext_data.toastrelid;
 	valueid = toast_ext_data.valueid;
 
 	result = (varlena *) palloc(attrsize + VARHDRSZ);
 
-	if (VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize))
+	if (toast_ext_data.is_compressed)
 		SET_VARSIZE_COMPRESSED(result, attrsize + VARHDRSZ);
 	else
 		SET_VARSIZE(result, attrsize + VARHDRSZ);
@@ -425,10 +473,11 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 		elog(ERROR, "toast_fetch_datum_slice shouldn't be called for non-ondisk datums");
 
 	toast_external_info_get(attr, &toast_ext_data);
-	attrsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
+	toast_check_external_form(&toast_ext_data);
+	attrsize = toast_ext_data.extsize;
 	toastrelid = toast_ext_data.toastrelid;
 	valueid = toast_ext_data.valueid;
-	is_compressed = VARATT_EXTINFO_IS_COMPRESSED(toast_ext_data.extinfo, toast_ext_data.rawsize);
+	is_compressed = toast_ext_data.is_compressed;
 
 	/*
 	 * It's nonsense to fetch slices of a compressed datum unless when it's a
@@ -445,11 +494,15 @@ toast_fetch_datum_slice(varlena *attr, int32 sliceoffset,
 
 	/*
 	 * When fetching a prefix of a compressed external datum, account for the
-	 * space required by va_tcinfo, which is stored at the beginning as an
-	 * int32 value.
+	 * compressed header stored at its beginning: va_tcinfo, followed in the
+	 * long form by the compression method ID byte.  (Today only pglz asks for
+	 * a true prefix, see detoast_attr_slice(); other methods ask for the
+	 * whole value, and the request is clamped to it below.)
 	 */
 	if (is_compressed && slicelength > 0)
-		slicelength = slicelength + sizeof(int32);
+		slicelength += (VARTAG_IS_ONDISK_LONG(toast_ext_data.tag) ?
+						VARHDRSZ_COMPRESSED_LONG : VARHDRSZ_COMPRESSED) -
+			VARHDRSZ;
 
 	/*
 	 * Adjust length request if needed.  (Note: our sole caller,
@@ -499,13 +552,22 @@ toast_decompress_datum(varlena *attr)
 	 * Fetch the compression method id stored in the compression header and
 	 * decompress the data using the appropriate decompression routine.
 	 */
-	cmid = VARDATA_COMPRESSED_GET_COMPRESS_METHOD(attr);
+	cmid = toast_inline_compression_id(attr);
+	if (cmid == TOAST_INVALID_COMPRESSION_ID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg_internal("compressed data is corrupt")));
 	switch (cmid)
 	{
 		case TOAST_PGLZ_COMPRESSION_ID:
 			return pglz_decompress_datum(attr);
 		case TOAST_LZ4_COMPRESSION_ID:
 			return lz4_decompress_datum(attr);
+		case TOAST_ZSTD_COMPRESSION_ID:
+			return zstd_decompress_datum(attr);
+		case TOAST_ZSTD_DICT_COMPRESSION_ID:
+		case TOAST_LZ4_DICT_COMPRESSION_ID:
+			return toast_dict_decompress_datum(attr);
 		default:
 			elog(ERROR, "invalid compression method id %d", cmid);
 			return NULL;		/* keep compiler quiet */
@@ -528,6 +590,17 @@ toast_decompress_datum_slice(varlena *attr, int32 slicelength)
 	Assert(VARATT_IS_COMPRESSED(attr));
 
 	/*
+	 * Fetch the compression method id stored in the compression header.  Do
+	 * it first, as it also checks the header is complete before we read the
+	 * decompressed size from it below.
+	 */
+	cmid = toast_inline_compression_id(attr);
+	if (cmid == TOAST_INVALID_COMPRESSION_ID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg_internal("compressed data is corrupt")));
+
+	/*
 	 * Some callers may pass a slicelength that's more than the actual
 	 * decompressed size.  If so, just decompress normally.  This avoids
 	 * possibly allocating a larger-than-necessary result object, and may be
@@ -539,16 +612,19 @@ toast_decompress_datum_slice(varlena *attr, int32 slicelength)
 		return toast_decompress_datum(attr);
 
 	/*
-	 * Fetch the compression method id stored in the compression header and
-	 * decompress the data slice using the appropriate decompression routine.
+	 * Decompress the data slice using the appropriate decompression routine.
 	 */
-	cmid = VARDATA_COMPRESSED_GET_COMPRESS_METHOD(attr);
 	switch (cmid)
 	{
 		case TOAST_PGLZ_COMPRESSION_ID:
 			return pglz_decompress_datum_slice(attr, slicelength);
 		case TOAST_LZ4_COMPRESSION_ID:
 			return lz4_decompress_datum_slice(attr, slicelength);
+		case TOAST_ZSTD_COMPRESSION_ID:
+			return zstd_decompress_datum_slice(attr, slicelength);
+		case TOAST_ZSTD_DICT_COMPRESSION_ID:
+		case TOAST_LZ4_DICT_COMPRESSION_ID:
+			return toast_dict_decompress_datum_slice(attr, slicelength);
 		default:
 			elog(ERROR, "invalid compression method id %d", cmid);
 			return NULL;		/* keep compiler quiet */
@@ -593,6 +669,11 @@ toast_raw_datum_size(Datum value)
 	}
 	else if (VARATT_IS_COMPRESSED(attr))
 	{
+		/* the header must be complete for us to read the size from it */
+		if (VARSIZE(attr) < VARHDRSZ_COMPRESSED)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg_internal("compressed data is corrupt")));
 		/* here, va_rawsize is just the payload size */
 		result = VARDATA_COMPRESSED_GET_EXTSIZE(attr) + VARHDRSZ;
 	}
@@ -634,7 +715,7 @@ toast_datum_size(Datum value)
 		toast_external_data toast_ext_data;
 
 		toast_external_info_get(attr, &toast_ext_data);
-		result = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
+		result = toast_ext_data.extsize;
 	}
 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
 	{

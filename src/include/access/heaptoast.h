@@ -123,11 +123,26 @@ extern void heap_toast_delete(Relation rel, HeapTuple oldtup,
 /* ----------
  * toast_flatten_tuple -
  *
- *	"Flatten" a tuple to contain no out-of-line toasted fields.
- *	(This does not eliminate compressed or short-header datums.)
+ *	"Flatten" a tuple to contain no out-of-line toasted fields, nor fields
+ *	compressed with a dictionary.  (This does not eliminate other compressed
+ *	or short-header datums.)
+ *
+ * toast_flatten_tuple_for_wal -
+ *
+ *	The same, but leaves fields compressed with a dictionary as they are,
+ *	for a tuple WAL-logged for logical decoding; returns NULL if no change
+ *	is needed.
+ *
+ * toast_flatten_tuple_dict -
+ *
+ *	The same, but expands only fields compressed with a dictionary, for a
+ *	tuple kept until the end of the transaction; returns NULL if no change
+ *	is needed.
  * ----------
  */
 extern HeapTuple toast_flatten_tuple(HeapTuple tup, TupleDesc tupleDesc);
+extern HeapTuple toast_flatten_tuple_for_wal(HeapTuple tup, TupleDesc tupleDesc);
+extern HeapTuple toast_flatten_tuple_dict(HeapTuple tup, TupleDesc tupleDesc);
 
 /* ----------
  * toast_flatten_tuple_to_datum -

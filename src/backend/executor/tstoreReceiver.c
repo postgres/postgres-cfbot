@@ -23,6 +23,7 @@
 #include "postgres.h"
 
 #include "access/detoast.h"
+#include "access/toast_compression.h"
 #include "access/tupconvert.h"
 #include "executor/tstoreReceiver.h"
 #include "varatt.h"
@@ -159,7 +160,7 @@ tstoreReceiveSlot_detoast(TupleTableSlot *slot, DestReceiver *self)
 
 		if (!attr->attisdropped && attr->attlen == -1 && !slot->tts_isnull[i])
 		{
-			if (VARATT_IS_EXTERNAL(DatumGetPointer(val)))
+			if (VARATT_IS_EXTERNAL_OR_DICT(DatumGetPointer(val)))
 			{
 				val = PointerGetDatum(detoast_external_attr((varlena *)
 															DatumGetPointer(val)));
