@@ -579,7 +579,7 @@ ProcessConfigFileInternal(GucContext context, bool applySettings, int elevel)
 		else
 		{
 			/* no error, but variable's active value was not changed */
-			item->applied = true;
+			item->applied = false;
 		}
 
 		/*
@@ -3668,12 +3668,20 @@ set_config_with_handle(const char *name, config_handle *handle,
 
 					if (*conf->variable != newval)
 					{
-						record->status |= GUC_PENDING_RESTART;
-						ereport(elevel,
-								(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
-								 errmsg("parameter \"%s\" cannot be changed without restarting the server",
+						if (record->source <= source)
+						{
+							record->status |= GUC_PENDING_RESTART;
+							ereport(elevel,
+									(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+									 errmsg("parameter \"%s\" cannot be changed without restarting the server",
+											record->name)));
+							return 0;
+						}
+						else
+							ereport(elevel,
+									(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+									 errmsg("\"%s\": setting ignored because previous source is higher priority",
 										record->name)));
-						return 0;
 					}
 					record->status &= ~GUC_PENDING_RESTART;
 					return -1;
@@ -3764,12 +3772,20 @@ set_config_with_handle(const char *name, config_handle *handle,
 
 					if (*conf->variable != newval)
 					{
-						record->status |= GUC_PENDING_RESTART;
-						ereport(elevel,
-								(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
-								 errmsg("parameter \"%s\" cannot be changed without restarting the server",
+						if (record->source <= source)
+						{
+							record->status |= GUC_PENDING_RESTART;
+							ereport(elevel,
+									(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+									 errmsg("parameter \"%s\" cannot be changed without restarting the server",
 										record->name)));
-						return 0;
+							return 0;
+						}
+						else
+							ereport(elevel,
+									(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+									 errmsg("\"%s\": setting ignored because previous source is higher priority",
+										record->name)));
 					}
 					record->status &= ~GUC_PENDING_RESTART;
 					return -1;
@@ -3860,12 +3876,20 @@ set_config_with_handle(const char *name, config_handle *handle,
 
 					if (*conf->variable != newval)
 					{
-						record->status |= GUC_PENDING_RESTART;
-						ereport(elevel,
-								(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
-								 errmsg("parameter \"%s\" cannot be changed without restarting the server",
+						if (record->source <= source)
+						{
+							record->status |= GUC_PENDING_RESTART;
+							ereport(elevel,
+									(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+									 errmsg("parameter \"%s\" cannot be changed without restarting the server",
+											record->name)));
+							return 0;
+						}
+						else
+							ereport(elevel,
+									(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+									 errmsg("\"%s\": setting ignored because previous source is higher priority",
 										record->name)));
-						return 0;
 					}
 					record->status &= ~GUC_PENDING_RESTART;
 					return -1;
@@ -3985,12 +4009,20 @@ set_config_with_handle(const char *name, config_handle *handle,
 
 					if (newval_different)
 					{
-						record->status |= GUC_PENDING_RESTART;
-						ereport(elevel,
-								(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
-								 errmsg("parameter \"%s\" cannot be changed without restarting the server",
+						if (record->source <= source)
+						{
+							record->status |= GUC_PENDING_RESTART;
+							ereport(elevel,
+									(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+									 errmsg("parameter \"%s\" cannot be changed without restarting the server",
+											record->name)));
+							return 0;
+						}
+						else
+							ereport(elevel,
+									(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+									 errmsg("\"%s\": setting ignored because previous source is higher priority",
 										record->name)));
-						return 0;
 					}
 					record->status &= ~GUC_PENDING_RESTART;
 					return -1;
@@ -4124,12 +4156,20 @@ set_config_with_handle(const char *name, config_handle *handle,
 
 					if (*conf->variable != newval)
 					{
-						record->status |= GUC_PENDING_RESTART;
-						ereport(elevel,
-								(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
-								 errmsg("parameter \"%s\" cannot be changed without restarting the server",
+						if (record->source <= source)
+						{
+							record->status |= GUC_PENDING_RESTART;
+							ereport(elevel,
+									(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+									 errmsg("parameter \"%s\" cannot be changed without restarting the server",
+											record->name)));
+							return 0;
+						}
+						else
+							ereport(elevel,
+									(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+									 errmsg("\"%s\": setting ignored because previous source is higher priority",
 										record->name)));
-						return 0;
 					}
 					record->status &= ~GUC_PENDING_RESTART;
 					return -1;
