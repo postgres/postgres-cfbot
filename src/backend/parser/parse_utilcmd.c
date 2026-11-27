@@ -86,6 +86,8 @@ typedef struct
 	List	   *fkconstraints;	/* FOREIGN KEY constraints */
 	List	   *ixconstraints;	/* index-creating constraints */
 	List	   *likeclauses;	/* LIKE clauses that need post-processing */
+	char	   *tablecomment;	/* comment on the LIKE source relation */
+	int			nlikeclauses;	/* # of LIKE clauses seen so far */
 	List	   *blist;			/* "before list" of things to do before
 								 * creating the table */
 	List	   *alist;			/* "after list" of things to do after creating
@@ -251,6 +253,8 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 	cxt.fkconstraints = NIL;
 	cxt.ixconstraints = NIL;
 	cxt.likeclauses = NIL;
+	cxt.tablecomment = NULL;
+	cxt.nlikeclauses = 0;
 	cxt.blist = NIL;
 	cxt.alist = NIL;
 	cxt.pkey = NULL;
@@ -298,6 +302,27 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 					 (int) nodeTag(element));
 				break;
 		}
+	}
+
+	/*
+	 * Copy the comment on the LIKE source relation to the new table, but only
+	 * if there is exactly one LIKE clause.  A table built from several source
+	 * relations is not described by any one of their comments, and there is
+	 * no obvious way to combine them, so we copy none.
+	 */
+	if (cxt.nlikeclauses == 1 && cxt.tablecomment != NULL)
+	{
+		CommentStmt *cstmt = makeNode(CommentStmt);
+
+		cstmt->objtype = cxt.isforeign ? OBJECT_FOREIGN_TABLE : OBJECT_TABLE;
+		if (cxt.relation->schemaname)
+			cstmt->object = (Node *) list_make2(makeString(cxt.relation->schemaname),
+												makeString(cxt.relation->relname));
+		else
+			cstmt->object = (Node *) list_make1(makeString(cxt.relation->relname));
+		cstmt->comment = cxt.tablecomment;
+
+		cxt.alist = lappend(cxt.alist, cstmt);
 	}
 
 	/*
@@ -1309,6 +1334,27 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 				}
 			}
 		}
+	}
+
+	/*
+	 * Remember the comment on the source relation itself, if requested.
+	 * transformCreateStmt decides whether to copy it, since that depends on
+	 * how many LIKE clauses there are.  There's no need to look up the
+	 * comment for any clause after the first.
+	 */
+	cxt->nlikeclauses++;
+	if (cxt->nlikeclauses == 1 &&
+		(table_like_clause->options & CREATE_TABLE_LIKE_COMMENTS))
+	{
+		/* A composite type's comment is attached to its pg_type entry */
+		if (relation->rd_rel->relkind == RELKIND_COMPOSITE_TYPE)
+			cxt->tablecomment = GetComment(relation->rd_rel->reltype,
+										   TypeRelationId,
+										   0);
+		else
+			cxt->tablecomment = GetComment(RelationGetRelid(relation),
+										   RelationRelationId,
+										   0);
 	}
 
 	/*
@@ -3624,6 +3670,8 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 	cxt.fkconstraints = NIL;
 	cxt.ixconstraints = NIL;
 	cxt.likeclauses = NIL;
+	cxt.tablecomment = NULL;
+	cxt.nlikeclauses = 0;
 	cxt.blist = NIL;
 	cxt.alist = NIL;
 	cxt.pkey = NULL;
