@@ -267,7 +267,8 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 	MemoryContext oldcontext;
 	List	   *expectedTLEs;
 	List	   *all_wslist,
-			   *required_wslist = NIL;
+			   *required_wslist = NIL,
+			   *past_switch_wslist = NIL;
 	ListCell   *lc;
 	TimeLineHistoryEntry **tlep;
 	int			num_wal_ranges;
@@ -567,6 +568,33 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 		required_wslist = list_concat(required_wslist, tli_wslist);
 
 		/*
+		 * A summary that ends at or after the point where we switched away
+		 * from this timeline may also cover WAL that this server never
+		 * replayed.  A standby now summarizes only replayed WAL, but a
+		 * summary written by an older release, which followed the walreceiver
+		 * ahead of replay, may still be on disk, and recovery can have
+		 * stopped at a recovery target before the end of it.  A summary that
+		 * was in progress at promotion ends exactly at the switch point, even
+		 * if it read WAL past it.  Block references from that WAL only make
+		 * us copy more than needed, but a relation truncation recorded there
+		 * would discard the references to blocks modified before the switch.
+		 * Remember these summaries, so that the merge below can back up such
+		 * a relation fork fully.
+		 */
+		if (tle->tli != backup_state->starttli)
+		{
+			ListCell   *lc2;
+
+			foreach(lc2, tli_wslist)
+			{
+				WalSummaryFile *ws = lfirst(lc2);
+
+				if (ws->end_lsn >= tli_end_lsn)
+					past_switch_wslist = lappend(past_switch_wslist, ws);
+			}
+		}
+
+		/*
 		 * Timelines earlier than the one in which the prior backup began are
 		 * not relevant.
 		 */
@@ -591,6 +619,7 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 	foreach(lc, required_wslist)
 	{
 		WalSummaryFile *ws = lfirst(lc);
+		bool		past_switch = list_member_ptr(past_switch_wslist, ws);
 		WalSummaryIO wsio;
 		BlockRefTableReader *reader;
 		RelFileLocator rlocator;
@@ -609,6 +638,17 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 		while (BlockRefTableReaderNextRelation(reader, &rlocator, &forknum,
 											   &limit_block))
 		{
+			/*
+			 * A truncation in a summary that reaches the switch point may
+			 * never have happened on this server, and summary entries carry
+			 * no LSNs to tell.  Use a limit block of 0 instead, which makes
+			 * us back up the whole fork.  That is always safe, and only costs
+			 * space in incremental backups whose prior backup was taken
+			 * before the switch.
+			 */
+			if (past_switch && limit_block != InvalidBlockNumber)
+				limit_block = 0;
+
 			BlockRefTableSetLimitBlock(ib->brtab, &rlocator,
 									   forknum, limit_block);
 

@@ -42,6 +42,8 @@ tests += {
       't/012_vm_consistency.pl',
       't/013_summary_order.pl',
       't/014_vm_truncation.pl',
+      't/015_summary_past_switch.pl',
+      't/016_truncation_after_target.pl',
     ],
   }
 }
