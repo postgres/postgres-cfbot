@@ -4973,7 +4973,21 @@ DropRelationsAllBuffers(SMgrRelation *smgr_reln, int nlocators)
 			if (block[i][j] == InvalidBlockNumber)
 			{
 				if (!smgrexists(rels[i], j))
+				{
+					/*
+					 * Every relation with storage has a main fork, so if it's
+					 * missing, its file was lost while buffers for it may
+					 * still be resident.  Fall back to the full scan so those
+					 * buffers get dropped instead of orphaned.  Other forks
+					 * are routinely absent, so just skip them.
+					 */
+					if (j == MAIN_FORKNUM)
+					{
+						cached = false;
+						break;
+					}
 					continue;
+				}
 				cached = false;
 				break;
 			}
