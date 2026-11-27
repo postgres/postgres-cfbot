@@ -724,3 +724,17 @@ SELECT xmltext('  ');
 SELECT xmltext('foo `$_-+?=*^%!|/\()[]{}');
 SELECT xmltext('foo & <"bar">');
 SELECT xmltext('x'|| '<P>73</P>'::xml || .42 || true || 'j'::char);
+
+-- Test XMLTABLE() column alias list deparsing, and the alias of an
+-- XMLTABLE() that is renamed to avoid a conflict with another one in an
+-- outer query level; leave the views around for the pg_upgrade test
+CREATE VIEW xmltableview_alias AS
+SELECT t.p
+FROM xmldata, XMLTABLE('/ROWS/ROW' PASSING data
+	COLUMNS a int PATH '@id') AS t(p);
+\sv xmltableview_alias
+CREATE VIEW xmltableview_conflict AS
+SELECT a, (SELECT max(b) FROM XMLTABLE('/ROWS/ROW' PASSING data
+	COLUMNS b int PATH '@id')) AS m
+FROM xmldata, XMLTABLE('/ROWS/ROW' PASSING data COLUMNS a int PATH '@id');
+\sv xmltableview_conflict

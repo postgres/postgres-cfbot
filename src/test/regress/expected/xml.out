@@ -1933,3 +1933,26 @@ SELECT xmltext('x'|| '<P>73</P>'::xml || .42 || true || 'j'::char);
  x&lt;P&gt;73&lt;/P&gt;0.42truej
 (1 row)
 
+-- Test XMLTABLE() column alias list deparsing, and the alias of an
+-- XMLTABLE() that is renamed to avoid a conflict with another one in an
+-- outer query level; leave the views around for the pg_upgrade test
+CREATE VIEW xmltableview_alias AS
+SELECT t.p
+FROM xmldata, XMLTABLE('/ROWS/ROW' PASSING data
+	COLUMNS a int PATH '@id') AS t(p);
+\sv xmltableview_alias
+CREATE OR REPLACE VIEW public.xmltableview_alias AS
+ SELECT t.p
+   FROM xmldata,
+    LATERAL XMLTABLE(('/ROWS/ROW'::text) PASSING (xmldata.data) COLUMNS a integer PATH ('@id'::text)) t(p)
+CREATE VIEW xmltableview_conflict AS
+SELECT a, (SELECT max(b) FROM XMLTABLE('/ROWS/ROW' PASSING data
+	COLUMNS b int PATH '@id')) AS m
+FROM xmldata, XMLTABLE('/ROWS/ROW' PASSING data COLUMNS a int PATH '@id');
+\sv xmltableview_conflict
+CREATE OR REPLACE VIEW public.xmltableview_conflict AS
+ SELECT "xmltable".a,
+    ( SELECT max(xmltable_1.b) AS max
+           FROM XMLTABLE(('/ROWS/ROW'::text) PASSING (xmldata.data) COLUMNS b integer PATH ('@id'::text)) xmltable_1) AS m
+   FROM xmldata,
+    LATERAL XMLTABLE(('/ROWS/ROW'::text) PASSING (xmldata.data) COLUMNS a integer PATH ('@id'::text))
