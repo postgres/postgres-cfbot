@@ -1274,7 +1274,17 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	plan->plan.qual = NIL;
 	plan->plan.lefttree = NULL;
 	plan->plan.righttree = NULL;
-	plan->apprelids = rel->relids;
+
+	/*
+	 * An Append on an unpartitioned join rel (such as an OR-clause expansion
+	 * into UNION ALL) does not form an appendrel and has no partition
+	 * pruning. Only partitioned tables or partitionwise joins have non-NULL
+	 * apprelids.
+	 */
+	if (IS_JOIN_REL(rel) && !IS_PARTITIONED_REL(rel))
+		plan->apprelids = NULL;
+	else
+		plan->apprelids = rel->relids;
 	plan->child_append_relid_sets = best_path->child_append_relid_sets;
 
 	if (pathkeys != NIL)
