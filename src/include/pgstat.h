@@ -161,7 +161,9 @@ StaticAssertDecl(sizeof(PgStat_TableCounts) == 5 * sizeof(PgStat_Counter),
  * table data).
  *
  * tuples_inserted/updated/deleted/hot_updated/newpage_updated count attempted
- * actions, regardless of whether the transaction committed.  delta_live_tuples,
+ * actions, regardless of whether the transaction committed.  Like
+ * tuples_inserted, ins_since_vacuum includes aborted inserts, but it can be
+ * reset separately by a committed truncate.  delta_live_tuples,
  * delta_dead_tuples, and changed_tuples are set depending on commit or abort.
  * Note that delta_live_tuples and delta_dead_tuples can be negative!
  * ----------
@@ -173,13 +175,14 @@ typedef struct PgStat_TableCountsXact
 	PgStat_Counter tuples_deleted;
 	PgStat_Counter tuples_hot_updated;
 	PgStat_Counter tuples_newpage_updated;
+	PgStat_Counter ins_since_vacuum;
 
 	PgStat_Counter delta_live_tuples;
 	PgStat_Counter delta_dead_tuples;
 	PgStat_Counter changed_tuples;
 } PgStat_TableCountsXact;
 
-StaticAssertDecl(sizeof(PgStat_TableCountsXact) == 8 * sizeof(PgStat_Counter),
+StaticAssertDecl(sizeof(PgStat_TableCountsXact) == 9 * sizeof(PgStat_Counter),
 				 "PgStat_TableCountsXact has no padding");
 
 /* ----------
@@ -258,6 +261,8 @@ typedef struct PgStat_TableXactStatus
 	PgStat_Counter inserted_pre_truncdrop;
 	PgStat_Counter updated_pre_truncdrop;
 	PgStat_Counter deleted_pre_truncdrop;
+	PgStat_Counter ins_since_vacuum_pre_truncdrop;
+	PgStat_Counter delta_dead_tuples_pre_truncdrop;
 	int			nest_level;		/* subtransaction nest level */
 	/* links to other structs for same relation: */
 	struct PgStat_TableXactStatus *upper;	/* next higher subxact if any */

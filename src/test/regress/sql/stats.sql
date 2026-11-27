@@ -45,13 +45,26 @@ SELECT t.seq_scan, t.seq_tup_read, t.idx_scan, t.idx_tup_fetch,
  WHERE t.relname='tenk2' AND b.relname='tenk2';
 COMMIT;
 
--- test effects of TRUNCATE on n_live_tup/n_dead_tup counters
+-- test effects of TRUNCATE on n_live_tup/n_dead_tup/n_ins_since_vacuum counters
 CREATE TABLE trunc_stats_test(id serial);
 CREATE TABLE trunc_stats_test1(id serial, stuff text);
 CREATE TABLE trunc_stats_test2(id serial);
 CREATE TABLE trunc_stats_test3(id serial, stuff text);
 CREATE TABLE trunc_stats_test4(id serial);
 CREATE TABLE trunc_stats_test5(id serial);
+CREATE TABLE trunc_stats_test6(id serial);
+CREATE TABLE trunc_stats_test7(id serial);
+CREATE TABLE trunc_stats_test8(id serial);
+CREATE TABLE trunc_stats_test9(id serial);
+CREATE TABLE trunc_stats_test10(id serial);
+CREATE TABLE trunc_stats_test11(id serial);
+CREATE TABLE trunc_stats_test12(id serial);
+CREATE TABLE trunc_stats_test13(id serial);
+CREATE TABLE trunc_stats_test14(id serial);
+CREATE TABLE trunc_stats_test15(id serial);
+CREATE TABLE trunc_stats_test16(id serial);
+CREATE TABLE trunc_stats_test17(id serial);
+CREATE TABLE trunc_stats_test18(id serial);
 
 -- check that n_live_tup is reset to 0 after truncate
 INSERT INTO trunc_stats_test DEFAULT VALUES;
@@ -113,6 +126,150 @@ DELETE FROM trunc_stats_test5 WHERE id = 2;
 SELECT pg_stat_force_next_flush();
 TRUNCATE trunc_stats_test5;
 
+-- a truncate resets inserts from an aborted subtransaction
+BEGIN;
+SAVEPOINT p1;
+INSERT INTO trunc_stats_test6 SELECT generate_series(1, 5);
+ROLLBACK TO SAVEPOINT p1;
+SELECT pg_stat_force_next_flush();
+TRUNCATE trunc_stats_test6;
+COMMIT;
+
+-- aborted inserts after a truncate still count
+BEGIN;
+TRUNCATE trunc_stats_test7;
+SAVEPOINT p1;
+INSERT INTO trunc_stats_test7 SELECT generate_series(1, 5);
+ROLLBACK TO SAVEPOINT p1;
+COMMIT;
+
+-- active inserts after a truncate still count when the subtransaction aborts
+BEGIN;
+SAVEPOINT p1;
+TRUNCATE trunc_stats_test8;
+INSERT INTO trunc_stats_test8 SELECT generate_series(1, 5);
+ROLLBACK TO SAVEPOINT p1;
+COMMIT;
+
+-- active inserts discarded by repeated truncates still count on abort
+BEGIN;
+INSERT INTO trunc_stats_test9 SELECT generate_series(1, 2);
+TRUNCATE trunc_stats_test9;
+INSERT INTO trunc_stats_test9 SELECT generate_series(1, 3);
+TRUNCATE trunc_stats_test9;
+INSERT INTO trunc_stats_test9 SELECT generate_series(1, 4);
+ROLLBACK;
+
+-- aborted inserts after an aborted truncate leave no dead tuples
+BEGIN;
+TRUNCATE trunc_stats_test10;
+SAVEPOINT p1;
+INSERT INTO trunc_stats_test10 SELECT generate_series(1, 5);
+ROLLBACK TO SAVEPOINT p1;
+ROLLBACK;
+
+-- a committed repeated truncate preserves only subsequent dead tuples
+BEGIN;
+SAVEPOINT p1;
+INSERT INTO trunc_stats_test11 SELECT generate_series(1, 2);
+ROLLBACK TO SAVEPOINT p1;
+RELEASE SAVEPOINT p1;
+TRUNCATE trunc_stats_test11;
+SAVEPOINT p2;
+INSERT INTO trunc_stats_test11 SELECT generate_series(1, 3);
+ROLLBACK TO SAVEPOINT p2;
+RELEASE SAVEPOINT p2;
+TRUNCATE trunc_stats_test11;
+SAVEPOINT p3;
+INSERT INTO trunc_stats_test11 SELECT generate_series(1, 4);
+ROLLBACK TO SAVEPOINT p3;
+COMMIT;
+
+-- an aborted repeated truncate preserves only preceding dead tuples
+BEGIN;
+SAVEPOINT p1;
+INSERT INTO trunc_stats_test12 SELECT generate_series(1, 2);
+ROLLBACK TO SAVEPOINT p1;
+RELEASE SAVEPOINT p1;
+TRUNCATE trunc_stats_test12;
+SAVEPOINT p2;
+INSERT INTO trunc_stats_test12 SELECT generate_series(1, 3);
+ROLLBACK TO SAVEPOINT p2;
+RELEASE SAVEPOINT p2;
+TRUNCATE trunc_stats_test12;
+SAVEPOINT p3;
+INSERT INTO trunc_stats_test12 SELECT generate_series(1, 4);
+ROLLBACK TO SAVEPOINT p3;
+ROLLBACK;
+
+-- an aborted update after a committed truncate leaves a dead tuple
+BEGIN;
+TRUNCATE trunc_stats_test13;
+INSERT INTO trunc_stats_test13 VALUES (1);
+SAVEPOINT p1;
+UPDATE trunc_stats_test13 SET id = 2;
+ROLLBACK TO SAVEPOINT p1;
+COMMIT;
+
+-- an aborted update after an aborted truncate leaves no dead tuple
+BEGIN;
+TRUNCATE trunc_stats_test14;
+INSERT INTO trunc_stats_test14 VALUES (1);
+SAVEPOINT p1;
+UPDATE trunc_stats_test14 SET id = 2;
+ROLLBACK TO SAVEPOINT p1;
+ROLLBACK;
+
+-- a committed subtransaction keeps dead tuples after its truncate
+BEGIN;
+SAVEPOINT p1;
+INSERT INTO trunc_stats_test15 SELECT generate_series(1, 2);
+TRUNCATE trunc_stats_test15;
+SAVEPOINT p2;
+INSERT INTO trunc_stats_test15 SELECT generate_series(1, 3);
+ROLLBACK TO SAVEPOINT p2;
+RELEASE SAVEPOINT p2;
+RELEASE SAVEPOINT p1;
+COMMIT;
+
+-- an aborted subtransaction restores dead tuples from before its truncate
+BEGIN;
+SAVEPOINT p1;
+INSERT INTO trunc_stats_test16 SELECT generate_series(1, 2);
+TRUNCATE trunc_stats_test16;
+SAVEPOINT p2;
+INSERT INTO trunc_stats_test16 SELECT generate_series(1, 3);
+ROLLBACK TO SAVEPOINT p2;
+RELEASE SAVEPOINT p2;
+ROLLBACK TO SAVEPOINT p1;
+COMMIT;
+
+-- an outer abort restores dead tuples from a committed subtransaction
+BEGIN;
+SAVEPOINT p1;
+INSERT INTO trunc_stats_test18 SELECT generate_series(1, 2);
+TRUNCATE trunc_stats_test18;
+SAVEPOINT p2;
+INSERT INTO trunc_stats_test18 SELECT generate_series(1, 3);
+ROLLBACK TO SAVEPOINT p2;
+RELEASE SAVEPOINT p2;
+RELEASE SAVEPOINT p1;
+ROLLBACK;
+
+-- an aborted drop after a truncate restores preceding dead tuples
+BEGIN;
+SAVEPOINT p1;
+INSERT INTO trunc_stats_test17 SELECT generate_series(1, 2);
+ROLLBACK TO SAVEPOINT p1;
+RELEASE SAVEPOINT p1;
+TRUNCATE trunc_stats_test17;
+SAVEPOINT p2;
+INSERT INTO trunc_stats_test17 SELECT generate_series(1, 3);
+ROLLBACK TO SAVEPOINT p2;
+RELEASE SAVEPOINT p2;
+DROP TABLE trunc_stats_test17;
+ROLLBACK;
+
 -- do a seqscan
 SELECT count(*) FROM tenk2;
 -- do an indexscan
@@ -134,7 +291,8 @@ SELECT relname, n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup
 
 SELECT relname, n_ins_since_vacuum
   FROM pg_stat_user_tables
- WHERE relname = 'trunc_stats_test5';
+ WHERE relname LIKE 'trunc_stats_test%'
+ ORDER BY relname;
 
 SELECT st.seq_scan >= pr.seq_scan + 1,
        st.seq_tup_read >= pr.seq_tup_read + cl.reltuples,
@@ -345,7 +503,13 @@ RELEASE SAVEPOINT sp1;
 COMMIT;
 SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
 
-DROP TABLE trunc_stats_test, trunc_stats_test1, trunc_stats_test2, trunc_stats_test3, trunc_stats_test4, trunc_stats_test5;
+DROP TABLE trunc_stats_test, trunc_stats_test1, trunc_stats_test2,
+           trunc_stats_test3, trunc_stats_test4, trunc_stats_test5,
+           trunc_stats_test6, trunc_stats_test7, trunc_stats_test8,
+           trunc_stats_test9, trunc_stats_test10, trunc_stats_test11,
+           trunc_stats_test12, trunc_stats_test13, trunc_stats_test14,
+           trunc_stats_test15, trunc_stats_test16, trunc_stats_test17,
+           trunc_stats_test18;
 DROP TABLE prevstats;
 
 
