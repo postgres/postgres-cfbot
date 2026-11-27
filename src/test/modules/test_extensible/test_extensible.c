@@ -17,6 +17,8 @@
 #include "access/tableam.h"
 #include "catalog/namespace.h"
 #include "executor/executor.h"
+#include "commands/explain.h"
+#include "commands/explain_format.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
@@ -151,6 +153,19 @@ static const ExtensibleNodeMethods test_ext_node_methods =
 	.nodeRead = test_ext_node_read_cb,
 };
 
+/* per-worker instrumentation, stored in shared memory */
+typedef struct TestScanInstrumentation
+{
+	int64		ntuples;		/* tuples emitted by this worker */
+} TestScanInstrumentation;
+
+/* shared memory chunk holding instrumentation for all workers */
+typedef struct SharedTestScanInfo
+{
+	int			num_workers;
+	TestScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+} SharedTestScanInfo;
+
 /*
  * TestCustomScanState - execution state for the custom scan
  */
@@ -160,6 +175,9 @@ typedef struct TestCustomScanState
 	TableScanDesc scandesc;
 	int			repeat_count;	/* repeat_count from TestExtNode */
 	int			repeats_left;	/* how many more times to return current row */
+	int64		ntuples;		/* tuples emitted by this process */
+	SharedTestScanInfo *shared_info;	/* all-worker instrumentation */
+	TestScanInstrumentation *sinstrument;	/* this worker's slot, or NULL */
 } TestCustomScanState;
 
 /*
@@ -197,6 +215,9 @@ test_begin_custom_scan(CustomScanState *node, EState *estate, int eflags)
 	tstate->repeat_count = tnode->repeat_count;
 	tstate->repeats_left = 0;
 	tstate->scandesc = NULL;
+	tstate->ntuples = 0;
+	tstate->shared_info = NULL;
+	tstate->sinstrument = NULL;
 
 	/* A plain EXPLAIN never executes the plan, so skip */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
@@ -220,6 +241,7 @@ test_scan_next(ScanState *node)
 	if (tstate->repeats_left > 0)
 	{
 		tstate->repeats_left--;
+		tstate->ntuples++;
 		return slot;
 	}
 
@@ -227,6 +249,7 @@ test_scan_next(ScanState *node)
 		return NULL;
 
 	tstate->repeats_left = tstate->repeat_count - 1;
+	tstate->ntuples++;
 	return slot;
 }
 
@@ -251,6 +274,10 @@ test_end_custom_scan(CustomScanState *node)
 {
 	TestCustomScanState *tstate = (TestCustomScanState *) node;
 
+	/* In a parallel worker, report our count to the leader. */
+	if (tstate->sinstrument != NULL)
+		tstate->sinstrument->ntuples = tstate->ntuples;
+
 	/* No scan started under EXEC_FLAG_EXPLAIN_ONLY */
 	if (tstate->scandesc != NULL)
 		table_endscan(tstate->scandesc);
@@ -269,6 +296,89 @@ test_rescan_custom_scan(CustomScanState *node)
 	ExecScanReScan(&node->ss);
 }
 
+/*
+ * Parallel instrumentation callbacks.
+ *
+ * Each worker counts the tuples it emitted; at the end of the scan the count
+ * is written into a per-worker slot of a shared memory chunk owned by the
+ * core executor.  The leader copies the chunk out of DSM in the Retrieve
+ * callback and prints it in EXPLAIN ANALYZE.
+ */
+static Size
+test_estimate_dsm_custom_scan(CustomScanState *node, ParallelContext *pcxt)
+{
+	return offsetof(SharedTestScanInfo, sinstrument)
+		+ pcxt->nworkers * sizeof(TestScanInstrumentation);
+}
+
+static void
+test_initialize_dsm_custom_scan(CustomScanState *node, ParallelContext *pcxt,
+								void *coordinate)
+{
+	TestCustomScanState *tstate = (TestCustomScanState *) node;
+
+	tstate->shared_info = (SharedTestScanInfo *) coordinate;
+	memset(tstate->shared_info, 0, node->pinstrument_len);
+	tstate->shared_info->num_workers = pcxt->nworkers;
+}
+
+static void
+test_initialize_worker_custom_scan(CustomScanState *node,
+								   ParallelWorkerContext *pwcxt,
+								   void *coordinate)
+{
+	TestCustomScanState *tstate = (TestCustomScanState *) node;
+
+	tstate->shared_info = (SharedTestScanInfo *) coordinate;
+	tstate->sinstrument =
+		&tstate->shared_info->sinstrument[ParallelWorkerNumber];
+}
+
+static void
+test_retrieve_instrumentation_custom_scan(CustomScanState *node)
+{
+	TestCustomScanState *tstate = (TestCustomScanState *) node;
+	SharedTestScanInfo *si;
+	Size		size;
+
+	if (tstate->shared_info == NULL)
+		return;
+
+	/* The DSM segment is about to go away, so copy the data out of it. */
+	size = offsetof(SharedTestScanInfo, sinstrument)
+		+ tstate->shared_info->num_workers * sizeof(TestScanInstrumentation);
+	si = palloc(size);
+	memcpy(si, tstate->shared_info, size);
+	tstate->shared_info = si;
+}
+
+static void
+test_explain_custom_scan(CustomScanState *node, List *ancestors,
+						 ExplainState *es)
+{
+	TestCustomScanState *tstate = (TestCustomScanState *) node;
+
+	if (!es->analyze)
+		return;
+
+	ExplainPropertyInteger("Tuples Emitted", NULL, tstate->ntuples, es);
+
+	if (tstate->shared_info != NULL && es->workers_state != NULL)
+	{
+		for (int n = 0; n < tstate->shared_info->num_workers; n++)
+		{
+			TestScanInstrumentation *sinstrument;
+
+			sinstrument = &tstate->shared_info->sinstrument[n];
+
+			ExplainOpenWorker(n, es);
+			ExplainPropertyInteger("Tuples Emitted", NULL,
+								   sinstrument->ntuples, es);
+			ExplainCloseWorker(n, es);
+		}
+	}
+}
+
 static const CustomExecMethods test_custom_exec_methods =
 {
 	.CustomName = TEST_CUSTOM_SCAN_NAME,
@@ -276,6 +386,11 @@ static const CustomExecMethods test_custom_exec_methods =
 	.ExecCustomScan = test_exec_custom_scan,
 	.EndCustomScan = test_end_custom_scan,
 	.ReScanCustomScan = test_rescan_custom_scan,
+	.EstimateDSMInstrumentationCustomScan = test_estimate_dsm_custom_scan,
+	.InitializeDSMInstrumentationCustomScan = test_initialize_dsm_custom_scan,
+	.InitializeWorkerInstrumentationCustomScan = test_initialize_worker_custom_scan,
+	.RetrieveInstrumentationCustomScan = test_retrieve_instrumentation_custom_scan,
+	.ExplainCustomScan = test_explain_custom_scan,
 };
 
 /*
