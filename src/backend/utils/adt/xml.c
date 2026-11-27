@@ -184,6 +184,9 @@ static const char *map_sql_catalog_to_xmlschema_types(List *nspid_list,
 static const char *map_sql_type_to_xml_name(Oid typeoid, int typmod);
 static const char *map_sql_typecoll_to_xmlschema_types(List *tupdesc_list);
 static const char *map_sql_type_to_xmlschema_type(Oid typeoid, int typmod);
+static char *map_sql_value_to_xml_value_internal(Datum value, Oid type,
+												 bool xml_escape_strings,
+												 FmgrInfo *typoutput);
 static void SPI_sql_row_to_xmlelement(uint64 rownum, StringInfo result,
 									  char *tablename, bool nulls, bool tableforest,
 									  const char *targetns, bool top_level);
@@ -2533,7 +2536,23 @@ map_xml_name_to_sql_identifier(const char *name)
 char *
 map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 {
-	if (type_is_array_domain(type))
+	return map_sql_value_to_xml_value_internal(value, type,
+											   xml_escape_strings, NULL);
+}
+
+/*
+ * Workhorse for map_sql_value_to_xml_value().
+ *
+ * If typoutput is not NULL, "type" must be a non-array base type and
+ * typoutput its output function.  The array case uses this to look them
+ * up only once per array instead of for every element.
+ */
+static char *
+map_sql_value_to_xml_value_internal(Datum value, Oid type,
+									bool xml_escape_strings,
+									FmgrInfo *typoutput)
+{
+	if (typoutput == NULL && type_is_array_domain(type))
 	{
 		ArrayType  *array;
 		Oid			elmtype;
@@ -2546,6 +2565,8 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 		StringInfoData buf;
 		MemoryContext elemcxt;
 		MemoryContext oldcxt;
+		FmgrInfo	elmoutput;
+		FmgrInfo   *elmoutputp = NULL;
 		int			i;
 
 		array = DatumGetArrayTypeP(value);
@@ -2556,6 +2577,24 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 						  elmlen, elmbyval, elmalign,
 						  &elem_values, &elem_nulls,
 						  &num_elems);
+
+		/*
+		 * Look up the element type's output function once for all elements,
+		 * unless the elements are themselves arrays (a domain over an array
+		 * type), which are converted recursively.  This must be done before
+		 * switching to the temporary context below, so that whatever the
+		 * output function caches in fn_extra survives each reset.
+		 */
+		if (!type_is_array_domain(elmtype))
+		{
+			Oid			typeOut;
+			bool		isvarlena;
+
+			elmtype = getBaseType(elmtype);
+			getTypeOutputInfo(elmtype, &typeOut, &isvarlena);
+			fmgr_info(typeOut, &elmoutput);
+			elmoutputp = &elmoutput;
+		}
 
 		initStringInfo(&buf);
 
@@ -2573,8 +2612,9 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 				continue;
 			appendStringInfoString(&buf, "<element>");
 			appendStringInfoString(&buf,
-								   map_sql_value_to_xml_value(elem_values[i],
-															  elmtype, true));
+								   map_sql_value_to_xml_value_internal(elem_values[i],
+																	   elmtype, true,
+																	   elmoutputp));
 			appendStringInfoString(&buf, "</element>");
 
 			MemoryContextReset(elemcxt);
@@ -2597,7 +2637,8 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 		 * Flatten domains; the special-case treatments below should apply to,
 		 * eg, domains over boolean not just boolean.
 		 */
-		type = getBaseType(type);
+		if (typoutput == NULL)
+			type = getBaseType(type);
 
 		/*
 		 * Special XSD formatting for some data types
@@ -2741,10 +2782,16 @@ map_sql_value_to_xml_value(Datum value, Oid type, bool xml_escape_strings)
 		}
 
 		/*
-		 * otherwise, just use the type's native text representation
+		 * otherwise, just use the type's native text representation, through
+		 * the output function given by the caller if there is one
 		 */
-		getTypeOutputInfo(type, &typeOut, &isvarlena);
-		str = OidOutputFunctionCall(typeOut, value);
+		if (typoutput)
+			str = OutputFunctionCall(typoutput, value);
+		else
+		{
+			getTypeOutputInfo(type, &typeOut, &isvarlena);
+			str = OidOutputFunctionCall(typeOut, value);
+		}
 
 		/* ... exactly as-is for XML, and when escaping is not wanted */
 		if (type == XMLOID || !xml_escape_strings)

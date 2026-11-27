@@ -63,6 +63,12 @@ SELECT xmlelement(name foo, xml 'bar');
 SELECT xmlelement(name foo, text 'b<a/>r');
 SELECT xmlelement(name foo, xml 'b<a/>r');
 SELECT xmlelement(name foo, array[1, 2, 3]);
+-- arrays of domains: over a scalar type, and over an array type
+CREATE DOMAIN xmltest_bool AS bool;
+CREATE DOMAIN xmltest_intarr AS int[];
+SELECT xmlelement(name foo, array[true, false]::xmltest_bool[]);
+SELECT xmlelement(name foo, array['{1,2}', '{3}']::xmltest_intarr[]);
+DROP DOMAIN xmltest_bool, xmltest_intarr;
 SET xmlbinary TO base64;
 SELECT xmlelement(name foo, bytea 'bar');
 SET xmlbinary TO hex;
