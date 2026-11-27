@@ -625,3 +625,86 @@ SELECT JSON_VALUE(x, '$' RETURNING json) FROM (VALUES ('1'::json), ('null'), ('2
 SELECT JSON_VALUE(x, '$.a' RETURNING jsonb) FROM (VALUES ('{"a": 1}'::jsonb), ('{}'), ('{"a": 2}')) v(x);
 SELECT JSON_VALUE(x, 'strict $.a' RETURNING jsonb) FROM (VALUES ('{"a": 1}'::jsonb), ('[]'), ('{"a": 2}')) v(x);
 SELECT JSON_VALUE(x, '$' RETURNING jsonb) FROM (VALUES ('1'::jsonb), (NULL), ('2')) v(x);
+
+-- Test the planner's strictness check for JsonExpr.  JSON_VALUE() etc. can
+-- return non-NULL for a NULL PASSING value or a NULL input to an ON EMPTY /
+-- ON ERROR expression, and, when RETURNING a domain, for a NULL context item.
+CREATE DOMAIN queryfuncs_jsonb_nn AS jsonb NOT NULL;
+CREATE DOMAIN queryfuncs_int_plain AS int;
+
+-- When a subquery is pulled up underneath an outer join, such expressions
+-- must be wrapped in PlaceHolderVars; all of these must be NULL.
+SELECT ss.* FROM (VALUES (1)) a
+LEFT JOIN (SELECT JSON_VALUE(jsonb '1', '$' PASSING y AS p) passing,
+                  JSON_VALUE(jsonb '{}', '$.a' RETURNING int
+                             DEFAULT num_nulls((SELECT y)) ON EMPTY) sublink,
+                  JSON_QUERY(j, '$' RETURNING queryfuncs_jsonb_nn
+                             EMPTY ARRAY ON ERROR) domain
+           FROM (VALUES (1, jsonb '1'), (2, NULL)) b(y, j)) ss ON false;
+
+-- A STRICT SQL function must not be inlined if its body isn't strict in the
+-- function's parameters; these must return NULL for the NULL row, not a
+-- non-NULL value.
+CREATE TEMP TABLE jsonexpr_strict_args (x int);
+INSERT INTO jsonexpr_strict_args VALUES (NULL), (1);
+CREATE FUNCTION jsonexpr_strict_passing(int) RETURNS text
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_VALUE(jsonb '1', '$' PASSING $1 AS p) $$;
+CREATE FUNCTION jsonexpr_strict_default(int) RETURNS int
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_VALUE(jsonb '1', '$' RETURNING int
+                          DEFAULT $1 + 0 ON EMPTY) $$;
+SELECT x, jsonexpr_strict_passing(x), jsonexpr_strict_default(x)
+FROM jsonexpr_strict_args ORDER BY x;
+
+-- With a NOT NULL domain, a NULL context item makes even the default NULL ON
+-- ERROR raise an error, as the NULL then fails the domain check too; this must
+-- return NULL for the NULL row, not an error.
+CREATE FUNCTION jsonexpr_strict_domain(jsonb) RETURNS jsonb
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_QUERY($1, '$' RETURNING queryfuncs_jsonb_nn) $$;
+SELECT x, jsonexpr_strict_domain(x::text::jsonb)
+FROM jsonexpr_strict_args ORDER BY x;
+
+-- Any domain is treated as non-strict, even one without constraints, since
+-- constraints may be added after planning.  So this is not inlined.
+CREATE FUNCTION jsonexpr_strict_domain_plain(text) RETURNS int
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_VALUE($1::jsonb, '$' RETURNING queryfuncs_int_plain) $$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT jsonexpr_strict_domain_plain(x::text) FROM jsonexpr_strict_args;
+
+-- But constant PASSING values and ON EMPTY / ON ERROR behaviors, including
+-- the implicit FALSE ON ERROR of JSON_EXISTS(), have no input that could be
+-- NULL, so these are strict in the context item and can be inlined.
+CREATE FUNCTION jsonexpr_strict_const_value(text) RETURNS int
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_VALUE($1::jsonb, '$ ? (@ > $v)' PASSING 0 AS v
+                          RETURNING int DEFAULT -1 ON EMPTY
+                          DEFAULT -2 ON ERROR) $$;
+CREATE FUNCTION jsonexpr_strict_const_query(text) RETURNS jsonb
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_QUERY($1::jsonb, '$.a' EMPTY ARRAY ON EMPTY) $$;
+CREATE FUNCTION jsonexpr_strict_const_exists(text) RETURNS bool
+  LANGUAGE sql IMMUTABLE STRICT
+  AS $$ SELECT JSON_EXISTS($1::jsonb, '$.a') $$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT jsonexpr_strict_const_value(x::text),
+       jsonexpr_strict_const_query(x::text),
+       jsonexpr_strict_const_exists(x::text)
+FROM jsonexpr_strict_args;
+SELECT x, jsonexpr_strict_const_value(x::text),
+       jsonexpr_strict_const_query(x::text),
+       jsonexpr_strict_const_exists(x::text)
+FROM jsonexpr_strict_args ORDER BY x;
+
+DROP TABLE jsonexpr_strict_args;
+DROP FUNCTION jsonexpr_strict_passing(int);
+DROP FUNCTION jsonexpr_strict_default(int);
+DROP FUNCTION jsonexpr_strict_domain(jsonb);
+DROP FUNCTION jsonexpr_strict_domain_plain(text);
+DROP FUNCTION jsonexpr_strict_const_value(text);
+DROP FUNCTION jsonexpr_strict_const_query(text);
+DROP FUNCTION jsonexpr_strict_const_exists(text);
+DROP DOMAIN queryfuncs_jsonb_nn;
+DROP DOMAIN queryfuncs_int_plain;
