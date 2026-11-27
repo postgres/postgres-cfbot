@@ -1393,6 +1393,107 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 }
 
 /*
+ * simplify_is_not_distinct
+ *	  If the given node is "NOT (a IS DISTINCT FROM b)", which is how the
+ *	  parser represents "a IS NOT DISTINCT FROM b", and at least one of its
+ *	  inputs is known to be non-null (equivalently, at most one input might
+ *	  be NULL), return the equivalent equality expression "a = b".
+ *	  Otherwise return the node unchanged.
+ *
+ * The equality form is preferable because the planner knows how to use it
+ * for index scans, join clauses and equivalence classes, whereas it has no
+ * such support for DistinctExpr.
+ *
+ * This conversion is only applied to top-level AND items of a qual, where
+ * the expression is used purely as a filter and NULL and FALSE are
+ * equivalent.  With one non-null input the both-NULL case cannot arise, so
+ * the two forms select exactly the same rows.  Do not apply it to arbitrary
+ * subexpressions: under NOT or a BooleanTest, NULL and FALSE are not
+ * interchangeable.
+ *
+ * Note that eval_const_expressions() has already handled the cases where
+ * both inputs are non-null, or where one input is a NULL constant, so in
+ * practice this only fires when exactly one input is non-null.
+ *
+ * We can only use NOTNULL_SOURCE_HASHTABLE here, as this runs before the
+ * RelOptInfos are built.
+ */
+static Node *
+simplify_is_not_distinct(PlannerInfo *root, Node *node)
+{
+	BoolExpr   *notExpr;
+	DistinctExpr *distinct;
+	Expr	   *lexpr;
+	Expr	   *rexpr;
+	int			flag = 0;		/* number of inputs that might be NULL */
+
+	if (!is_notclause(node))
+		return node;
+
+	notExpr = (BoolExpr *) node;
+	if (list_length(notExpr->args) != 1 ||
+		!IsA(linitial(notExpr->args), DistinctExpr))
+		return node;
+
+	distinct = (DistinctExpr *) linitial(notExpr->args);
+	Assert(list_length(distinct->args) == 2);
+	lexpr = (Expr *) linitial(distinct->args);
+	rexpr = (Expr *) lsecond(distinct->args);
+
+	/*
+	 * "a = b" is only equivalent if the equality operator is strict;
+	 * otherwise it might return true for a NULL input, whereas IS NOT
+	 * DISTINCT FROM would return false.
+	 */
+	if (!op_strict(distinct->opno))
+		return node;
+
+	if ((IsA(lexpr, Const) && ((Const *) lexpr)->constisnull) ||
+		(!expr_is_nonnullable(root, lexpr, NOTNULL_SOURCE_HASHTABLE)))
+		flag++;
+
+	if ((IsA(rexpr, Const) && ((Const *) rexpr)->constisnull) ||
+		(!expr_is_nonnullable(root, rexpr, NOTNULL_SOURCE_HASHTABLE)))
+		flag++;
+
+	if (flag < 2)
+	{
+		OpExpr	   *eqExpr = makeNode(OpExpr);
+
+		eqExpr->opno = distinct->opno;
+		eqExpr->opfuncid = distinct->opfuncid;
+		eqExpr->opresulttype = BOOLOID;
+		eqExpr->opretset = distinct->opretset;
+		eqExpr->opcollid = distinct->opcollid;
+		eqExpr->inputcollid = distinct->inputcollid;
+		eqExpr->args = distinct->args;
+		eqExpr->location = distinct->location;
+
+		return (Node *) eqExpr;
+	}
+
+	return node;
+}
+
+/*
+ * simplify_is_not_distinct_quals
+ *	  Apply simplify_is_not_distinct() to each top-level AND item of a
+ *	  qual.  The input list is not modified; a new list is returned.
+ */
+static List *
+simplify_is_not_distinct_quals(PlannerInfo *root, List *quals)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	foreach(lc, quals)
+		result = lappend(result,
+						 simplify_is_not_distinct(root, (Node *) lfirst(lc)));
+
+	return result;
+}
+
+/*
  * preprocess_expression
  *		Do subquery_planner's preprocessing work for an expression,
  *		which can be a targetlist, a WHERE clause (including JOIN/ON
@@ -1499,7 +1600,17 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 	 * SS_process_sublinks expects explicit-AND format.)
 	 */
 	if (kind == EXPRKIND_QUAL)
+	{
 		expr = (Node *) make_ands_implicit((Expr *) expr);
+
+		/*
+		 * Each top-level AND item is used only as a filter, so it's safe to
+		 * convert "a IS NOT DISTINCT FROM b" to "a = b" when one input is
+		 * non-null.  Don't look inside the items: under NOT or a BooleanTest
+		 * the conversion would change the result.
+		 */
+		expr = (Node *) simplify_is_not_distinct_quals(root, (List *) expr);
+	}
 
 	return expr;
 }

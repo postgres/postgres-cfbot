@@ -392,6 +392,107 @@ DROP TABLE dist_tab;
 DROP TYPE dist_row_t;
 
 --
+-- Test optimization of IS NOT DISTINCT FROM when one input is nullable
+--
+
+-- Helper to show estimated and actual row counts, with cost estimates masked
+-- so that the output is stable across platforms.
+CREATE OR REPLACE FUNCTION predicate_explain(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS
+$$
+DECLARE
+    ln text;
+BEGIN
+    FOR ln IN EXECUTE
+        'EXPLAIN (ANALYZE, COSTS ON, TIMING OFF, SUMMARY OFF, BUFFERS OFF) '
+        || query
+    LOOP
+        ln := regexp_replace(ln, 'cost=\d+\.\d\d\.\.\d+\.\d\d', 'cost=N..N');
+        RETURN NEXT ln;
+    END LOOP;
+END;
+$$;
+
+CREATE TABLE t_is_not_distinct (id integer, a integer, b integer NOT NULL);
+
+INSERT INTO t_is_not_distinct
+SELECT g, CASE WHEN g % 10 = 0 THEN NULL ELSE g END, g
+FROM generate_series(1, 1000) AS s(g);
+
+CREATE INDEX t_is_not_distinct_a_idx ON t_is_not_distinct USING btree (a);
+CREATE INDEX t_is_not_distinct_b_idx ON t_is_not_distinct USING btree (b);
+
+ANALYZE t_is_not_distinct;
+
+-- keep the plans and actual row counts reproducible
+SET max_parallel_workers_per_gather TO 0;
+
+-- a is nullable and the constant is not: converted to equality and indexable
+SET enable_seqscan TO off;
+SELECT predicate_explain($$
+SELECT * FROM t_is_not_distinct WHERE a IS NOT DISTINCT FROM 1$$);
+RESET enable_seqscan;
+SELECT id FROM t_is_not_distinct WHERE a IS NOT DISTINCT FROM 1;
+
+-- both inputs are the same nullable column: not converted
+SELECT predicate_explain($$
+SELECT * FROM t_is_not_distinct WHERE a IS NOT DISTINCT FROM a$$);
+
+-- b is NOT NULL: converted to equality and indexable
+SELECT predicate_explain($$
+SELECT * FROM t_is_not_distinct WHERE a IS NOT DISTINCT FROM b$$);
+
+-- the conversion lets the planner use the index on b and derive "a = 1"
+SET enable_seqscan TO off;
+SELECT predicate_explain($$
+SELECT * FROM t_is_not_distinct WHERE a IS NOT DISTINCT FROM b AND b = 1$$);
+RESET enable_seqscan;
+
+-- both join inputs are nullable: not converted, but NULLs still match
+SELECT predicate_explain($$
+SELECT * FROM t_is_not_distinct x, t_is_not_distinct y
+WHERE x.a IS NOT DISTINCT FROM y.a$$);
+
+-- ... and a restriction on one side does not change that fact
+SELECT predicate_explain($$
+SELECT * FROM t_is_not_distinct x, t_is_not_distinct y
+WHERE x.a IS NOT DISTINCT FROM y.a AND x.a = 1$$);
+
+-- y.b is NOT NULL: converted to equality, allowing a hash join
+SELECT predicate_explain($$
+SELECT * FROM t_is_not_distinct x, t_is_not_distinct y
+WHERE x.a IS NOT DISTINCT FROM y.b$$);
+
+-- ... or a merge join
+SET enable_hashjoin TO off;
+SELECT predicate_explain($$
+SELECT * FROM t_is_not_distinct x, t_is_not_distinct y
+WHERE x.a IS NOT DISTINCT FROM y.b$$);
+RESET enable_hashjoin;
+
+-- the derived equality can be pushed to both sides via equivalence classes
+SELECT predicate_explain($$
+SELECT * FROM t_is_not_distinct x, t_is_not_distinct y
+WHERE x.a IS NOT DISTINCT FROM y.b AND x.a = 1$$);
+SELECT predicate_explain($$
+SELECT * FROM t_is_not_distinct x, t_is_not_distinct y
+WHERE x.a IS NOT DISTINCT FROM y.b AND y.b = 1$$);
+RESET max_parallel_workers_per_gather;
+
+-- a top-level NOT is not rewritten; this is "a IS DISTINCT FROM 1"
+SELECT predicate_explain($$
+SELECT id FROM t_is_not_distinct WHERE NOT (a IS NOT DISTINCT FROM 1)$$);
+SELECT count(*) FROM t_is_not_distinct WHERE NOT (a IS NOT DISTINCT FROM 1);
+
+-- the targetlist must keep IS NOT DISTINCT FROM semantics: a NULL a
+-- compared to a non-null b yields false, not NULL
+SELECT id, a IS NOT DISTINCT FROM b AS indf
+FROM t_is_not_distinct WHERE id IN (1, 10) ORDER BY id;
+
+DROP TABLE t_is_not_distinct;
+DROP FUNCTION predicate_explain(text);
+
+--
 -- Test optimization of BooleanTest (IS [NOT] TRUE/FALSE/UNKNOWN) on
 -- non-nullable input
 --
