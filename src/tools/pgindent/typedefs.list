@@ -3071,6 +3071,7 @@ SystemSamplerData
 SystemTimeSamplerData
 TAPtype
 TAR_MEMBER
+TBMCacheEntry
 TBMIterateResult
 TBMIteratingState
 TBMIterator
