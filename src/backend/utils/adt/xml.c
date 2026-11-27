@@ -2990,6 +2990,8 @@ cursor_to_xml(PG_FUNCTION_ARGS)
 
 	StringInfoData result;
 	Portal		portal;
+	MemoryContext rowcxt;
+	MemoryContext oldcxt;
 	uint64		i;
 
 	initStringInfo(&result);
@@ -3008,9 +3010,24 @@ cursor_to_xml(PG_FUNCTION_ARGS)
 				 errmsg("cursor \"%s\" does not exist", name)));
 
 	SPI_cursor_fetch(portal, true, count);
+
+	rowcxt = AllocSetContextCreate(CurrentMemoryContext,
+								   "cursor_to_xml temporary cxt",
+								   ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(rowcxt);
+
 	for (i = 0; i < SPI_processed; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+
 		SPI_sql_row_to_xmlelement(i, &result, NULL, nulls,
 								  tableforest, targetns, true);
+
+		MemoryContextReset(rowcxt);
+	}
+
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(rowcxt);
 
 	SPI_finish();
 
@@ -3074,6 +3091,8 @@ query_to_xml_internal(const char *query, char *tablename,
 {
 	StringInfo	result;
 	char	   *xmltn;
+	MemoryContext rowcxt;
+	MemoryContext oldcxt;
 	uint64		i;
 
 	if (tablename)
@@ -3099,9 +3118,23 @@ query_to_xml_internal(const char *query, char *tablename,
 	if (xmlschema)
 		appendStringInfo(result, "%s\n\n", xmlschema);
 
+	rowcxt = AllocSetContextCreate(CurrentMemoryContext,
+								   "query_to_xml_internal temporary cxt",
+								   ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(rowcxt);
+
 	for (i = 0; i < SPI_processed; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+
 		SPI_sql_row_to_xmlelement(i, result, tablename, nulls,
 								  tableforest, targetns, top_level);
+
+		MemoryContextReset(rowcxt);
+	}
+
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(rowcxt);
 
 	if (!tableforest)
 		xmldata_root_element_end(result, xmltn);
