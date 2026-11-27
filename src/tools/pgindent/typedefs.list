@@ -2467,6 +2467,17 @@ PullFilterOps
 PushFilter
 PushFilterOps
 PushFunction
+PwetCaptureLevel
+PwetLWLockHash
+PwetLWLockHashEntry
+PwetMarkerState
+PwetRegionHeader
+PwetSlot
+PwetStats
+PwetTimingEntry
+PwetTraceRecord
+PwetTraceRowFields
+PwetTraceState
 PyCFunction
 PyMethodDef
 PyModuleDef
@@ -3411,6 +3422,7 @@ WaitEventCustomEntryByInfo
 WaitEventCustomEntryByName
 WaitEventIO
 WaitEventIPC
+WaitEventReportState
 WaitEventSet
 WaitEventTimeout
 WaitLSNProcInfo
