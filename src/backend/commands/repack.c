@@ -3653,7 +3653,8 @@ build_new_indexes(Relation NewHeap, List *OldIndexes)
 	{
 		Oid			newindex;
 		char	   *newName;
-		Relation	ind;
+		Relation	ind,
+					newind;
 
 		ind = index_open(oldindex, ShareUpdateExclusiveLock);
 
@@ -3662,10 +3663,26 @@ build_new_indexes(Relation NewHeap, List *OldIndexes)
 									 "repacknew",
 									 get_rel_namespace(ind->rd_index->indrelid),
 									 false);
-		newindex = index_create_copy(NewHeap, INDEX_CREATE_SUPPRESS_PROGRESS,
+
+		/*
+		 * Create the catalog entries for the new index without building it
+		 * yet, and copy any associated constraints first.  BuildIndexInfo()
+		 * (called below and in parallel index build workers) looks up the
+		 * exclusion constraint record in pg_constraint when indisexclusion is
+		 * set.
+		 */
+		newindex = index_create_copy(NewHeap,
+									 INDEX_CREATE_SKIP_BUILD |
+									 INDEX_CREATE_SUPPRESS_PROGRESS,
 									 oldindex, ind->rd_rel->reltablespace,
 									 newName);
 		copy_index_constraints(ind, newindex, RelationGetRelid(NewHeap));
+
+		newind = index_open(newindex, NoLock);
+		index_build(NewHeap, newind, BuildIndexInfo(newind), false, true,
+					false);
+		index_close(newind, NoLock);
+
 		result = lappend_oid(result, newindex);
 
 		index_close(ind, NoLock);
@@ -3680,9 +3697,9 @@ build_new_indexes(Relation NewHeap, List *OldIndexes)
  * Create a transient copy of a constraint -- supported by a transient
  * copy of the index that supports the original constraint.
  *
- * When repacking a table that contains exclusion constraints, the executor
- * relies on these constraints being properly catalogued.  These copies are
- * to support that.
+ * When repacking a table that contains exclusion constraints, parallel index
+ * builds and the executor rely on these constraints being properly
+ * catalogued.  These copies are to support that.
  *
  * We don't need the constraints for anything else (the original constraints
  * will be there once repack completes), so we add pg_depend entries so that
