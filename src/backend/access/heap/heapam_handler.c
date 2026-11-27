@@ -47,6 +47,7 @@
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/tuplesort.h"
 
 static void reform_and_rewrite_tuple(HeapTuple tuple,
@@ -1997,6 +1998,38 @@ heapam_scan_get_blocks_done(HeapScanDesc hscan)
  */
 
 /*
+ * Check whether the heap contains no live tuples.  In fast mode, only a heap
+ * with no blocks is considered empty; otherwise, scan for a live tuple if
+ * necessary.  The caller must hold AccessExclusiveLock on the relation.
+ */
+static bool
+heapam_relation_is_empty(Relation rel, bool fast_decision)
+{
+	TableScanDesc scan;
+	bool		is_empty;
+
+	Assert(CheckRelationLockedByMe(rel, AccessExclusiveLock, true));
+
+	/* A relation with no blocks is certainly empty. */
+	if (RelationGetNumberOfBlocks(rel) == 0)
+		return true;
+
+	if (fast_decision)
+		return false;
+
+	/*
+	 * Look for a live tuple, including our own changes and any commits made
+	 * since the caller's snapshot was taken.  AccessExclusiveLock ensures
+	 * there are no concurrent modifications to consider.
+	 */
+	scan = table_beginscan_strat(rel, SnapshotSelf, 0, NULL, true, false);
+	is_empty = (heap_getnext(scan, ForwardScanDirection) == NULL);
+	table_endscan(scan);
+
+	return is_empty;
+}
+
+/*
  * Check to see whether the table needs a TOAST table.  It does only if
  * (1) there are any toastable attributes, and (2) the maximum length
  * of a tuple could exceed TOAST_TUPLE_THRESHOLD.  (We don't want to
@@ -2705,6 +2738,7 @@ static const TableAmRoutine heapam_methods = {
 	.index_validate_scan = heapam_index_validate_scan,
 
 	.relation_size = table_block_relation_size,
+	.relation_is_empty = heapam_relation_is_empty,
 	.relation_needs_toast_table = heapam_relation_needs_toast_table,
 	.relation_toast_am = heapam_relation_toast_am,
 	.relation_fetch_toast_slice = heap_fetch_toast_slice,

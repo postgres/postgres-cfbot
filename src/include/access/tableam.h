@@ -761,6 +761,9 @@ typedef struct TableAmRoutine
 	 */
 	uint64		(*relation_size) (Relation rel, ForkNumber forkNumber);
 
+	/* See table_relation_is_empty(). */
+	bool		(*relation_is_empty) (Relation rel, bool fast_decision);
+
 
 	/*
 	 * This callback should return true if the relation requires a TOAST table
@@ -1960,6 +1963,26 @@ static inline uint64
 table_relation_size(Relation rel, ForkNumber forkNumber)
 {
 	return rel->rd_tableam->relation_size(rel, forkNumber);
+}
+
+/*
+ * Return true if the relation contains no live tuples.
+ *
+ * If fast_decision is true, the AM may use a conservative, inexpensive check
+ * rather than scanning the relation.  In that case, false means that the
+ * relation might not be empty.  Otherwise, the result must be exact, scanning
+ * the relation if necessary.
+ *
+ * The caller must hold AccessExclusiveLock on the relation, so that it cannot
+ * become nonempty while the result is being used.  The check must consider all
+ * committed changes and the current transaction's changes, including those
+ * made by the current command (SnapshotSelf semantics).  It must not depend on
+ * the caller's MVCC snapshot, which might not see recently committed tuples.
+ */
+static inline bool
+table_relation_is_empty(Relation rel, bool fast_decision)
+{
+	return rel->rd_tableam->relation_is_empty(rel, fast_decision);
 }
 
 /*
