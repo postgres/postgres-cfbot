@@ -33,6 +33,11 @@ static Buffer _bt_moveright(Relation rel, Relation heaprel, BTScanInsert key,
 							Buffer buf, bool forupdate, BTStack stack,
 							int access);
 static OffsetNumber _bt_binsrch(Relation rel, BTScanInsert key, Buffer buf);
+static int32 _bt_compare_coded(Relation rel, BTScanInsert key, Page page,
+							   OffsetNumber offnum);
+static inline int32 _bt_compare_tuple(Relation rel, BTScanInsert key,
+									  Page page, OffsetNumber offnum,
+									  IndexTuple itup);
 static int	_bt_binsrch_posting(BTScanInsert key, Page page,
 								OffsetNumber offnum);
 static inline void _bt_returnitem(IndexScanDesc scan, BTScanOpaque so);
@@ -693,16 +698,53 @@ _bt_compare(Relation rel,
 			Page page,
 			OffsetNumber offnum)
 {
+	BTPageOpaque opaque = BTPageGetOpaque(page);
+
+	if (unlikely(P_HASPREFIX(opaque)) && offnum > BTPageGetPrefixOff(opaque))
+		return _bt_compare_coded(rel, key, page, offnum);
+
+	Assert(_bt_check_natts(rel, key->heapkeyspace, page, offnum));
+	return _bt_compare_tuple(rel, key, page, offnum,
+							 (IndexTuple) PageGetItem(page,
+													  PageGetItemId(page, offnum)));
+}
+
+/*
+ * _bt_compare_coded() -- _bt_compare() for a coded prefix-compressed leaf item.
+ *
+ * Kept out of line so that only these comparisons pay for the decode buffer,
+ * which is a whole BLCKSZ; _bt_compare() on a plain page uses no stack for it.
+ */
+static pg_noinline int32
+_bt_compare_coded(Relation rel, BTScanInsert key, Page page,
+				  OffsetNumber offnum)
+{
+	BTItemBuf	prefixbuf;
+
+	/* Decode (and so validate) the member before assertions inspect it. */
+	IndexTuple	itup = _bt_prefix_decode(page, offnum, &prefixbuf);
+
+	Assert(_bt_check_natts(rel, key->heapkeyspace, page, offnum));
+	return _bt_compare_tuple(rel, key, page, offnum, itup);
+}
+
+/*
+ * _bt_compare_tuple() -- body of _bt_compare(), given the item at offnum.
+ *
+ * itup is either the tuple on the page or its decoded copy.
+ */
+static inline int32
+_bt_compare_tuple(Relation rel, BTScanInsert key, Page page,
+				  OffsetNumber offnum, IndexTuple itup)
+{
 	TupleDesc	itupdesc = RelationGetDescr(rel);
 	BTPageOpaque opaque = BTPageGetOpaque(page);
-	IndexTuple	itup;
 	ItemPointer heapTid;
 	ScanKey		scankey;
 	int			ncmpkey;
 	int			ntupatts;
 	int32		result;
 
-	Assert(_bt_check_natts(rel, key->heapkeyspace, page, offnum));
 	Assert(key->keysz <= IndexRelationGetNumberOfKeyAttributes(rel));
 	Assert(key->heapkeyspace || key->scantid == NULL);
 
@@ -713,7 +755,6 @@ _bt_compare(Relation rel,
 	if (!P_ISLEAF(opaque) && offnum == P_FIRSTDATAKEY(opaque))
 		return 1;
 
-	itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));
 	ntupatts = BTreeTupleGetNAtts(itup, rel);
 
 	/*

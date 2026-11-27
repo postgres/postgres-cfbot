@@ -472,6 +472,18 @@ test=# SELECT itemoffset, ctid, itemlen, nulls, vars, data, dead, htid, tids[0:2
       however.
      </para>
      <para>
+      On a leaf page of an index with
+      <link linkend="index-reloption-prefix-compression"><literal>prefix_compression</literal></link>
+      enabled, the item after the high key (or the first item, on a rightmost
+      page) may be the page's prefix directory, which holds the leading bytes
+      that the page's data items share.  Such a page has bit 512
+      (<literal>BTP_PREFIX</literal>) set in <structfield>btpo_flags</structfield>.
+      Its data items are shown decoded, so <structfield>data</structfield>
+      and <structfield>htid</structfield> read as they would on an
+      uncompressed page, while <structfield>itemlen</structfield> shows the
+      item's stored, compressed size.
+     </para>
+     <para>
       For more details about the structure of B-tree indexes, see
       <xref linkend="btree-structure"/>.  For more details about
       deduplication and posting lists, see <xref

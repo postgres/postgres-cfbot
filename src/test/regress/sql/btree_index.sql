@@ -520,3 +520,213 @@ CREATE TABLE btree_part (id int4) PARTITION BY RANGE (id);
 CREATE INDEX btree_part_idx ON btree_part(id);
 ALTER INDEX btree_part_idx ALTER COLUMN id SET (n_distinct=100);
 DROP TABLE btree_part;
+
+--
+-- Leaf key prefix compression (prefix_compression reloption).
+--
+-- Forced scans of a prefix-compressed index must return what the heap or the
+-- inserted literals return, after build, retail inserts and splits, and
+-- VACUUM.  The keys share a long prefix, sit around 127 bytes (where the
+-- varlena header grows from 1 to 4 bytes, so neighbors share only a
+-- header-length prefix), exceed a group's anchor, share nothing, or are NULL.
+-- The C collation keeps the output platform-independent.
+--
+CREATE TABLE btree_prefix (u text COLLATE "C");
+INSERT INTO btree_prefix
+  SELECT 'https://example.com/path/to/resource/' || lpad((g % 20000)::text, 8, '0')
+  FROM generate_series(1, 20000) g;
+INSERT INTO btree_prefix
+  SELECT repeat('a', 40) || repeat('b', n) FROM generate_series(85, 90) n;
+INSERT INTO btree_prefix VALUES
+  (repeat('a', 125)), (repeat('a', 126)), (repeat('a', 127)), (repeat('a', 300)),
+  ('zzz-no-shared-prefix'), (NULL);
+CREATE INDEX btree_prefix_on ON btree_prefix (u) WITH (prefix_compression = on);
+
+-- The queries below must read the index, not fall back to the heap.
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (costs off)
+  SELECT u FROM btree_prefix WHERE u = 'https://example.com/path/to/resource/00012345';
+
+-- The recorded output is the oracle for these scans.
+SELECT count(*) FROM btree_prefix
+  WHERE u = 'https://example.com/path/to/resource/00012345';
+SELECT count(*) FROM btree_prefix
+  WHERE u BETWEEN 'https://example.com/path/to/resource/00000100'
+             AND 'https://example.com/path/to/resource/00000900';
+SELECT u FROM btree_prefix
+  WHERE u > 'https://example.com/path/to/resource/00019996' ORDER BY u DESC;
+-- Boundary and oversized keys round-trip to their exact stored values.
+SELECT u FROM btree_prefix WHERE u LIKE 'aaaa%' ORDER BY u;
+SELECT count(*) FROM btree_prefix WHERE u = repeat('a', 300);
+SELECT count(*) FROM btree_prefix WHERE u IS NULL;
+
+-- Compare an index-only scan with the inserted literals.  The plan shows the
+-- keys come from decoded index tuples, not the heap.
+EXPLAIN (costs off)
+  SELECT md5(string_agg(u, '|' ORDER BY u)) FROM btree_prefix WHERE u IS NOT NULL;
+SELECT (SELECT md5(string_agg(u, '|' ORDER BY u))
+          FROM btree_prefix WHERE u IS NOT NULL) =
+       md5(string_agg(x, '|' ORDER BY x)) AS ios_ok
+  FROM (
+    SELECT 'https://example.com/path/to/resource/' || lpad((g % 20000)::text, 8, '0') AS x
+      FROM generate_series(1, 20000) g
+    UNION ALL SELECT repeat('a', 40) || repeat('b', n) FROM generate_series(85, 90) n
+    UNION ALL SELECT v FROM (VALUES (repeat('a',125)),(repeat('a',126)),
+                                    (repeat('a',127)),(repeat('a',300)),
+                                    ('zzz-no-shared-prefix')) t(v)
+  ) oracle;
+
+INSERT INTO btree_prefix
+  SELECT 'https://example.com/other/' || lpad(g::text, 8, '0')
+  FROM generate_series(1, 10000) g;
+-- Delete only part of the URL range, so the boundary keys survive for later
+-- checks.
+DELETE FROM btree_prefix
+  WHERE u >= 'https://example.com/path/to/resource/00000000'
+    AND u <  'https://example.com/path/to/resource/00005000';
+VACUUM btree_prefix;
+INSERT INTO btree_prefix
+  SELECT 'https://example.com/path/to/resource/' || lpad((g % 5000)::text, 8, '0')
+  FROM generate_series(1, 5000) g;
+-- The index-only digest must equal the digest of a sequential heap scan.
+EXPLAIN (costs off)
+  SELECT md5(string_agg(u, '|' ORDER BY u)) FROM btree_prefix WHERE u IS NOT NULL;
+SELECT md5(string_agg(u, '|' ORDER BY u)) AS ios_digest
+  FROM btree_prefix WHERE u IS NOT NULL \gset
+SET enable_indexscan = off;
+SET enable_seqscan = on;
+EXPLAIN (costs off)
+  SELECT md5(string_agg(u, '|' ORDER BY u)) FROM btree_prefix WHERE u IS NOT NULL;
+SELECT :'ios_digest' =
+       (SELECT md5(string_agg(u, '|' ORDER BY u)) FROM btree_prefix WHERE u IS NOT NULL)
+       AS post_churn_ok;
+RESET enable_indexscan;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+
+-- The reloption round-trips and can be toggled without a rewrite.
+SELECT reloptions FROM pg_class WHERE relname = 'btree_prefix_on';
+ALTER INDEX btree_prefix_on SET (prefix_compression = off);
+SELECT reloptions FROM pg_class WHERE relname = 'btree_prefix_on';
+-- Reading back with the option off still returns correct rows: existing
+-- BTP_PREFIX leaves keep their coded form and decode on the page flag.
+SET enable_seqscan = off;
+SELECT count(*) FROM btree_prefix WHERE u = repeat('a', 126);
+RESET enable_seqscan;
+
+-- Verify scans of a fixed-width key with prefix compression enabled.
+CREATE INDEX btree_prefix_int ON btree_prefix ((length(u))) WITH (prefix_compression = on);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (costs off)
+  SELECT length(u) FROM btree_prefix WHERE length(u) = 300;
+SELECT length(u) FROM btree_prefix WHERE length(u) = 300;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE btree_prefix;
+
+--
+-- Bottom-up index deletion on prefix-compressed pages.
+--
+-- Non-key UPDATEs make "logically unchanged" index inserts, so full coded
+-- leaves get a bottom-up deletion pass before they split.  What the pass can
+-- remove depends on timing, so only the index contents are checked.
+--
+CREATE TABLE btree_prefix_bu (id int PRIMARY KEY, u text COLLATE "C", filler text);
+INSERT INTO btree_prefix_bu
+  SELECT g, 'https://example.com/path/' || lpad((g % 500)::text, 8, '0'), repeat('x', 40)
+  FROM generate_series(1, 4000) g;
+CREATE INDEX btree_prefix_bu_u ON btree_prefix_bu (u) WITH (prefix_compression = on);
+UPDATE btree_prefix_bu SET filler = repeat('y', 40);
+UPDATE btree_prefix_bu SET filler = repeat('z', 40);
+UPDATE btree_prefix_bu SET filler = repeat('w', 40);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (costs off) SELECT u FROM btree_prefix_bu;
+SELECT (SELECT md5(string_agg(u, '|' ORDER BY u)) FROM btree_prefix_bu) =
+       md5(string_agg(x, '|' ORDER BY x)) AS bottomup_ok
+  FROM (SELECT 'https://example.com/path/' || lpad((g % 500)::text, 8, '0') AS x
+          FROM generate_series(1, 4000) g) oracle;
+SELECT count(*) FROM btree_prefix_bu
+  WHERE u = 'https://example.com/path/' || lpad('7', 8, '0');
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE btree_prefix_bu;
+
+-- A final coded leaf must fit all posting tuples, not just the layout with
+-- the last posting tuple replaced by a high key.
+CREATE TABLE btree_prefix_post (u text COLLATE "C");
+INSERT INTO btree_prefix_post
+  SELECT repeat('x', 119) FROM generate_series(1, 1356);
+CREATE INDEX btree_prefix_post_u ON btree_prefix_post (u)
+  WITH (prefix_compression = on);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) FROM btree_prefix_post WHERE u = repeat('x', 119);
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE btree_prefix_post;
+
+--
+-- Runtime deduplication on prefix-compressed leaves.  Retail inserts of
+-- duplicates fill coded leaves, which deduplicate and re-code before they
+-- split.
+--
+CREATE TABLE btree_prefix_dd (u text COLLATE "C");
+CREATE INDEX btree_prefix_dd_u ON btree_prefix_dd (u) WITH (prefix_compression = on);
+INSERT INTO btree_prefix_dd
+  SELECT 'https://example.com/path/to/resource/' || lpad((g % 200)::text, 8, '0')
+  FROM generate_series(1, 40000) g;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (costs off) SELECT u FROM btree_prefix_dd;
+SELECT (SELECT md5(string_agg(u, '|' ORDER BY u)) FROM btree_prefix_dd) =
+       md5(string_agg(x, '|' ORDER BY x)) AS runtime_dedup_ok
+  FROM (SELECT 'https://example.com/path/to/resource/' || lpad((g % 200)::text, 8, '0') AS x
+          FROM generate_series(1, 40000) g) oracle;
+SELECT count(*) FROM btree_prefix_dd
+  WHERE u = 'https://example.com/path/to/resource/' || lpad('42', 8, '0');
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE btree_prefix_dd;
+
+--
+-- Compression actually happens, both when an index is built and when it grows
+-- by insertion: a prefix-compressed index on keys with a long shared prefix
+-- is much smaller than a plain one.
+--
+CREATE TABLE btree_prefix_sz (u text COLLATE "C");
+INSERT INTO btree_prefix_sz
+  SELECT 'https://example.com/path/to/resource/' || lpad(g::text, 8, '0')
+  FROM generate_series(1, 20000) g;
+CREATE INDEX btree_prefix_sz_on ON btree_prefix_sz (u) WITH (prefix_compression = on);
+CREATE INDEX btree_prefix_sz_off ON btree_prefix_sz (u);
+SELECT pg_relation_size('btree_prefix_sz_on') * 3 <
+       pg_relation_size('btree_prefix_sz_off') * 2 AS build_compresses;
+TRUNCATE btree_prefix_sz;
+INSERT INTO btree_prefix_sz
+  SELECT 'https://example.com/path/to/resource/' || lpad(((g * 7919) % 20000)::text, 8, '0')
+  FROM generate_series(1, 20000) g;
+SELECT pg_relation_size('btree_prefix_sz_on') * 3 <
+       pg_relation_size('btree_prefix_sz_off') * 2 AS insert_compresses;
+DROP TABLE btree_prefix_sz;
+
+--
+-- Multiple prefix groups per page.  When a leaf's first tuple shares only a
+-- short prefix (here the leading int column) with a long run of tuples that
+-- share much more among themselves, the run must form its own group rather
+-- than stay anchored to that first tuple.  Without per-page grouping this case
+-- does not compress at all.
+--
+CREATE TABLE btree_prefix_grp (tenant int4, u text COLLATE "C");
+INSERT INTO btree_prefix_grp VALUES (1001, 'a');
+INSERT INTO btree_prefix_grp
+  SELECT 1001, 'https://shop.example.com/pay/' || lpad(g::text, 6, '0')
+  FROM generate_series(1, 150 * current_setting('block_size')::integer / 8192) g;
+CREATE INDEX btree_prefix_grp_on ON btree_prefix_grp (tenant, u)
+  WITH (prefix_compression = on);
+CREATE INDEX btree_prefix_grp_off ON btree_prefix_grp (tenant, u);
+SELECT pg_relation_size('btree_prefix_grp_on') <
+       pg_relation_size('btree_prefix_grp_off') AS groups_compress;
+DROP TABLE btree_prefix_grp;
