@@ -1334,6 +1334,38 @@ filter_by_origin_cb_wrapper(LogicalDecodingContext *ctx, ReplOriginId origin_id)
 	return ret;
 }
 
+bool
+filter_by_rlocator_cb_wrapper(LogicalDecodingContext *ctx,
+							  RelFileLocator rlocator)
+{
+	LogicalErrorCallbackState state;
+	ErrorContextCallback errcallback;
+	bool		ret;
+
+	Assert(!ctx->fast_forward);
+
+	/* Push callback + info on the error context stack */
+	state.ctx = ctx;
+	state.callback_name = "filter_by_rlocator";
+	state.report_location = InvalidXLogRecPtr;
+	errcallback.callback = output_plugin_error_callback;
+	errcallback.arg = &state;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+
+	/* set output state */
+	ctx->accept_writes = false;
+	ctx->end_xact = false;
+
+	/* do the actual work: call callback */
+	ret = ctx->callbacks.filter_by_rlocator_cb(ctx, rlocator);
+
+	/* Pop the error context stack */
+	error_context_stack = errcallback.previous;
+
+	return ret;
+}
+
 static void
 message_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn,
 				   TransactionId xid, XLogRecPtr message_lsn, bool transactional,

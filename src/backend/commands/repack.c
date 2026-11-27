@@ -542,7 +542,7 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 	 * possible for the toast relfilenode to change (e.g. because VACUUM FULL
 	 * or REPACK is run on it).  This would break concurrent repack's system
 	 * for skipping decoding changes in other tables -- see
-	 * change_useless_for_repack().
+	 * repack_filter_by_rlocator().
 	 */
 	if (concurrent && OidIsValid(OldHeap->rd_rel->reltoastrelid))
 		LockRelationOid(OldHeap->rd_rel->reltoastrelid, lmode);

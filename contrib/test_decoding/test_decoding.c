@@ -136,14 +136,17 @@ _PG_output_plugin_init(OutputPluginCallbacks *cb)
 	cb->change_cb = pg_decode_change;
 	cb->truncate_cb = pg_decode_truncate;
 	cb->commit_cb = pg_decode_commit_txn;
-	cb->filter_by_origin_cb = pg_decode_filter;
-	cb->shutdown_cb = pg_decode_shutdown;
 	cb->message_cb = pg_decode_message;
+	cb->filter_by_origin_cb = pg_decode_filter;
+	cb->filter_by_rlocator_cb = NULL;
+	cb->shutdown_cb = pg_decode_shutdown;
+
 	cb->filter_prepare_cb = pg_decode_filter_prepare;
 	cb->begin_prepare_cb = pg_decode_begin_prepare_txn;
 	cb->prepare_cb = pg_decode_prepare_txn;
 	cb->commit_prepared_cb = pg_decode_commit_prepared_txn;
 	cb->rollback_prepared_cb = pg_decode_rollback_prepared_txn;
+
 	cb->stream_start_cb = pg_decode_stream_start;
 	cb->stream_stop_cb = pg_decode_stream_stop;
 	cb->stream_abort_cb = pg_decode_stream_abort;

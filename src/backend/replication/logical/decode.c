@@ -442,8 +442,7 @@ heap2_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	{
 		case XLOG_HEAP2_MULTI_INSERT:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward &&
-				!change_useless_for_repack(buf))
+				!ctx->fast_forward)
 				DecodeMultiInsert(ctx, buf);
 			break;
 		case XLOG_HEAP2_NEW_CID:
@@ -505,8 +504,7 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	{
 		case XLOG_HEAP_INSERT:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward &&
-				!change_useless_for_repack(buf))
+				!ctx->fast_forward)
 				DecodeInsert(ctx, buf);
 			break;
 
@@ -518,22 +516,19 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		case XLOG_HEAP_HOT_UPDATE:
 		case XLOG_HEAP_UPDATE:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward &&
-				!change_useless_for_repack(buf))
+				!ctx->fast_forward)
 				DecodeUpdate(ctx, buf);
 			break;
 
 		case XLOG_HEAP_DELETE:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward &&
-				!change_useless_for_repack(buf))
+				!ctx->fast_forward)
 				DecodeDelete(ctx, buf);
 			break;
 
 		case XLOG_HEAP_TRUNCATE:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward &&
-				!change_useless_for_repack(buf))
+				!ctx->fast_forward)
 				DecodeTruncate(ctx, buf);
 			break;
 
@@ -549,8 +544,7 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 
 		case XLOG_HEAP_CONFIRM:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward &&
-				!change_useless_for_repack(buf))
+				!ctx->fast_forward)
 				DecodeSpecConfirm(ctx, buf);
 			break;
 
@@ -598,6 +592,15 @@ FilterByOrigin(LogicalDecodingContext *ctx, ReplOriginId origin_id)
 		return false;
 
 	return filter_by_origin_cb_wrapper(ctx, origin_id);
+}
+
+static inline bool
+FilterByRelFileLocator(LogicalDecodingContext *ctx, RelFileLocator rlocator)
+{
+	if (ctx->callbacks.filter_by_rlocator_cb == NULL)
+		return false;
+
+	return filter_by_rlocator_cb_wrapper(ctx, rlocator);
 }
 
 /*
@@ -955,6 +958,10 @@ DecodeInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	if (target_locator.dbOid != ctx->slot->data.database)
 		return;
 
+	/* Is the output plugin interested in this relation? */
+	if (FilterByRelFileLocator(ctx, target_locator))
+		return;
+
 	/* output plugin doesn't look for this origin, no need to queue */
 	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
 		return;
@@ -1012,6 +1019,10 @@ DecodeUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	/* only interested in our database */
 	XLogRecGetBlockTag(r, 0, &target_locator, NULL, NULL);
 	if (target_locator.dbOid != ctx->slot->data.database)
+		return;
+
+	/* Is the output plugin interested in this relation? */
+	if (FilterByRelFileLocator(ctx, target_locator))
 		return;
 
 	/* output plugin doesn't look for this origin, no need to queue */
@@ -1087,6 +1098,10 @@ DecodeDelete(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	/* only interested in our database */
 	XLogRecGetBlockTag(r, 0, &target_locator, NULL, NULL);
 	if (target_locator.dbOid != ctx->slot->data.database)
+		return;
+
+	/* Is the output plugin interested in this relation? */
+	if (FilterByRelFileLocator(ctx, target_locator))
 		return;
 
 	/* output plugin doesn't look for this origin, no need to queue */
@@ -1191,6 +1206,10 @@ DecodeMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	if (rlocator.dbOid != ctx->slot->data.database)
 		return;
 
+	/* Is the output plugin interested in this relation? */
+	if (FilterByRelFileLocator(ctx, rlocator))
+		return;
+
 	/* output plugin doesn't look for this origin, no need to queue */
 	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
 		return;
@@ -1280,6 +1299,10 @@ DecodeSpecConfirm(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	/* only interested in our database */
 	XLogRecGetBlockTag(r, 0, &target_locator, NULL, NULL);
 	if (target_locator.dbOid != ctx->slot->data.database)
+		return;
+
+	/* Is the output plugin interested in this relation? */
+	if (FilterByRelFileLocator(ctx, target_locator))
 		return;
 
 	/* output plugin doesn't look for this origin, no need to queue */
