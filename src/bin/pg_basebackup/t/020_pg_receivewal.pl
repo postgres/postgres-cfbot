@@ -215,6 +215,56 @@ SKIP:
 		"lz4 verified the integrity of compressed WAL segments");
 }
 
+# Resume streaming into an LZ4 partial segment that has some junk at its end,
+# as if an earlier run had written a longer compressed stream there.
+SKIP:
+{
+	skip "postgres was not built with LZ4 support", 3
+	  if (!check_pg_config("#define USE_LZ4 1"));
+
+	my @lz4_partial_wals = glob "$stream_dir/*.lz4.partial";
+	is(scalar(@lz4_partial_wals),
+		1, "one partial WAL segment compressed with LZ4 exists");
+	my $lz4_partial = $lz4_partial_wals[0];
+
+	open(my $fh, '>>', $lz4_partial)
+	  or die "could not open \"$lz4_partial\": $!";
+	binmode($fh);
+	print $fh 'stale data ' x 10000;
+	close($fh) or die "could not close \"$lz4_partial\": $!";
+
+	$primary->psql('postgres', 'SELECT pg_switch_wal();');
+	$nextlsn =
+	  $primary->safe_psql('postgres', 'SELECT pg_current_wal_insert_lsn();');
+	chomp($nextlsn);
+	$primary->psql('postgres', 'INSERT INTO test_table VALUES (100);');
+	$primary->command_ok(
+		[
+			'pg_receivewal',
+			'--directory' => $stream_dir,
+			'--verbose',
+			'--endpos' => $nextlsn,
+			'--no-loop',
+			'--compress' => 'lz4'
+		],
+		'resume streaming into a partial LZ4 segment');
+
+	# pg_receivewal decompresses completed LZ4 segments while looking for
+	# its start position, which fails if the junk is still there.  With
+	# such an early --endpos, it stops right after that.
+	$primary->command_ok(
+		[
+			'pg_receivewal',
+			'--directory' => $stream_dir,
+			'--endpos' => '0/1',
+			'--no-loop'
+		],
+		'completed LZ4 segment can be decompressed');
+
+	# Update the list of partial wals with the current one.
+	@partial_wals = glob "$stream_dir/*.lz4.partial";
+}
+
 # Verify that the start streaming position is computed and that the value is
 # correct regardless of whether any compression is available.
 $primary->psql('postgres', 'SELECT pg_switch_wal();');

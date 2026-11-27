@@ -120,6 +120,7 @@ dir_open_for_write(WalWriteMethod *wwmethod, const char *pathname,
 	DirectoryMethodData *dir_data = (DirectoryMethodData *) wwmethod;
 	char		tmppath[MAXPGPATH];
 	char	   *filename;
+	int			flags;
 	int			fd;
 	DirectoryMethodFile *f;
 #ifdef HAVE_LIBZ
@@ -143,8 +144,16 @@ dir_open_for_write(WalWriteMethod *wwmethod, const char *pathname,
 	 * the file descriptor is important for dir_sync() method as gzflush()
 	 * does not do any system calls to fsync() to make changes permanent on
 	 * disk.
+	 *
+	 * Compressed files need to be truncated, as we may be reopening a partial
+	 * segment from an earlier run, and the new compressed data can be shorter
+	 * than what is already there.  Non-compressed segments are padded to
+	 * their full size, so this is not a problem for them.
 	 */
-	fd = open(tmppath, O_WRONLY | O_CREAT | PG_BINARY, pg_file_create_mode);
+	flags = O_WRONLY | O_CREAT | PG_BINARY;
+	if (wwmethod->compression_algorithm != PG_COMPRESSION_NONE)
+		flags |= O_TRUNC;
+	fd = open(tmppath, flags, pg_file_create_mode);
 	if (fd < 0)
 	{
 		wwmethod->lasterrno = errno;
