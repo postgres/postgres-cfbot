@@ -1,0 +1,30 @@
+-- Tests for the gist_trgm_ops_noeq operator class.
+
+-- Should validate cleanly, same as any other opclass.
+SELECT amname, opcname
+FROM pg_opclass opc LEFT JOIN pg_am am ON am.oid = opcmethod
+WHERE opcname = 'gist_trgm_ops_noeq' AND NOT amvalidate(opc.oid);
+
+create table noeq_test (a text);
+insert into noeq_test select md5(g::text) from generate_series(1, 100) g;
+create index noeq_test_gist on noeq_test using gist (a gist_trgm_ops_noeq);
+
+-- The opclass doesn't offer '=' at all, so it must never be used for it,
+-- even with every alternative disabled.
+set enable_seqscan = off;
+set enable_bitmapscan = off;
+set enable_indexonlyscan = off;
+explain (costs off)
+  select * from noeq_test where a = '1234';
+
+-- Other operators still work, and give correct results.
+reset enable_seqscan;
+reset enable_bitmapscan;
+select count(*) from noeq_test where a like '%ab%';
+set enable_seqscan = off;
+explain (costs off)
+  select count(*) from noeq_test where a like '%ab%';
+select count(*) from noeq_test where a like '%ab%';
+reset enable_seqscan;
+
+drop table noeq_test;
