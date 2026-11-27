@@ -501,6 +501,27 @@ rewriteSearchAndCycle(CommonTableExpr *cte)
 	if (newsubquery->distinctClause)
 		newsubquery->hasDistinctOn = true;
 
+	if (cte->cycle_clause)
+	{
+		Expr *expr;
+
+		expr = make_opclause(cte->cycle_clause->cycle_mark_neop, BOOLOID, false,
+							 (Expr *) makeVar(cte_rtindex, cmc_attno,
+											  cte->cycle_clause->cycle_mark_type,
+											  cte->cycle_clause->cycle_mark_typmod,
+											  cte->cycle_clause->cycle_mark_collation,
+											  0),
+							 (Expr *) cte->cycle_clause->cycle_mark_value,
+							 InvalidOid,
+							 cte->cycle_clause->cycle_mark_collation);
+
+		if (newsubquery->jointree->quals)
+			newsubquery->jointree->quals = (Node *)
+				make_andclause(list_make2(newsubquery->jointree->quals, expr));
+		else
+			newsubquery->jointree->quals = (Node *) expr;
+	}
+
 	newrte->subquery = newsubquery;
 	newrte->inFromCl = true;
 	newq2->rtable = list_make1(newrte);
@@ -508,26 +529,7 @@ rewriteSearchAndCycle(CommonTableExpr *cte)
 	rtr = makeNode(RangeTblRef);
 	rtr->rtindex = 1;
 
-	if (cte->cycle_clause)
-	{
-		Expr	   *expr;
-
-		/*
-		 * Add cmc <> cmv condition
-		 */
-		expr = make_opclause(cte->cycle_clause->cycle_mark_neop, BOOLOID, false,
-							 (Expr *) makeVar(1, cmc_attno,
-											  cte->cycle_clause->cycle_mark_type,
-											  cte->cycle_clause->cycle_mark_typmod,
-											  cte->cycle_clause->cycle_mark_collation, 0),
-							 (Expr *) cte->cycle_clause->cycle_mark_value,
-							 InvalidOid,
-							 cte->cycle_clause->cycle_mark_collation);
-
-		newq2->jointree = makeFromExpr(list_make1(rtr), (Node *) expr);
-	}
-	else
-		newq2->jointree = makeFromExpr(list_make1(rtr), NULL);
+	newq2->jointree = makeFromExpr(list_make1(rtr), NULL);
 
 	/*
 	 * Make target list

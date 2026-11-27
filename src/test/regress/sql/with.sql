@@ -746,6 +746,20 @@ with recursive t(x) as (
 ) cycle x set m using p
 select * from t;
 
+-- cycle parents must not affect windows in the recursive term
+create temp table cycle_window_edge (src int, dst int);
+insert into cycle_window_edge values (1, 2), (2, 1), (2, 3), (3, 4);
+
+with recursive walk(id, depth, n) as (
+	values (1, 0, 0::bigint)
+	union all
+	select e.dst, w.depth + 1, count(*) over ()
+	from walk w join cycle_window_edge e on e.src = w.id
+) cycle id set is_cycle using path
+select depth, id, n, is_cycle from walk order by depth, id;
+
+drop table cycle_window_edge;
+
 -- various syntax errors
 with recursive search_graph(f, t, label) as (
 	select * from graph g
