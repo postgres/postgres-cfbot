@@ -1479,3 +1479,22 @@ DROP TABLE ruletest_t2;
 DROP TABLE ruletest_t1;
 
 DROP USER regress_rule_user1;
+
+-- Test that the columns of a relation not printed in FROM (the target of
+-- UPDATE, NEW and OLD) are not renamed to keep a USING column name unique.
+CREATE TABLE ruletest_cu_a (x int);
+CREATE TABLE ruletest_cu_b (x int);
+CREATE TABLE ruletest_cu_t (x int, a int);
+CREATE RULE ruletest_cu_r AS ON UPDATE TO ruletest_cu_a
+    DO ALSO UPDATE ruletest_cu_t SET a = 1
+    FROM ruletest_cu_a ca FULL JOIN ruletest_cu_b cb USING (x)
+    WHERE ruletest_cu_t.x = NEW.x AND ca.x = OLD.x;
+SELECT pg_get_ruledef(oid) FROM pg_rewrite WHERE rulename = 'ruletest_cu_r';
+-- The same for OLD and NEW of RETURNING, which read the target.
+CREATE RULE ruletest_cu_ret AS ON DELETE TO ruletest_cu_a
+    DO INSTEAD UPDATE ruletest_cu_t SET a = 1
+    FROM ruletest_cu_a ca FULL JOIN ruletest_cu_b cb USING (x)
+    WHERE ruletest_cu_t.x = ca.x
+    RETURNING WITH (OLD AS o, NEW AS n) o.x + n.x AS x;
+SELECT pg_get_ruledef(oid) FROM pg_rewrite WHERE rulename = 'ruletest_cu_ret';
+DROP TABLE ruletest_cu_a, ruletest_cu_b, ruletest_cu_t;
