@@ -25,7 +25,7 @@ Index Only Scan using horizons_tst_data_key on horizons_tst
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -35,7 +35,7 @@ step pruner_query:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -48,7 +48,7 @@ step pruner_delete:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -58,7 +58,7 @@ step pruner_query:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -95,7 +95,7 @@ Index Only Scan using horizons_tst_data_key on horizons_tst
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -105,7 +105,7 @@ step pruner_query:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -118,7 +118,7 @@ step pruner_delete:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -128,7 +128,7 @@ step pruner_query:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -157,7 +157,7 @@ step ll_start:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -167,7 +167,7 @@ step pruner_query:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -181,7 +181,7 @@ step pruner_delete:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -191,7 +191,7 @@ step pruner_query:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -221,7 +221,7 @@ step ll_start:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -231,7 +231,7 @@ step pruner_query:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -247,7 +247,7 @@ step pruner_vacuum:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -257,7 +257,7 @@ step pruner_query:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -286,7 +286,7 @@ step ll_start:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -296,7 +296,7 @@ step pruner_query:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -312,7 +312,7 @@ step pruner_vacuum:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------
@@ -322,7 +322,7 @@ step pruner_query:
 step pruner_query: 
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 
 ?column?
 --------

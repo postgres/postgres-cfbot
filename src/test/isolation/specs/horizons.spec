@@ -75,14 +75,14 @@ step pruner_vacuum
     VACUUM horizons_tst;
 }
 
-# Show the heap fetches of an ordered index-only-scan (other plans
+# Show the table row fetches of an ordered index-only-scan (other plans
 # have been forbidden above) - that tells us how many non-killed leaf
 # entries there are.
 step pruner_query
 {
     SELECT explain_json($$
         EXPLAIN (FORMAT json, BUFFERS, ANALYZE)
-	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Heap Fetches';
+	  SELECT * FROM horizons_tst ORDER BY data;$$)->0->'Plan'->'Table Row Fetches';
 }
 
 # Verify that the query plan still is an IOS
