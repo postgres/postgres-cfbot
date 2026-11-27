@@ -5814,6 +5814,62 @@ create_ordered_paths(PlannerInfo *root,
 	return ordered_rel;
 }
 
+/*
+ * collect_agg_key_vars_walker
+ *		Expression-tree walker callback to collect the Vars used in the
+ *		ORDER BY / DISTINCT key expressions of presorted aggregates.
+ *
+ * Only presorted aggregates are of interest: the others sort their own
+ * input inside the Aggregate node, so their keys are not sort keys of the
+ * Aggregate's input.
+ *
+ * The pull_var_clause flags must match the ones make_group_input_target
+ * uses for non_group_vars, so that add_new_columns_to_pathtarget() can
+ * de-duplicate them.
+ */
+static bool
+collect_agg_key_vars_walker(Node *node, void *context)
+{
+	List	  **vars = context;
+
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Aggref))
+	{
+		Aggref	   *aggref = (Aggref *) node;
+
+		if (aggref->aggpresorted)
+		{
+			/*
+			 * Same sort list as the planner and the executor use
+			 * (adjust_group_pathkeys_for_groupagg(),
+			 * build_pertrans_for_aggref()).  With DISTINCT, the
+			 * ORDER BY keys are a prefix of the DISTINCT keys.  Take
+			 * the keys in sort order.
+			 */
+			List	   *sortlist = aggref->aggdistinct ?
+											aggref->aggdistinct : aggref->aggorder;
+			ListCell   *lc;
+
+			foreach(lc, sortlist)
+			{
+				SortGroupClause *sortcl = lfirst_node(SortGroupClause, lc);
+				TargetEntry *tle = get_sortgroupclause_tle(sortcl,
+														   aggref->args);
+
+				*vars = list_concat(*vars,
+									pull_var_clause((Node *) tle->expr,
+													PVC_RECURSE_AGGREGATES |
+													PVC_RECURSE_WINDOWFUNCS |
+													PVC_INCLUDE_PLACEHOLDERS));
+			}
+		}
+	}
+
+	return expression_tree_walker(node, collect_agg_key_vars_walker,
+								  context);
+}
 
 /*
  * make_group_input_target
@@ -5836,6 +5892,9 @@ create_ordered_paths(PlannerInfo *root,
  *		a+b,c,d
  * where the a+b target will be used by the Sort/Group steps, and the
  * other targets will be used for computing the final results.
+ * If ordered aggregates make the subplan sort by keys beyond the GROUP
+ * BY ones, the Vars in those keys are placed right after the GROUP BY
+ * items and ahead of the remaining Vars (see the comment in the body).
  *
  * 'final_target' is the query's final target list (in PathTarget form)
  *
@@ -5928,6 +5987,29 @@ make_group_input_target(PlannerInfo *root, PathTarget *final_target)
 								  bms_make_singleton(root->group_rtindex),
 								  NULL);
 	}
+
+	/*
+	 * Only do that when it can matter.
+	 * adjust_group_pathkeys_for_groupagg() appends the keys of presorted
+	 * aggregates to root->group_pathkeys, after the plain GROUP BY keys, and
+	 * the input is sorted by that list.
+	 * tuplesort caches only the first sort key, so a key column gains only
+	 * when there is more than one sort key and at least one of them beyond
+	 * the GROUP BY keys.  The first test is the same one that
+	 * gather_grouping_paths() uses to detect the extra keys.
+	 */
+	if (list_length(root->group_pathkeys) > root->num_groupby_pathkeys &&
+		list_length(root->group_pathkeys) > 1)
+	{
+		List	   *agg_key_vars = NIL;
+
+		(void) expression_tree_walker((Node *) non_group_cols,
+									  collect_agg_key_vars_walker,
+									  &agg_key_vars);
+		add_new_columns_to_pathtarget(input_target, agg_key_vars);
+		list_free(agg_key_vars);
+	}
+
 	add_new_columns_to_pathtarget(input_target, non_group_vars);
 
 	/* clean up cruft */
