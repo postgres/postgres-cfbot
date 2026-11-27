@@ -786,6 +786,128 @@ explain (costs off)
 select sum(two order by two) from tenk1;
 reset enable_presorted_aggregate;
 
+-- Check that the sort key columns of presorted aggregates come before the
+-- argument columns in the aggregation input.
+explain (verbose, costs off)
+select ten, sum(unique1 order by two), max(unique1 order by two, four)
+from tenk1 group by ten;
+
+-- The keys of an aggregate that is not presorted stay where they are.
+explain (verbose, costs off)
+select ten, sum(unique1 order by two), array_agg(unique2 order by four)
+from tenk1 group by ten;
+
+-- The key columns are taken in sort order, not in Aggref->args order.
+explain (verbose, costs off)
+select ten, sum(unique1 order by two, unique1) from tenk1 group by ten;
+
+-- Without GROUP BY the aggregate keys are the only sort keys.
+explain (verbose, costs off)
+select sum(unique1 order by ten, two) from tenk1;
+
+-- A single sort key is not moved.
+explain (verbose, costs off)
+select sum(unique1 order by two) from tenk1;
+
+-- Nothing is moved when presorted aggregates are disabled.
+set enable_presorted_aggregate to off;
+explain (verbose, costs off)
+select ten, sum(unique1 order by two) from tenk1 group by ten;
+reset enable_presorted_aggregate;
+
+-- A DISTINCT aggregate is sorted by its whole DISTINCT list.
+explain (verbose, costs off)
+select ten, max(unique1), jsonb_object_agg(distinct two, four order by four)
+from tenk1 group by ten;
+
+-- An ordered aggregate that appears only in the HAVING clause.
+explain (verbose, costs off)
+select ten from tenk1 group by ten having sum(unique1 order by two, four) > 0;
+
+-- An ordered aggregate nested inside a larger expression, here in the
+-- ORDER BY clause of a window function.
+explain (verbose, costs off)
+select ten, rank() over (order by sum(unique1 order by two, four) + 1)
+from tenk1 group by ten;
+
+-- The Vars inside an expression sort key are moved as well.
+explain (verbose, costs off)
+select ten, sum(unique1 order by two + four) from tenk1 group by ten;
+
+-- GROUP BY columns come first, each of them once, then the aggregate keys.
+explain (verbose, costs off)
+select ten, two, sum(unique1 order by two, four) from tenk1 group by ten, two;
+
+-- A FILTER clause leaves an aggregate with plain Var arguments presorted.
+explain (verbose, costs off)
+select ten, sum(unique1 order by two, four) filter (where two > 0)
+from tenk1 group by ten;
+
+-- The keys also come first in the Sort below a Gather Merge.
+set parallel_setup_cost TO 0;
+set parallel_tuple_cost TO 0;
+set min_parallel_table_scan_size = 0;
+set max_parallel_workers_per_gather = 2;
+explain (verbose, costs off)
+select ten, sum(unique1 order by two, four) from tenk1 group by ten;
+reset max_parallel_workers_per_gather;
+reset min_parallel_table_scan_size;
+reset parallel_tuple_cost;
+reset parallel_setup_cost;
+
+-- Other plan shapes; some of them need an extra projection node for it.
+-- These queries are run as well, since their results depend on the order
+-- the aggregates see.
+create temp table agg_key (g int, k int, v text);
+insert into agg_key values (1, 3, 'c'), (1, 1, 'a'), (1, 2, 'b'),
+                           (2, 2, 'b'), (2, 1, 'a');
+create temp table agg_key2 (g int, k int, v text);
+insert into agg_key2 values (0, 3, 'p'), (0, 1, 'q');
+analyze agg_key;
+analyze agg_key2;
+
+-- A subquery that is not pulled up keeps a Subquery Scan, which brings the
+-- keys to the front.
+explain (verbose, costs off)
+select g, string_agg(v, ',' order by g, k)
+from (select g, v, k from agg_key offset 0) s group by g order by g;
+select g, string_agg(v, ',' order by g, k)
+from (select g, v, k from agg_key offset 0) s group by g order by g;
+
+-- A sort key from the nullable side of an outer join.
+explain (verbose, costs off)
+select a.g, string_agg(a.v, ',' order by b.k, a.k)
+from agg_key a left join agg_key2 b on a.k = b.k
+group by a.g order by a.g;
+select a.g, string_agg(a.v, ',' order by b.k, a.k)
+from agg_key a left join agg_key2 b on a.k = b.k
+group by a.g order by a.g;
+
+-- An Append cannot change the column order of its inputs, so a UNION ALL
+-- gets a Result node that brings the keys to the front.
+explain (verbose, costs off)
+select g, string_agg(v, ',' order by g, k)
+from (select g, k, v from agg_key union all select g, k, v from agg_key2) u
+group by g order by g;
+select g, string_agg(v, ',' order by g, k)
+from (select g, k, v from agg_key union all select g, k, v from agg_key2) u
+group by g order by g;
+
+-- A partitioned table is planned with the new order, so no Result node is
+-- needed.
+create temp table agg_part (g int, k int, v text) partition by list (g);
+create temp table agg_part1 partition of agg_part for values in (1);
+create temp table agg_part2 partition of agg_part for values in (2);
+insert into agg_part values (1, 3, 'c'), (1, 1, 'a'), (1, 2, 'b'),
+                            (2, 2, 'b'), (2, 1, 'a');
+explain (verbose, costs off)
+select g, string_agg(v, ',' order by g, k) from agg_part group by g order by g;
+select g, string_agg(v, ',' order by g, k) from agg_part group by g order by g;
+
+drop table agg_part;
+drop table agg_key2;
+drop table agg_key;
+
 --
 -- Test cases with FILTER clause
 --
