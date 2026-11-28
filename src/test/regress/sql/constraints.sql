@@ -649,6 +649,22 @@ REINDEX INDEX circles_c1_c2_excl;
 
 DROP TABLE circles;
 
+-- Check SP-GiST exclusion constraints (both exact box_ops and lossy poly_ops)
+CREATE TABLE spgist_excl (
+  b box,
+  p polygon,
+  EXCLUDE USING spgist (b WITH &&),
+  EXCLUDE USING spgist (p WITH &&)
+);
+INSERT INTO spgist_excl VALUES ('((0,0),(1,1))', '((0,0),(0,3),(3,0))');
+-- succeed: polygon bounding boxes overlap, but the polygons themselves do not
+INSERT INTO spgist_excl VALUES ('((2,2),(3,3))', '((1,3),(3,3),(3,1))');
+-- fail, box overlaps
+INSERT INTO spgist_excl VALUES ('((0.5,0.5),(1.5,1.5))', '((10,10),(10,11),(11,10))');
+-- fail, polygon overlaps
+INSERT INTO spgist_excl VALUES ('((4,4),(5,5))', '((0,0),(0,1),(1,0))');
+DROP TABLE spgist_excl;
+
 -- Check deferred exclusion constraint
 
 CREATE TABLE deferred_excl (
