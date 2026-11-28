@@ -100,6 +100,9 @@ ALTER TYPE <replaceable class="parameter">name</replaceable> SET ( <replaceable 
     <listitem>
      <para>
       This form drops an attribute from a composite type.
+      The attribute cannot be dropped while a table has a column of the type,
+      even with <literal>CASCADE</literal>, nor while a view, column default or
+      other stored expression contains a constant of it.
       If <literal>IF EXISTS</literal> is specified and the attribute
       does not exist, no error is thrown. In this case a notice
       is issued instead.

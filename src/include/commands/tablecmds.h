@@ -87,6 +87,7 @@ extern void ResetRelRewrite(Oid myrelid);
 extern void find_composite_type_dependencies(Oid typeOid,
 											 Relation origRelation,
 											 const char *origTypeName);
+extern void find_composite_type_dependencies_for_drop(List *rels);
 
 extern void check_of_type(HeapTuple typetuple);
 

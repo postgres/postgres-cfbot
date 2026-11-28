@@ -98,20 +98,10 @@ $old->safe_psql(
 	ALTER TYPE rowver_comp ADD ATTRIBUTE b int;
 	INSERT INTO rowver_tbl VALUES (2, '(2,22)');
 
-	-- A stored composite datum with attributes that are later dropped.
 	CREATE TABLE rowdrop_src (a int);
 	ALTER TABLE rowdrop_src ADD COLUMN b int;
-	CREATE TABLE rowdrop_tbl (r rowdrop_src);
-	INSERT INTO rowdrop_tbl VALUES (ROW(1,2));
-	ALTER TABLE rowdrop_src DROP COLUMN b;
-
-	-- The same for a composite type, whose versions pg_dump collects
-	-- separately.
 	CREATE TYPE rowdropt_comp AS (a int);
 	ALTER TYPE rowdropt_comp ADD ATTRIBUTE b int;
-	CREATE TABLE rowdropt_tbl (c rowdropt_comp);
-	INSERT INTO rowdropt_tbl VALUES (ROW(1,2));
-	ALTER TYPE rowdropt_comp DROP ATTRIBUTE b;
 
 	-- Restore the attribute versions of a view with a stored datum made
 	-- narrower than the view by a subsequent CREATE OR REPLACE VIEW.
@@ -141,7 +131,6 @@ $old->safe_psql(
 	-- A table whose column versions are cleared below, to simulate columns
 	-- created before updating to a release with attribute versioning.
 	CREATE TABLE rowunvdrop_src (a int, b int, c int);
-	CREATE TABLE rowunvdrop_tbl (r rowunvdrop_src);
 
 	-- Further relations with a row type, with differing attribute
 	-- versions, to verify pg_upgrade preserves their versions.
@@ -160,6 +149,14 @@ $old->safe_psql(
 	ALTER FOREIGN TABLE rowforeign ALTER COLUMN b TYPE bigint;
 	CREATE TYPE rowzero_comp AS ();
 });
+
+# A stored composite datum with attributes that are later dropped.
+store_then_drop($old, 'rowdrop_tbl', 'r', 'rowdrop_src', 'ROW(1,2)',
+	'ALTER TABLE rowdrop_src DROP COLUMN b');
+
+# The same for a composite type, whose versions pg_dump collects separately.
+store_then_drop($old, 'rowdropt_tbl', 'c', 'rowdropt_comp', 'ROW(1,2)',
+	'ALTER TYPE rowdropt_comp DROP ATTRIBUTE b');
 
 # With versioning, clearing the type's versions produces a versioned datum
 # with version zero.  This is distinct from an unversioned datum.
@@ -180,9 +177,9 @@ $old->safe_psql(
 	-- Other attribute options and dropping a column must cope with columns
 	-- lacking a version.
 	ALTER TABLE rowunvdrop_src ALTER COLUMN c SET (n_distinct = 5);
-	INSERT INTO rowunvdrop_tbl VALUES (ROW(1, 2, 3));
-	ALTER TABLE rowunvdrop_src DROP COLUMN b;
 });
+store_then_drop($old, 'rowunvdrop_tbl', 'r', 'rowunvdrop_src', 'ROW(1, 2, 3)',
+	'ALTER TABLE rowunvdrop_src DROP COLUMN b');
 
 if ($test_unversioned)
 {
@@ -384,6 +381,42 @@ SKIP:
 		$stderr,
 		qr/row type of datum tuple was altered after the datum's creation/,
 		'unversioned datum reports a version mismatch after type alteration');
+}
+
+# Store $value in a new table $tbl, then run $drop, leaving a stored datum
+# with data for a dropped column.  Servers that refuse the drop while the
+# value is stored allow it while it is held in a PL/pgSQL variable.
+sub store_then_drop
+{
+	my ($node, $tbl, $col, $type, $value, $drop) = @_;
+
+	my ($ret, $stdout, $stderr) = $node->psql(
+		'postgres', qq{
+		BEGIN;
+		CREATE TABLE $tbl ($col $type);
+		INSERT INTO $tbl VALUES ($value);
+		$drop;
+		COMMIT;
+	});
+	return if $ret == 0;
+
+	die "unexpected failure storing a datum, then dropping a column: $stderr"
+	  unless $stderr =~
+	  /cannot alter (?:type|table) "[^"]+" because column "[^"]+" uses (?:it|its row type)/;
+
+	$node->safe_psql(
+		'postgres', qq{
+		DO \$\$
+		DECLARE
+			old $type := $value;
+		BEGIN
+			$drop;
+			CREATE TABLE $tbl ($col $type);
+			INSERT INTO $tbl VALUES (old);
+		END
+		\$\$;
+	});
+	return;
 }
 
 sub versions_query
