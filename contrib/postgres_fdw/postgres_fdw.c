@@ -17,10 +17,12 @@
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "access/xact.h"
 #include "catalog/pg_opfamily.h"
 #include "commands/defrem.h"
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
+#include "commands/tablespace.h"
 #include "commands/vacuum.h"
 #include "executor/execAsync.h"
 #include "executor/instrument.h"
@@ -44,7 +46,9 @@
 #include "pgstat.h"
 #include "postgres_fdw.h"
 #include "statistics/statistics.h"
+#include "storage/buffile.h"
 #include "storage/latch.h"
+#include "tcop/pquery.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
 #include "utils/fmgroids.h"
@@ -52,6 +56,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/resowner.h"
 #include "utils/sampling.h"
 #include "utils/selfuncs.h"
 #include "utils/timestamp.h"
@@ -108,6 +113,9 @@ enum FdwScanPrivateIndex
 	 * flattens rtables.
 	 */
 	FdwScanPrivateMinRTIndex,
+
+	/* Boolean indicating whether streaming_fetch mode is enabled */
+	FdwScanPrivateStreamingFetch,
 };
 
 /*
@@ -184,7 +192,7 @@ typedef struct PgFdwScanState
 	PGconn	   *conn;			/* connection for the scan */
 	PgFdwConnState *conn_state; /* extra per-connection state */
 	unsigned int cursor_number; /* quasi-unique ID for my cursor */
-	bool		cursor_exists;	/* have we created the cursor? */
+	bool		scan_in_progress;	/* is there a scan in progress? */
 	int			numParams;		/* number of parameters passed to query */
 	FmgrInfo   *param_flinfo;	/* output conversion functions for them */
 	List	   *param_exprs;	/* executable expressions for param values */
@@ -207,7 +215,56 @@ typedef struct PgFdwScanState
 	MemoryContext temp_cxt;		/* context for per-tuple temporary data */
 
 	int			fetch_size;		/* number of tuples per fetch */
+	/* for streaming_fetch mode */
+	bool		streaming_fetch;	/* use streaming_fetch mode? */
+	uint64		spool_id;		/* see PgFdwSpool; 0 if none */
 } PgFdwScanState;
+
+/*
+ * A spool holds what has been read of a streaming_fetch scan's result but
+ * not yet returned by the scan.  Rows are kept exactly as received: whole
+ * PGresults while they fit in work_mem, and then as text in a temporary
+ * file.  They are converted only when the scan returns them.
+ *
+ * Spools live in transaction-lifespan memory, apart from the scans, and are
+ * found by a 64-bit ID that is never reused.  A connection only records the
+ * ID of the spool that the result it is carrying belongs to (see
+ * PgFdwConnState).  So a scan's executor state, memory and resource owner
+ * can go away at any point, e.g. with a cursor that fails while being read in
+ * a subtransaction, without leaving dangling pointers: its spool is deleted
+ * at subtransaction abort, and the connection is left with an ID that no
+ * longer finds anything, so the rest of the result is just thrown away.
+ */
+typedef struct PgFdwSpool
+{
+	uint64		id;				/* hash key; must be first */
+	MemoryContext cxt;			/* holds the spool's data and PGresults */
+	char	   *query;			/* the remote query, for error messages */
+	SubTransactionId subid;		/* subtransaction the scan began in */
+	Portal		portal;			/* ActivePortal when the scan began */
+	char	   *portal_name;	/* ... and its name */
+	bool		stream_done;	/* has the end of the result been read? */
+	bool		rows_lost;		/* did saving the result fail partway? */
+
+	/* saved PGresults, while they fit in work_mem */
+	List	   *results;		/* PGresults not yet fully returned */
+	int			result_row;		/* next row of linitial(results) */
+	Size		results_mem;	/* memory used by results */
+
+	/* rows saved beyond work_mem, which come after all of results' */
+	BufFile    *file;			/* owned by TopTransactionResourceOwner */
+	int			file_nfields;	/* number of values per row */
+	int64		file_rows_written;
+	int64		file_rows_read;
+	int			file_read_fileno;	/* where to read the next row */
+	pgoff_t		file_read_offset;
+	int			file_write_fileno;	/* where to write the next row */
+	pgoff_t		file_write_offset;
+} PgFdwSpool;
+
+/* All of the transaction's spools, by ID, in TopTransactionContext */
+static HTAB *spools = NULL;
+static uint64 last_spool_id = 0;
 
 /*
  * Execution state of a foreign insert/update/delete operation.
@@ -520,6 +577,7 @@ static void estimate_path_cost_size(PlannerInfo *root,
 									Cost *p_startup_cost, Cost *p_total_cost);
 static void get_remote_estimate(const char *sql,
 								PGconn *conn,
+								PgFdwConnState *conn_state,
 								double *rows,
 								int *width,
 								Cost *startup_cost,
@@ -535,7 +593,9 @@ static void adjust_foreign_grouping_path_cost(PlannerInfo *root,
 static bool ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
 									  EquivalenceClass *ec, EquivalenceMember *em,
 									  void *arg);
+static void prepare_query(ForeignScanState *node);
 static void create_cursor(ForeignScanState *node);
+static void reset_batch_state(PgFdwScanState *fsstate);
 static void fetch_more_data(ForeignScanState *node);
 static void close_cursor(PGconn *conn, unsigned int cursor_number,
 						 PgFdwConnState *conn_state);
@@ -601,8 +661,10 @@ static bool fetch_remote_statistics(Relation relation,
 									RemoteStatsResults *remstats,
 									RemoteAttributeMapping **p_remattrmap,
 									int *p_attrcnt);
-static PGresult *fetch_relstats(PGconn *conn, Relation relation);
-static PGresult *fetch_attstats(PGconn *conn, int server_version_num,
+static PGresult *fetch_relstats(PGconn *conn, PgFdwConnState *conn_state,
+								Relation relation);
+static PGresult *fetch_attstats(PGconn *conn, PgFdwConnState *conn_state,
+								int server_version_num,
 								const char *remote_schemaname, const char *remote_relname,
 								const char *column_list);
 static RemoteAttributeMapping *build_remattrmap(Relation relation, List *va_cols,
@@ -638,6 +700,13 @@ static HeapTuple make_tuple_from_result_row(PGresult *res,
 											List *retrieved_attrs,
 											ForeignScanState *fsstate,
 											MemoryContext temp_context);
+static HeapTuple make_tuple_from_strings(const char **valstrs,
+										 int nvals,
+										 Relation rel,
+										 AttInMetadata *attinmeta,
+										 List *retrieved_attrs,
+										 ForeignScanState *fsstate,
+										 MemoryContext temp_context);
 static void conversion_error_callback(void *arg);
 static bool foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel,
 							JoinType jointype, RelOptInfo *outerrel, RelOptInfo *innerrel,
@@ -670,6 +739,24 @@ static void merge_fdw_options(PgFdwRelationInfo *fpinfo,
 							  const PgFdwRelationInfo *fpinfo_i);
 static int	get_batch_size_option(Relation rel);
 
+/* streaming_fetch mode support */
+static void init_scan(ForeignScanState *node);
+static bool scan_at_eof(PgFdwScanState *fsstate);
+static PGresult *fetch_stream_result(PgFdwConnState *conn_state,
+									 PgFdwSpool *spool);
+static void discard_stream_result(PgFdwScanState *fsstate);
+static void discard_abandoned_result(PgFdwConnState *conn_state);
+static void check_stream_rows_lost(PgFdwSpool *spool);
+static bool is_active_scan(PgFdwScanState *fsstate);
+static void create_spool(PgFdwScanState *fsstate);
+static PgFdwSpool *find_spool(uint64 id);
+static void delete_spool(uint64 id);
+static void reset_spool(PgFdwScanState *fsstate);
+static bool spool_has_rows(PgFdwSpool *spool);
+static void fetch_spooled_rows(ForeignScanState *node, PgFdwSpool *spool);
+static void save_result(PgFdwSpool *spool, PGresult *res);
+static HeapTuple read_spooled_row(ForeignScanState *node, PgFdwSpool *spool);
+static bool scan_locks_rows(PlannerInfo *root, RelOptInfo *foreignrel);
 
 /*
  * Foreign-data wrapper handler function: return a struct with pointers
@@ -779,9 +866,12 @@ postgresGetForeignRelSize(PlannerInfo *root,
 	fpinfo->shippable_extensions = NIL;
 	fpinfo->fetch_size = 100;
 	fpinfo->async_capable = false;
+	fpinfo->streaming_fetch = false;
 
 	apply_server_options(fpinfo);
 	apply_table_options(fpinfo);
+	if (fpinfo->streaming_fetch)
+		fpinfo->async_capable = false;
 
 	/*
 	 * If the table or the server is configured to use remote estimates,
@@ -1372,6 +1462,7 @@ postgresGetForeignPlan(PlannerInfo *root,
 	StringInfoData sql;
 	bool		has_final_sort = false;
 	bool		has_limit = false;
+	bool		streaming_fetch;
 	ListCell   *lc;
 
 	/*
@@ -1538,12 +1629,21 @@ postgresGetForeignPlan(PlannerInfo *root,
 	fpinfo->final_remote_exprs = remote_exprs;
 
 	/*
+	 * Use a cursor anyway for scans that lock rows, including those under a
+	 * non-direct UPDATE or DELETE: a streamed query would lock every row up
+	 * front, not just the ones fetched.
+	 */
+	streaming_fetch = fpinfo->streaming_fetch &&
+		!scan_locks_rows(root, foreignrel);
+
+	/*
 	 * Build the fdw_private list that will be available to the executor.
 	 * Items in the list must match order in enum FdwScanPrivateIndex.
 	 */
-	fdw_private = list_make3(makeString(sql.data),
+	fdw_private = list_make4(makeString(sql.data),
 							 retrieved_attrs,
-							 makeInteger(fpinfo->fetch_size));
+							 makeInteger(fpinfo->fetch_size),
+							 makeBoolean(streaming_fetch));
 
 	/*
 	 * Position FdwScanPrivateRelations: either the EXPLAIN relation string
@@ -1759,9 +1859,7 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	 */
 	fsstate->conn = GetConnection(user, false, &fsstate->conn_state);
 
-	/* Assign a unique ID for my cursor */
-	fsstate->cursor_number = GetCursorNumber(fsstate->conn);
-	fsstate->cursor_exists = false;
+	fsstate->scan_in_progress = false;
 
 	/* Get private info created by planner functions. */
 	fsstate->query = strVal(list_nth(fsplan->fdw_private,
@@ -1770,6 +1868,12 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 												 FdwScanPrivateRetrievedAttrs);
 	fsstate->fetch_size = intVal(list_nth(fsplan->fdw_private,
 										  FdwScanPrivateFetchSize));
+	fsstate->streaming_fetch = boolVal(list_nth(fsplan->fdw_private,
+												FdwScanPrivateStreamingFetch));
+
+	/* Assign a unique ID for my cursor */
+	if (!fsstate->streaming_fetch)
+		fsstate->cursor_number = GetCursorNumber(fsstate->conn);
 
 	/* Create contexts for batches of tuples and per-tuple temp workspace. */
 	fsstate->batch_cxt = AllocSetContextCreate(estate->es_query_cxt,
@@ -1822,6 +1926,10 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 
 	/* Set the async-capable flag */
 	fsstate->async_capable = node->ss.ps.async_capable;
+
+	/* The spool records where the scan began (see PgFdwSpool) */
+	if (fsstate->streaming_fetch)
+		create_spool(fsstate);
 }
 
 /*
@@ -1841,8 +1949,13 @@ postgresIterateForeignScan(ForeignScanState *node)
 	 * already created the cursor before we get here, even if this is the
 	 * first call after Begin or ReScan.
 	 */
-	if (!fsstate->cursor_exists)
-		create_cursor(node);
+	if (!fsstate->scan_in_progress)
+	{
+		if (fsstate->streaming_fetch)
+			init_scan(node);
+		else
+			create_cursor(node);
+	}
 
 	/*
 	 * Get some more tuples, if we've run out.
@@ -1871,6 +1984,50 @@ postgresIterateForeignScan(ForeignScanState *node)
 }
 
 /*
+ * Reset a scan's batch bookkeeping so the next fetch starts fresh.  The
+ * caller handles scan_in_progress.
+ */
+static void
+reset_batch_state(PgFdwScanState *fsstate)
+{
+	fsstate->tuples = NULL;
+	fsstate->num_tuples = 0;
+	fsstate->next_tuple = 0;
+	fsstate->fetch_ct_2 = 0;
+	fsstate->eof_reached = false;
+}
+
+/*
+ * Does the given foreign scan lock rows on the remote side?  This must cover
+ * every case where deparseLockingClause() adds FOR UPDATE/SHARE; covering a
+ * few more (e.g. lower subquery rels) only costs an unneeded cursor.
+ */
+static bool
+scan_locks_rows(PlannerInfo *root, RelOptInfo *foreignrel)
+{
+	int			relid = -1;
+
+	if (IS_UPPER_REL(foreignrel))
+		return false;
+
+	while ((relid = bms_next_member(foreignrel->relids, relid)) >= 0)
+	{
+		PlanRowMark *rc;
+
+		if (bms_is_member(relid, root->all_result_relids) &&
+			(root->parse->commandType == CMD_UPDATE ||
+			 root->parse->commandType == CMD_DELETE))
+			return true;
+
+		rc = get_plan_rowmark(root->rowMarks, relid);
+		if (rc && rc->strength != LCS_NONE)
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * postgresReScanForeignScan
  *		Restart the scan.
  */
@@ -1880,9 +2037,10 @@ postgresReScanForeignScan(ForeignScanState *node)
 	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
 	char		sql[64];
 	PGresult   *res;
+	bool		reinitialize_scan = false;
 
-	/* If we haven't created the cursor yet, nothing to do. */
-	if (!fsstate->cursor_exists)
+	/* If no scan is in progress, nothing to do. */
+	if (!fsstate->scan_in_progress)
 		return;
 
 	/*
@@ -1901,43 +2059,67 @@ postgresReScanForeignScan(ForeignScanState *node)
 	 * to check the scrollability of it, so destroy and recreate it in any
 	 * case.  If we've only fetched zero or one batch, we needn't even rewind
 	 * the cursor, just rescan what we have.
+	 *
+	 * A streaming_fetch scan can't be rewound, so it is re-run from the
+	 * start, unless it has only read its first batch and saved nothing.
 	 */
 	if (node->ss.ps.chgParam != NULL)
-	{
-		fsstate->cursor_exists = false;
-		snprintf(sql, sizeof(sql), "CLOSE c%u",
-				 fsstate->cursor_number);
-	}
+		reinitialize_scan = true;
 	else if (fsstate->fetch_ct_2 > 1)
 	{
-		if (PQserverVersion(fsstate->conn) < 150000)
+		if (!fsstate->streaming_fetch &&
+			PQserverVersion(fsstate->conn) < 150000)
+		{
 			snprintf(sql, sizeof(sql), "MOVE BACKWARD ALL IN c%u",
 					 fsstate->cursor_number);
-		else
-		{
-			fsstate->cursor_exists = false;
-			snprintf(sql, sizeof(sql), "CLOSE c%u",
-					 fsstate->cursor_number);
+			res = pgfdw_exec_query(fsstate->conn, sql, fsstate->conn_state);
+			if (PQresultStatus(res) != PGRES_COMMAND_OK)
+				pgfdw_report_error(res, fsstate->conn, sql);
+
+			PQclear(res);
+
+			/* Now force a fresh FETCH. */
+			reset_batch_state(fsstate);
+			return;
 		}
+		else
+			reinitialize_scan = true;
 	}
 	else
 	{
-		/* Easy: just rescan what we already have in memory, if anything */
-		fsstate->next_tuple = 0;
-		return;
+		PgFdwSpool *spool = find_spool(fsstate->spool_id);
+
+		/*
+		 * Easy: just rescan what we already have in memory, if anything.  But
+		 * if a drain saved more rows, start over rather than rewind them.
+		 */
+		if (spool != NULL && spool_has_rows(spool))
+			reinitialize_scan = true;
+		else
+		{
+			fsstate->next_tuple = 0;
+			return;
+		}
 	}
-
-	res = pgfdw_exec_query(fsstate->conn, sql, fsstate->conn_state);
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-		pgfdw_report_error(res, fsstate->conn, sql);
-	PQclear(res);
-
-	/* Now force a fresh FETCH. */
-	fsstate->tuples = NULL;
-	fsstate->num_tuples = 0;
-	fsstate->next_tuple = 0;
-	fsstate->fetch_ct_2 = 0;
-	fsstate->eof_reached = false;
+	if (reinitialize_scan)
+	{
+		if (fsstate->streaming_fetch)
+		{
+			discard_stream_result(fsstate);
+		}
+		else
+		{
+			snprintf(sql, sizeof(sql), "CLOSE c%u",
+					 fsstate->cursor_number);
+			res = pgfdw_exec_query(fsstate->conn, sql, fsstate->conn_state);
+			if (PQresultStatus(res) != PGRES_COMMAND_OK)
+				pgfdw_report_error(res, fsstate->conn, sql);
+			PQclear(res);
+		}
+		/* Now force a fresh FETCH, and re-open the scan on the next iterate. */
+		reset_batch_state(fsstate);
+		fsstate->scan_in_progress = false;
+	}
 }
 
 /*
@@ -1953,10 +2135,19 @@ postgresEndForeignScan(ForeignScanState *node)
 	if (fsstate == NULL)
 		return;
 
-	/* Close the cursor if open, to prevent accumulation of cursors */
-	if (fsstate->cursor_exists)
-		close_cursor(fsstate->conn, fsstate->cursor_number,
-					 fsstate->conn_state);
+	/* Shut down the remote scan, if one is in progress */
+	if (fsstate->scan_in_progress)
+	{
+		if (fsstate->streaming_fetch)
+			discard_stream_result(fsstate);
+		else
+		{
+			close_cursor(fsstate->conn, fsstate->cursor_number,
+						 fsstate->conn_state);
+		}
+	}
+	delete_spool(fsstate->spool_id);
+	fsstate->spool_id = 0;
 
 	/* Release remote connection */
 	ReleaseConnection(fsstate->conn);
@@ -3237,9 +3428,14 @@ postgresExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	if (es->verbose)
 	{
 		char	   *sql;
+		bool		streaming_fetch;
 
 		sql = strVal(list_nth(fdw_private, FdwScanPrivateSelectSql));
+		streaming_fetch = boolVal(list_nth(fdw_private,
+										   FdwScanPrivateStreamingFetch));
 		ExplainPropertyText("Remote SQL", sql, es);
+		if (streaming_fetch)
+			ExplainPropertyBool("Streaming Fetch", true, es);
 	}
 }
 
@@ -3433,6 +3629,7 @@ estimate_path_cost_size(PlannerInfo *root,
 		List	   *local_param_join_conds;
 		StringInfoData sql;
 		PGconn	   *conn;
+		PgFdwConnState *conn_state;
 		Selectivity local_sel;
 		QualCost	local_cost;
 		List	   *fdw_scan_tlist = NIL;
@@ -3476,8 +3673,8 @@ estimate_path_cost_size(PlannerInfo *root,
 								false, &retrieved_attrs, NULL);
 
 		/* Get the remote estimate */
-		conn = GetConnection(fpinfo->user, false, NULL);
-		get_remote_estimate(sql.data, conn, &rows, &width,
+		conn = GetConnection(fpinfo->user, false, &conn_state);
+		get_remote_estimate(sql.data, conn, conn_state, &rows, &width,
 							&startup_cost, &total_cost);
 		ReleaseConnection(conn);
 
@@ -3923,7 +4120,7 @@ estimate_path_cost_size(PlannerInfo *root,
  * The given "sql" must be an EXPLAIN command.
  */
 static void
-get_remote_estimate(const char *sql, PGconn *conn,
+get_remote_estimate(const char *sql, PGconn *conn, PgFdwConnState *conn_state,
 					double *rows, int *width,
 					Cost *startup_cost, Cost *total_cost)
 {
@@ -3935,7 +4132,7 @@ get_remote_estimate(const char *sql, PGconn *conn,
 	/*
 	 * Execute EXPLAIN remotely.
 	 */
-	res = pgfdw_exec_query(conn, sql, NULL);
+	res = pgfdw_exec_query(conn, sql, conn_state);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		pgfdw_report_error(res, conn, sql);
 
@@ -4042,22 +4239,23 @@ ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
 }
 
 /*
- * Create cursor for node's query with current parameter values.
+ * Work common to create_cursor() and init_scan(): make the connection idle,
+ * and convert this scan's parameter values to text.
  */
 static void
-create_cursor(ForeignScanState *node)
+prepare_query(ForeignScanState *node)
 {
 	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
 	int			numParams = fsstate->numParams;
 	const char **values = fsstate->param_values;
-	PGconn	   *conn = fsstate->conn;
-	StringInfoData buf;
-	PGresult   *res;
 
 	/* First, process a pending asynchronous request, if any. */
 	if (fsstate->conn_state->pendingAreq)
 		process_pending_request(fsstate->conn_state->pendingAreq);
+
+	/* Likewise, finish any streaming_fetch scan using the connection. */
+	drain_active_scan(fsstate->conn_state);
 
 	/*
 	 * Construct array of query parameter values in text format.  We do the
@@ -4077,6 +4275,22 @@ create_cursor(ForeignScanState *node)
 
 		MemoryContextSwitchTo(oldcontext);
 	}
+}
+
+/*
+ * Create cursor for node's query with current parameter values.
+ */
+static void
+create_cursor(ForeignScanState *node)
+{
+	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
+	PGconn	   *conn = fsstate->conn;
+	int			numParams = fsstate->numParams;
+	const char **values = fsstate->param_values;
+	StringInfoData buf;
+	PGresult   *res;
+
+	prepare_query(node);
 
 	/* Construct the DECLARE CURSOR command */
 	initStringInfo(&buf);
@@ -4102,8 +4316,8 @@ create_cursor(ForeignScanState *node)
 		pgfdw_report_error(res, conn, fsstate->query);
 	PQclear(res);
 
-	/* Mark the cursor as created, and show no tuples have been retrieved */
-	fsstate->cursor_exists = true;
+	/* Mark the scan as started, and show no tuples have been retrieved */
+	fsstate->scan_in_progress = true;
 	fsstate->tuples = NULL;
 	fsstate->num_tuples = 0;
 	fsstate->next_tuple = 0;
@@ -4115,7 +4329,45 @@ create_cursor(ForeignScanState *node)
 }
 
 /*
- * Fetch some more rows from the node's cursor.
+ * Start the remote query for a streaming_fetch scan in chunked-rows mode;
+ * the counterpart of create_cursor().
+ */
+static void
+init_scan(ForeignScanState *node)
+{
+	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
+	PGconn	   *conn = fsstate->conn;
+
+	prepare_query(node);
+
+	/* Rows read from the new stream go to the scan's spool, emptied */
+	reset_spool(fsstate);
+
+	if (!PQsendQueryParams(conn, fsstate->query, fsstate->numParams,
+						   NULL, fsstate->param_values, NULL, NULL, 0))
+		pgfdw_report_error(NULL, conn, fsstate->query);
+
+	/* Receive the rows in chunks of fetch_size */
+	if (!PQsetChunkedRowsMode(conn, fsstate->fetch_size))
+	{
+		pgfdw_cancel_query(fsstate->conn, fsstate->conn_state);
+		pgfdw_report_error(NULL, conn, fsstate->query);
+	}
+
+	/* Mark the scan as started, and show no tuples have been retrieved */
+	fsstate->scan_in_progress = true;
+	fsstate->tuples = NULL;
+	fsstate->num_tuples = 0;
+	fsstate->next_tuple = 0;
+	fsstate->fetch_ct_2 = 0;
+	fsstate->eof_reached = false;
+
+	/* Until the result is consumed, the connection belongs to our spool */
+	fsstate->conn_state->active_spool_id = fsstate->spool_id;
+}
+
+/*
+ * Fetch some more rows from the remote scan.
  */
 static void
 fetch_more_data(ForeignScanState *node)
@@ -4127,13 +4379,17 @@ fetch_more_data(ForeignScanState *node)
 	int			i;
 	MemoryContext oldcontext;
 
-	/*
-	 * We'll store the tuples in the batch_cxt.  First, flush the previous
-	 * batch.
-	 */
 	fsstate->tuples = NULL;
 	MemoryContextReset(fsstate->batch_cxt);
 	oldcontext = MemoryContextSwitchTo(fsstate->batch_cxt);
+
+	/*
+	 * Count every fill of tuples[], whichever branch below supplies it, so
+	 * that rescan knows how to rewind.  Counting a fetch that then fails is
+	 * harmless, as the error prevents any rescan.
+	 */
+	if (fsstate->fetch_ct_2 < 2)
+		fsstate->fetch_ct_2++;
 
 	if (fsstate->async_capable)
 	{
@@ -4151,7 +4407,7 @@ fetch_more_data(ForeignScanState *node)
 		/* Reset per-connection state */
 		fsstate->conn_state->pendingAreq = NULL;
 	}
-	else
+	else if (!fsstate->streaming_fetch)
 	{
 		char		sql[64];
 
@@ -4164,7 +4420,58 @@ fetch_more_data(ForeignScanState *node)
 		if (PQresultStatus(res) != PGRES_TUPLES_OK)
 			pgfdw_report_error(res, conn, fsstate->query);
 	}
+	else
+	{
+		PgFdwSpool *spool = find_spool(fsstate->spool_id);
 
+		/*
+		 * The spool can only be missing if abort cleanup deleted it, but then
+		 * the scan should be gone too.
+		 */
+		if (spool == NULL)
+			elog(ERROR, "streaming_fetch spool %" PRIu64 " not found",
+				 fsstate->spool_id);
+
+		/* Don't read past rows that a failed drain consumed but never saved */
+		check_stream_rows_lost(spool);
+
+		/* Rows saved by a drain come first */
+		if (spool_has_rows(spool))
+		{
+			fetch_spooled_rows(node, spool);
+			MemoryContextSwitchTo(oldcontext);
+			return;
+		}
+
+		if (!is_active_scan(fsstate))
+		{
+			/*
+			 * Nothing saved and nothing to read: EOF, if the stream ended.
+			 * That happens when our last chunk was full, so we didn't know we
+			 * were at EOF, and a drain then found only the end of the stream.
+			 */
+			if (spool->stream_done)
+			{
+				fsstate->eof_reached = true;
+				MemoryContextSwitchTo(oldcontext);
+				return;
+			}
+
+			/* Otherwise abort cleanup (e.g. ROLLBACK TO SAVEPOINT) ended it */
+			ereport(ERROR,
+					errcode(ERRCODE_INVALID_CURSOR_STATE),
+					errmsg("could not obtain remaining rows from remote server"),
+					errdetail("The remote query was canceled when a subtransaction was rolled back."));
+		}
+
+		res = fetch_stream_result(fsstate->conn_state, spool);
+		if (res == NULL)
+		{
+			fsstate->eof_reached = true;
+			MemoryContextSwitchTo(oldcontext);
+			return;
+		}
+	}
 	/* Convert the data into HeapTuples */
 	numrows = PQntuples(res);
 	fsstate->tuples = palloc0_array(HeapTuple, numrows);
@@ -4184,15 +4491,566 @@ fetch_more_data(ForeignScanState *node)
 									   fsstate->temp_cxt);
 	}
 
-	/* Update fetch_ct_2 */
-	if (fsstate->fetch_ct_2 < 2)
-		fsstate->fetch_ct_2++;
-
-	/* Must be EOF if we didn't get as many tuples as we asked for. */
-	fsstate->eof_reached = (numrows < fsstate->fetch_size);
-
 	PQclear(res);
 
+	if (fsstate->streaming_fetch)
+	{
+		/*
+		 * After a partial chunk, only the end of the stream is left; consume
+		 * it now so the connection is free.  (Any unexpected rows would be
+		 * saved.)
+		 */
+		if (numrows < fsstate->fetch_size && is_active_scan(fsstate))
+			drain_active_scan(fsstate->conn_state);
+
+		/*
+		 * Converting the rows can also run code (e.g. a domain's check) that
+		 * uses this connection, and so drains this very scan.  Either way,
+		 * we're at EOF once the stream has ended and nothing is saved.
+		 */
+		fsstate->eof_reached = scan_at_eof(fsstate);
+	}
+	else
+	{
+		/* Must be EOF if we didn't get as many tuples as we asked for. */
+		fsstate->eof_reached = (numrows < fsstate->fetch_size);
+	}
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
+ * Is a streaming_fetch scan at EOF: its stream has ended, and its spool has
+ * no rows left to return?
+ */
+static bool
+scan_at_eof(PgFdwScanState *fsstate)
+{
+	PgFdwSpool *spool = find_spool(fsstate->spool_id);
+
+	return spool != NULL && spool->stream_done &&
+		!spool_has_rows(spool) && !is_active_scan(fsstate);
+}
+
+/*
+ * Get the next chunked-rows-mode result of the stream on the connection,
+ * whose rows belong to the given spool.  Returns the result, or NULL once
+ * the end of the stream has been read.
+ */
+static PGresult *
+fetch_stream_result(PgFdwConnState *conn_state, PgFdwSpool *spool)
+{
+	PGconn	   *conn = conn_state->conn;
+	PGresult   *res;
+
+	res = pgfdw_get_next_result(conn);
+
+	if (!res || PQresultStatus(res) == PGRES_FATAL_ERROR)
+		pgfdw_report_error(res, conn, spool->query);
+
+	/*
+	 * PGRES_TUPLES_OK ends the stream: consume the final NULL, and the
+	 * connection is free again.
+	 */
+	if (PQresultStatus(res) == PGRES_TUPLES_OK)
+	{
+		/* Ensure that theere are no tuples */
+		if (PQntuples(res) != 0);
+			pgfdw_report_error(res, conn, spool->query);
+		PQclear(res);
+		res = pgfdw_get_next_result(conn);
+		if (res != NULL)
+			pgfdw_report_error(res, conn, spool->query);
+		conn_state->active_spool_id = 0;
+		spool->stream_done = true;
+		return NULL;
+	}
+
+	if (PQresultStatus(res) != PGRES_TUPLES_CHUNK)
+		pgfdw_report_error(res, conn, spool->query);
+
+	return res;
+}
+
+/*
+ * Consume and discard every remaining chunked-rows result of this scan.
+ * Used on rescan or early end of scan.  We don't cancel the query instead,
+ * since that would abort the remote transaction.
+ */
+static void
+discard_stream_result(PgFdwScanState *fsstate)
+{
+	PgFdwSpool *spool;
+	PGresult   *res;
+
+	/* Nothing to do if the stream was already consumed */
+	if (!is_active_scan(fsstate))
+		return;
+
+	spool = find_spool(fsstate->spool_id);
+	if (spool == NULL)
+	{
+		discard_abandoned_result(fsstate->conn_state);
+		return;
+	}
+	for (;;)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		res = fetch_stream_result(fsstate->conn_state, spool);
+		if (res == NULL)
+			break;
+		PQclear(res);
+	}
+}
+
+/*
+ * Read and throw away the rest of a result whose spool no longer exists,
+ * because its scan is gone.  We can't cancel the query instead, since that
+ * would abort the remote transaction, which outer transaction levels may
+ * still be using.  If the result ends in an error, the remote transaction is
+ * aborted anyway, and the next command will report that.
+ */
+static void
+discard_abandoned_result(PgFdwConnState *conn_state)
+{
+	PGresult   *res;
+
+	while ((res = pgfdw_get_next_result(conn_state->conn)) != NULL)
+		PQclear(res);
+	conn_state->active_spool_id = 0;
+}
+
+/*
+ * Error out if a failed drain may have lost some of the scan's rows, rather
+ * than silently return short results.
+ */
+static void
+check_stream_rows_lost(PgFdwSpool *spool)
+{
+	if (spool->rows_lost)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_CURSOR_STATE),
+				errmsg("could not obtain all rows from remote server"),
+				errdetail("An earlier error interrupted reading the remote query's result."));
+}
+
+/*
+ * Return true if fsstate is the scan whose result the connection is
+ * currently carrying.
+ */
+static bool
+is_active_scan(PgFdwScanState *fsstate)
+{
+	return fsstate->streaming_fetch && fsstate->spool_id != 0 &&
+		fsstate->conn_state->active_spool_id == fsstate->spool_id;
+}
+
+/*
+ * Create the scan's spool when the scan begins, recording the subtransaction
+ * and portal it began in, and set its spool_id.
+ */
+static void
+create_spool(PgFdwScanState *fsstate)
+{
+	MemoryContext cxt;
+	PgFdwSpool *spool;
+	uint64		id;
+
+	if (spools == NULL)
+	{
+		HASHCTL		ctl;
+
+		ctl.keysize = sizeof(uint64);
+		ctl.entrysize = sizeof(PgFdwSpool);
+		ctl.hcxt = TopTransactionContext;
+		spools = hash_create("postgres_fdw spools", 16, &ctl,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+
+	cxt = AllocSetContextCreate(TopTransactionContext,
+								"postgres_fdw spool",
+								ALLOCSET_DEFAULT_SIZES);
+	id = ++last_spool_id;
+	spool = hash_search(spools, &id, HASH_ENTER, NULL);
+	memset(spool, 0, sizeof(PgFdwSpool));
+	spool->id = id;
+	spool->cxt = cxt;
+	spool->query = MemoryContextStrdup(cxt, fsstate->query);
+	spool->subid = GetCurrentSubTransactionId();
+	spool->portal = ActivePortal;
+	if (ActivePortal)
+		spool->portal_name = MemoryContextStrdup(cxt, ActivePortal->name);
+
+	fsstate->spool_id = id;
+}
+
+/*
+ * Find a spool by ID; NULL if it doesn't exist (any more).
+ */
+static PgFdwSpool *
+find_spool(uint64 id)
+{
+	if (spools == NULL || id == 0)
+		return NULL;
+	return (PgFdwSpool *) hash_search(spools, &id, HASH_FIND, NULL);
+}
+
+/*
+ * Delete a spool, and everything saved in it.  It's fine if it doesn't
+ * exist.  A connection may still be reading a result into it; that result
+ * will be discarded instead.
+ */
+static void
+delete_spool(uint64 id)
+{
+	PgFdwSpool *spool = find_spool(id);
+
+	if (spool == NULL)
+		return;
+	if (spool->file)
+		BufFileClose(spool->file);
+	MemoryContextDelete(spool->cxt);	/* frees the PGresults too */
+	hash_search(spools, &id, HASH_REMOVE, NULL);
+}
+
+/*
+ * Empty the scan's spool, ready for a new stream.
+ */
+static void
+reset_spool(PgFdwScanState *fsstate)
+{
+	PgFdwSpool *spool = find_spool(fsstate->spool_id);
+	ListCell   *lc;
+
+	/* Only abort cleanup deletes a spool, and then the scan is gone too */
+	if (spool == NULL)
+		elog(ERROR, "streaming_fetch spool %" PRIu64 " not found",
+			 fsstate->spool_id);
+
+	foreach(lc, spool->results)
+		PQclear((PGresult *) lfirst(lc));
+	list_free(spool->results);
+	spool->results = NIL;
+	spool->result_row = 0;
+	spool->results_mem = 0;
+
+	if (spool->file)
+		BufFileClose(spool->file);
+	spool->file = NULL;
+	spool->file_rows_written = spool->file_rows_read = 0;
+	spool->file_read_fileno = spool->file_write_fileno = 0;
+	spool->file_read_offset = spool->file_write_offset = 0;
+
+	spool->stream_done = false;
+	spool->rows_lost = false;
+}
+
+/*
+ * Subtransaction end: delete the spools of scans that began in an aborted
+ * subtransaction, or whose portal has failed (e.g. a cursor from an outer
+ * level that failed while being read in it) or is gone.  At commit, spools
+ * just move to the parent subtransaction.
+ */
+void
+pgfdw_spools_at_subxact_end(bool isCommit, SubTransactionId mySubid,
+							SubTransactionId parentSubid)
+{
+	HASH_SEQ_STATUS status;
+	PgFdwSpool *spool;
+
+	if (spools == NULL)
+		return;
+
+	hash_seq_init(&status, spools);
+	while ((spool = hash_seq_search(&status)) != NULL)
+	{
+		bool		drop;
+
+		if (isCommit)
+		{
+			if (spool->subid == mySubid)
+				spool->subid = parentSubid;
+			continue;
+		}
+
+		drop = (spool->subid == mySubid);
+		if (!drop && spool->portal != NULL)
+		{
+			Portal		portal = GetPortalByName(spool->portal_name);
+
+			drop = (portal != spool->portal ||
+					portal->status == PORTAL_FAILED);
+		}
+		if (drop)
+			delete_spool(spool->id);
+	}
+}
+
+/*
+ * Transaction end: delete all spools.  Normally every scan has deleted its
+ * own by now.
+ */
+void
+pgfdw_spools_at_xact_end(void)
+{
+	HASH_SEQ_STATUS status;
+	PgFdwSpool *spool;
+
+	if (spools == NULL)
+		return;
+
+	/* Close the files; the memory goes with TopTransactionContext */
+	hash_seq_init(&status, spools);
+	while ((spool = hash_seq_search(&status)) != NULL)
+	{
+		if (spool->file)
+			BufFileClose(spool->file);
+	}
+	spools = NULL;
+}
+
+/*
+ * Does the spool have rows that haven't been returned yet?
+ */
+static bool
+spool_has_rows(PgFdwSpool *spool)
+{
+	return spool->results != NIL ||
+		spool->file_rows_read < spool->file_rows_written;
+}
+
+/*
+ * Return the next batch of up to fetch_size of the rows saved in the spool:
+ * first those in saved PGresults, then those in the file.  The rows are
+ * saved unconverted, so this is where they are converted, as part of the
+ * scan's own execution.
+ */
+static void
+fetch_spooled_rows(ForeignScanState *node, PgFdwSpool *spool)
+{
+	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
+	int			numrows = 0;
+
+	/* The tuples are built in the caller's context, batch_cxt */
+	fsstate->tuples = palloc0_array(HeapTuple, fsstate->fetch_size);
+	while (numrows < fsstate->fetch_size)
+	{
+		if (spool->results != NIL)
+		{
+			PGresult   *res = (PGresult *) linitial(spool->results);
+
+			if (spool->result_row < PQntuples(res))
+			{
+				fsstate->tuples[numrows++] =
+					make_tuple_from_result_row(res, spool->result_row++,
+											   fsstate->rel,
+											   fsstate->attinmeta,
+											   fsstate->retrieved_attrs,
+											   node,
+											   fsstate->temp_cxt);
+				continue;
+			}
+
+			/* Done with this PGresult */
+			spool->results = list_delete_first(spool->results);
+			spool->results_mem -= PQresultMemorySize(res->res);
+			spool->result_row = 0;
+			PQclear(res);
+		}
+		else if (spool->file_rows_read < spool->file_rows_written)
+			fsstate->tuples[numrows++] = read_spooled_row(node, spool);
+		else
+			break;
+	}
+	fsstate->num_tuples = numrows;
+	fsstate->next_tuple = 0;
+
+	/* Close the file once everything in it has been returned */
+	if (!spool_has_rows(spool) && spool->file)
+	{
+		BufFileClose(spool->file);
+		spool->file = NULL;
+		spool->file_rows_written = spool->file_rows_read = 0;
+	}
+
+	fsstate->eof_reached = scan_at_eof(fsstate);
+}
+
+/*
+ * Save one chunk of a stream's result in its spool, unconverted.  The
+ * PGresult itself is kept while the spool's results fit in work_mem; beyond
+ * that, its rows are written to the spool's file as text, and it is freed.
+ * After the first spill, everything goes to the file, so that the rows stay
+ * in order.
+ *
+ * Each row is written as its values in order, each an int32 length (-1 for
+ * NULL) followed by that many bytes.
+ *
+ * The caller must have made the spool's memory context current, so that the
+ * PGresult belongs to it, and TopTransactionResourceOwner the current resource
+ * owner, so that the file does.
+ */
+static void
+save_result(PgFdwSpool *spool, PGresult *res)
+{
+	Size		size = PQresultMemorySize(res->res);
+	int			nfields = PQnfields(res);
+	int			ntuples = PQntuples(res);
+
+	if (spool->file == NULL &&
+		spool->results_mem + size <= (Size) work_mem * 1024)
+	{
+		spool->results = lappend(spool->results, res);
+		spool->results_mem += size;
+		return;
+	}
+
+	if (spool->file == NULL)
+	{
+		PrepareTempTablespaces();
+		spool->file = BufFileCreateTemp(false);
+		spool->file_nfields = nfields;
+	}
+	else if (nfields != spool->file_nfields)
+		elog(ERROR, "remote query result does not match the foreign table");
+
+	if (BufFileSeek(spool->file, spool->file_write_fileno,
+					spool->file_write_offset, SEEK_SET) != 0)
+		elog(ERROR, "could not seek in postgres_fdw temporary file");
+
+	for (int i = 0; i < ntuples; i++)
+	{
+		for (int k = 0; k < nfields; k++)
+		{
+			int32		len;
+
+			len = PQgetisnull(res, i, k) ? -1 : PQgetlength(res, i, k);
+			BufFileWrite(spool->file, &len, sizeof(len));
+			if (len > 0)
+				BufFileWrite(spool->file, PQgetvalue(res, i, k), len);
+		}
+		spool->file_rows_written++;
+	}
+
+	BufFileTell(spool->file, &spool->file_write_fileno,
+				&spool->file_write_offset);
+	PQclear(res);
+}
+
+/*
+ * Read the next row from the spool's file, and convert it to a tuple.
+ */
+static HeapTuple
+read_spooled_row(ForeignScanState *node, PgFdwSpool *spool)
+{
+	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
+	int			nfields = spool->file_nfields;
+	const char **valstrs;
+	MemoryContext oldcontext;
+
+	if (BufFileSeek(spool->file, spool->file_read_fileno,
+					spool->file_read_offset, SEEK_SET) != 0)
+		elog(ERROR, "could not seek in postgres_fdw temporary file");
+
+	/* make_tuple_from_strings() resets temp_cxt when it's done */
+	oldcontext = MemoryContextSwitchTo(fsstate->temp_cxt);
+	valstrs = palloc_array(const char *, nfields);
+	for (int k = 0; k < nfields; k++)
+	{
+		int32		len;
+		char	   *val;
+
+		BufFileReadExact(spool->file, &len, sizeof(len));
+		if (len < 0)
+		{
+			valstrs[k] = NULL;
+			continue;
+		}
+		val = palloc(len + 1);
+		if (len > 0)
+			BufFileReadExact(spool->file, val, len);
+		val[len] = '\0';
+		valstrs[k] = val;
+	}
+	MemoryContextSwitchTo(oldcontext);
+
+	BufFileTell(spool->file, &spool->file_read_fileno,
+				&spool->file_read_offset);
+	spool->file_rows_read++;
+
+	return make_tuple_from_strings(valstrs, nfields,
+								   fsstate->rel,
+								   fsstate->attinmeta,
+								   fsstate->retrieved_attrs,
+								   node,
+								   fsstate->temp_cxt);
+}
+
+/*
+ * A connection can carry only one query result at a time.  If a
+ * streaming_fetch scan's result is still being read, save the rest of it in
+ * the scan's spool, so that the connection can be used for something else.
+ * Every path that sends a query must call this first.
+ *
+ * This can happen in the middle of an unrelated statement, as a different
+ * user, or in a transaction callback, so it must not run any user-defined
+ * code: rows are saved as received, and converted only when the scan
+ * returns them.  It also doesn't need the scan itself, which may be gone:
+ * then its spool is gone too, and the rest of the result is thrown away.
+ */
+void
+drain_active_scan(PgFdwConnState *conn_state)
+{
+	PgFdwSpool *spool;
+	MemoryContext oldcontext;
+	ResourceOwner oldowner;
+	bool		rows_already_lost;
+
+	if (conn_state->active_spool_id == 0)
+		return;
+
+	spool = find_spool(conn_state->active_spool_id);
+	if (spool == NULL)
+	{
+		discard_abandoned_result(conn_state);
+		return;
+	}
+
+	/* Rows lost by an earlier failed drain stay lost */
+	rows_already_lost = spool->rows_lost;
+
+	/* See save_result() */
+	oldcontext = MemoryContextSwitchTo(spool->cxt);
+	oldowner = CurrentResourceOwner;
+	CurrentResourceOwner = TopTransactionResourceOwner;
+
+	/* Save each chunk until fetch_stream_result() reports the end */
+	for (;;)
+	{
+		PGresult   *res;
+
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * An error before this chunk is fully saved loses rows, and may abort
+		 * only a subtransaction, leaving the scan readable at an outer level.
+		 * Flag that until the chunk is saved.
+		 */
+		spool->rows_lost = true;
+
+		res = fetch_stream_result(conn_state, spool);
+		if (res == NULL)
+		{
+			spool->rows_lost = rows_already_lost;
+			break;
+		}
+
+		save_result(spool, res);
+		spool->rows_lost = rows_already_lost;
+	}
+
+	CurrentResourceOwner = oldowner;
 	MemoryContextSwitchTo(oldcontext);
 }
 
@@ -4419,6 +5277,9 @@ execute_foreign_modify(EState *estate,
 	/* First, process a pending asynchronous request, if any. */
 	if (fmstate->conn_state->pendingAreq)
 		process_pending_request(fmstate->conn_state->pendingAreq);
+
+	/* Likewise, finish any streaming_fetch scan using the connection. */
+	drain_active_scan(fmstate->conn_state);
 
 	/*
 	 * If the existing query was deparsed and prepared for a different number
@@ -4846,6 +5707,9 @@ execute_dml_stmt(ForeignScanState *node)
 	if (dmstate->conn_state->pendingAreq)
 		process_pending_request(dmstate->conn_state->pendingAreq);
 
+	/* Likewise, finish any streaming_fetch scan using the connection. */
+	drain_active_scan(dmstate->conn_state);
+
 	/*
 	 * Construct array of query parameter values in text format.
 	 */
@@ -5216,6 +6080,7 @@ postgresAnalyzeForeignTable(Relation relation,
 	ForeignTable *table;
 	UserMapping *user;
 	PGconn	   *conn;
+	PgFdwConnState *conn_state;
 	StringInfoData sql;
 	PGresult   *res;
 
@@ -5235,7 +6100,7 @@ postgresAnalyzeForeignTable(Relation relation,
 	 */
 	table = GetForeignTable(RelationGetRelid(relation));
 	user = GetUserMapping(relation->rd_rel->relowner, table->serverid);
-	conn = GetConnection(user, false, NULL);
+	conn = GetConnection(user, false, &conn_state);
 
 	/*
 	 * Construct command to get page count for relation.
@@ -5243,7 +6108,7 @@ postgresAnalyzeForeignTable(Relation relation,
 	initStringInfo(&sql);
 	deparseAnalyzeSizeSql(&sql, relation);
 
-	res = pgfdw_exec_query(conn, sql.data, NULL);
+	res = pgfdw_exec_query(conn, sql.data, conn_state);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		pgfdw_report_error(res, conn, sql.data);
 
@@ -5270,6 +6135,7 @@ postgresGetAnalyzeInfoForForeignTable(Relation relation, bool *can_tablesample)
 	ForeignTable *table;
 	UserMapping *user;
 	PGconn	   *conn;
+	PgFdwConnState *conn_state;
 	StringInfoData sql;
 	PGresult   *res;
 	double		reltuples;
@@ -5284,7 +6150,7 @@ postgresGetAnalyzeInfoForForeignTable(Relation relation, bool *can_tablesample)
 	 */
 	table = GetForeignTable(RelationGetRelid(relation));
 	user = GetUserMapping(relation->rd_rel->relowner, table->serverid);
-	conn = GetConnection(user, false, NULL);
+	conn = GetConnection(user, false, &conn_state);
 
 	/*
 	 * Construct command to get page count for relation.
@@ -5292,7 +6158,7 @@ postgresGetAnalyzeInfoForForeignTable(Relation relation, bool *can_tablesample)
 	initStringInfo(&sql);
 	deparseAnalyzeInfoSql(&sql, relation);
 
-	res = pgfdw_exec_query(conn, sql.data, NULL);
+	res = pgfdw_exec_query(conn, sql.data, conn_state);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		pgfdw_report_error(res, conn, sql.data);
 
@@ -5338,6 +6204,7 @@ postgresAcquireSampleRowsFunc(Relation relation, int elevel,
 	ForeignServer *server;
 	UserMapping *user;
 	PGconn	   *conn;
+	PgFdwConnState *conn_state;
 	int			server_version_num;
 	PgFdwSamplingMethod method = ANALYZE_SAMPLE_AUTO;	/* auto is default */
 	double		sample_frac = -1.0;
@@ -5373,7 +6240,7 @@ postgresAcquireSampleRowsFunc(Relation relation, int elevel,
 	table = GetForeignTable(RelationGetRelid(relation));
 	server = GetForeignServer(table->serverid);
 	user = GetUserMapping(relation->rd_rel->relowner, table->serverid);
-	conn = GetConnection(user, false, NULL);
+	conn = GetConnection(user, false, &conn_state);
 
 	/* We'll need server version, so fetch it now. */
 	server_version_num = PQserverVersion(conn);
@@ -5523,7 +6390,7 @@ postgresAcquireSampleRowsFunc(Relation relation, int elevel,
 
 	deparseAnalyzeSql(&sql, relation, method, sample_frac, &astate.retrieved_attrs);
 
-	res = pgfdw_exec_query(conn, sql.data, NULL);
+	res = pgfdw_exec_query(conn, sql.data, conn_state);
 	if (PQresultStatus(res) != PGRES_COMMAND_OK)
 		pgfdw_report_error(res, conn, sql.data);
 	PQclear(res);
@@ -5574,7 +6441,7 @@ postgresAcquireSampleRowsFunc(Relation relation, int elevel,
 		 */
 
 		/* Fetch some rows */
-		res = pgfdw_exec_query(conn, fetch_sql, NULL);
+		res = pgfdw_exec_query(conn, fetch_sql, conn_state);
 		/* On error, report the original query, not the FETCH. */
 		if (PQresultStatus(res) != PGRES_TUPLES_OK)
 			pgfdw_report_error(res, conn, sql.data);
@@ -5592,7 +6459,7 @@ postgresAcquireSampleRowsFunc(Relation relation, int elevel,
 	}
 
 	/* Close the cursor, just to be tidy. */
-	close_cursor(conn, cursor_number, NULL);
+	close_cursor(conn, cursor_number, conn_state);
 
 	ReleaseConnection(conn);
 
@@ -5808,6 +6675,7 @@ fetch_remote_statistics(Relation relation,
 	const char *remote_relname = NULL;
 	UserMapping *user;
 	PGconn	   *conn;
+	PgFdwConnState *conn_state;
 	PGresult   *relstats = NULL;
 	PGresult   *attstats = NULL;
 	int			server_version_num;
@@ -5839,11 +6707,11 @@ fetch_remote_statistics(Relation relation,
 	 * from ImportForeignStatistics().
 	 */
 	user = GetUserMapping(GetUserId(), table->serverid);
-	conn = GetConnection(user, false, NULL);
+	conn = GetConnection(user, false, &conn_state);
 	remstats->version = server_version_num = PQserverVersion(conn);
 
 	/* Fetch relation stats. */
-	remstats->rel = relstats = fetch_relstats(conn, relation);
+	remstats->rel = relstats = fetch_relstats(conn, conn_state, relation);
 
 	/*
 	 * Verify that the remote table is the sort that can have meaningful stats
@@ -5929,7 +6797,7 @@ fetch_remote_statistics(Relation relation,
 			}
 
 			/* Fetch attribute stats. */
-			remstats->att = attstats = fetch_attstats(conn,
+			remstats->att = attstats = fetch_attstats(conn, conn_state,
 													  server_version_num,
 													  remote_schemaname,
 													  remote_relname,
@@ -5977,7 +6845,8 @@ fetch_cleanup:
  * Attempt to fetch remote relation stats.
  */
 static PGresult *
-fetch_relstats(PGconn *conn, Relation relation)
+fetch_relstats(PGconn *conn, PgFdwConnState *conn_state,
+			   Relation relation)
 {
 	StringInfoData sql;
 	PGresult   *res;
@@ -5985,7 +6854,7 @@ fetch_relstats(PGconn *conn, Relation relation)
 	initStringInfo(&sql);
 	deparseAnalyzeInfoSql(&sql, relation);
 
-	res = pgfdw_exec_query(conn, sql.data, NULL);
+	res = pgfdw_exec_query(conn, sql.data, conn_state);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		pgfdw_report_error(res, conn, sql.data);
 
@@ -5999,7 +6868,8 @@ fetch_relstats(PGconn *conn, Relation relation)
  * Attempt to fetch remote attribute stats.
  */
 static PGresult *
-fetch_attstats(PGconn *conn, int server_version_num,
+fetch_attstats(PGconn *conn, PgFdwConnState *conn_state,
+			   int server_version_num,
 			   const char *remote_schemaname, const char *remote_relname,
 			   const char *column_list)
 {
@@ -6073,7 +6943,7 @@ fetch_attstats(PGconn *conn, int server_version_num,
 		appendStringInfoString(&sql,
 							   " ORDER BY attname::text COLLATE \"C\", inherited DESC");
 
-	res = pgfdw_exec_query(conn, sql.data, NULL);
+	res = pgfdw_exec_query(conn, sql.data, conn_state);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		pgfdw_report_error(res, conn, sql.data);
 
@@ -6533,6 +7403,7 @@ postgresImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 	ForeignServer *server;
 	UserMapping *mapping;
 	PGconn	   *conn;
+	PgFdwConnState *conn_state;
 	StringInfoData buf;
 	PGresult   *res;
 	int			numrows,
@@ -6564,7 +7435,7 @@ postgresImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 	 */
 	server = GetForeignServer(serverOid);
 	mapping = GetUserMapping(GetUserId(), server->serverid);
-	conn = GetConnection(mapping, false, NULL);
+	conn = GetConnection(mapping, false, &conn_state);
 
 	/* Don't attempt to import collation if remote server hasn't got it */
 	if (PQserverVersion(conn) < 90100)
@@ -6577,7 +7448,7 @@ postgresImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 	appendStringInfoString(&buf, "SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = ");
 	deparseStringLiteral(&buf, stmt->remote_schema);
 
-	res = pgfdw_exec_query(conn, buf.data, NULL);
+	res = pgfdw_exec_query(conn, buf.data, conn_state);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		pgfdw_report_error(res, conn, buf.data);
 
@@ -6691,7 +7562,7 @@ postgresImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 	appendStringInfoString(&buf, " ORDER BY c.relname, a.attnum");
 
 	/* Fetch the data */
-	res = pgfdw_exec_query(conn, buf.data, NULL);
+	res = pgfdw_exec_query(conn, buf.data, conn_state);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		pgfdw_report_error(res, conn, buf.data);
 
@@ -7608,6 +8479,8 @@ apply_server_options(PgFdwRelationInfo *fpinfo)
 			(void) parse_int(defGetString(def), &fpinfo->fetch_size, 0, NULL);
 		else if (strcmp(def->defname, "async_capable") == 0)
 			fpinfo->async_capable = defGetBoolean(def);
+		else if (strcmp(def->defname, "streaming_fetch") == 0)
+			fpinfo->streaming_fetch = defGetBoolean(def);
 	}
 }
 
@@ -7631,6 +8504,8 @@ apply_table_options(PgFdwRelationInfo *fpinfo)
 			(void) parse_int(defGetString(def), &fpinfo->fetch_size, 0, NULL);
 		else if (strcmp(def->defname, "async_capable") == 0)
 			fpinfo->async_capable = defGetBoolean(def);
+		else if (strcmp(def->defname, "streaming_fetch") == 0)
+			fpinfo->streaming_fetch = defGetBoolean(def);
 	}
 }
 
@@ -7666,6 +8541,7 @@ merge_fdw_options(PgFdwRelationInfo *fpinfo,
 	fpinfo->use_remote_estimate = fpinfo_o->use_remote_estimate;
 	fpinfo->fetch_size = fpinfo_o->fetch_size;
 	fpinfo->async_capable = fpinfo_o->async_capable;
+	fpinfo->streaming_fetch = fpinfo_o->streaming_fetch;
 
 	/* Merge the table level options from either side of the join. */
 	if (fpinfo_i)
@@ -7697,6 +8573,11 @@ merge_fdw_options(PgFdwRelationInfo *fpinfo,
 		 */
 		fpinfo->async_capable = fpinfo_o->async_capable ||
 			fpinfo_i->async_capable;
+		fpinfo->streaming_fetch = fpinfo_o->streaming_fetch ||
+			fpinfo_i->streaming_fetch;
+		/* streaming_fetch and async execution are mutually exclusive */
+		if (fpinfo->streaming_fetch)
+			fpinfo->async_capable = false;
 	}
 }
 
@@ -8867,8 +9748,11 @@ fetch_more_data_begin(AsyncRequest *areq)
 	Assert(!fsstate->conn_state->pendingAreq);
 
 	/* Create the cursor synchronously. */
-	if (!fsstate->cursor_exists)
+	if (!fsstate->scan_in_progress)
 		create_cursor(node);
+
+	/* PQsendQuery() below doesn't drain a streaming_fetch scan; do it here */
+	drain_active_scan(fsstate->conn_state);
 
 	/* We will send this query, but not wait for the response. */
 	snprintf(sql, sizeof(sql), "FETCH %d FROM c%u",
@@ -8960,6 +9844,42 @@ make_tuple_from_result_row(PGresult *res,
 						   ForeignScanState *fsstate,
 						   MemoryContext temp_context)
 {
+	int			nfields = PQnfields(res);
+	const char **valstrs;
+	MemoryContext oldcontext;
+	int			j;
+
+	Assert(row < PQntuples(res));
+
+	/* make_tuple_from_strings() resets temp_context when it's done */
+	oldcontext = MemoryContextSwitchTo(temp_context);
+	valstrs = palloc_array(const char *, nfields);
+	for (j = 0; j < nfields; j++)
+		valstrs[j] = PQgetisnull(res, row, j) ? NULL : PQgetvalue(res, row, j);
+	MemoryContextSwitchTo(oldcontext);
+
+	return make_tuple_from_strings(valstrs, nfields, rel, attinmeta,
+								   retrieved_attrs, fsstate, temp_context);
+}
+
+/*
+ * Create a tuple from the textual values of one remote row, as received
+ * (valstrs[j] is the j'th column of the remote query's result, or NULL).
+ * The other arguments are as for make_tuple_from_result_row().
+ *
+ * This runs the columns' input functions, which can execute arbitrary code
+ * (e.g. a domain's CHECK constraints), so it must only be called while the
+ * scan itself is executing.
+ */
+static HeapTuple
+make_tuple_from_strings(const char **valstrs,
+						int nvals,
+						Relation rel,
+						AttInMetadata *attinmeta,
+						List *retrieved_attrs,
+						ForeignScanState *fsstate,
+						MemoryContext temp_context)
+{
 	HeapTuple	tuple;
 	TupleDesc	tupdesc;
 	Datum	   *values;
@@ -8970,8 +9890,6 @@ make_tuple_from_result_row(PGresult *res,
 	MemoryContext oldcontext;
 	ListCell   *lc;
 	int			j;
-
-	Assert(row < PQntuples(res));
 
 	/*
 	 * Do the following work in a temp context that we reset after each tuple.
@@ -9018,10 +9936,9 @@ make_tuple_from_result_row(PGresult *res,
 		const char *valstr;
 
 		/* fetch next column's textual value */
-		if (PQgetisnull(res, row, j))
-			valstr = NULL;
-		else
-			valstr = PQgetvalue(res, row, j);
+		if (j >= nvals)
+			elog(ERROR, "remote query result does not match the foreign table");
+		valstr = valstrs[j];
 
 		/*
 		 * convert value to internal representation
@@ -9060,10 +9977,10 @@ make_tuple_from_result_row(PGresult *res,
 	error_context_stack = errcallback.previous;
 
 	/*
-	 * Check we got the expected number of columns.  Note: j == 0 and
-	 * PQnfields == 1 is expected, since deparse emits a NULL if no columns.
+	 * Check we got the expected number of columns.  Note: j == 0 with a
+	 * single value is expected, since deparse emits a NULL if no columns.
 	 */
-	if (j > 0 && j != PQnfields(res))
+	if (j > 0 && j != nvals)
 		elog(ERROR, "remote query result does not match the foreign table");
 
 	/*

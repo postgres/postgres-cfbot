@@ -2294,6 +2294,7 @@ PgFdwPathExtraData
 PgFdwRelationInfo
 PgFdwSamplingMethod
 PgFdwScanState
+PgFdwSpool
 PgIfAddrCallback
 PgStatShared_Archiver
 PgStatShared_Backend

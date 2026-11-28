@@ -88,6 +88,7 @@ typedef struct PgFdwRelationInfo
 	UserMapping *user;			/* only set in use_remote_estimate mode */
 
 	int			fetch_size;		/* fetch size for this remote table */
+	bool		streaming_fetch;	/* true if cursor-free fetch is enabled */
 
 	/*
 	 * Name of the relation, for use while EXPLAINing ForeignScan.  It is used
@@ -146,7 +147,11 @@ typedef struct PgFdwRelationInfo
  */
 typedef struct PgFdwConnState
 {
+	PGconn	   *conn;			/* the connection this state belongs to */
 	AsyncRequest *pendingAreq;	/* pending async request */
+	uint64		active_spool_id;	/* if not 0, a streaming_fetch result is
+									 * being read on this connection, and this
+									 * is the ID of the spool it belongs to */
 } PgFdwConnState;
 
 /*
@@ -165,6 +170,11 @@ typedef enum PgFdwSamplingMethod
 extern int	set_transmission_modes(void);
 extern void reset_transmission_modes(int nestlevel);
 extern void process_pending_request(AsyncRequest *areq);
+extern void drain_active_scan(PgFdwConnState *conn_state);
+extern void pgfdw_spools_at_subxact_end(bool isCommit,
+										SubTransactionId mySubid,
+										SubTransactionId parentSubid);
+extern void pgfdw_spools_at_xact_end(void);
 
 /* in connection.c */
 extern PGconn *GetConnection(UserMapping *user, bool will_prep_stmt,
@@ -174,8 +184,10 @@ extern unsigned int GetCursorNumber(PGconn *conn);
 extern unsigned int GetPrepStmtNumber(PGconn *conn);
 extern void do_sql_command(PGconn *conn, const char *sql);
 extern PGresult *pgfdw_get_result(PGconn *conn);
+extern PGresult *pgfdw_get_next_result(PGconn *conn);
 extern PGresult *pgfdw_exec_query(PGconn *conn, const char *query,
 								  PgFdwConnState *state);
+extern bool pgfdw_cancel_query(PGconn *conn, PgFdwConnState *state);
 pg_noreturn extern void pgfdw_report_error(PGresult *res, PGconn *conn,
 										   const char *sql);
 extern void pgfdw_report(int elevel, PGresult *res, PGconn *conn,
