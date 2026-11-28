@@ -1954,3 +1954,173 @@ SELECT most_common_elems, most_common_elem_freqs
   FROM pg_stats_ext_exprs WHERE statistics_name = 'stats_ext_mcelem';
 SELECT * FROM stats_ext_tbl_mcelem WHERE (a || a) @> '{1}';
 DROP TABLE stats_ext_tbl_mcelem;
+
+-- Prefer exact expression statistics, with top-level relabeling as a fallback.
+CREATE TABLE relabel_column (a text COLLATE "C")
+  WITH (autovacuum_enabled = off);
+INSERT INTO relabel_column SELECT chr(65 + g % 52)
+  FROM generate_series(1, 5200) g;
+ANALYZE relabel_column;
+SELECT * FROM check_estimated_rows($$
+  SELECT * FROM relabel_column WHERE a COLLATE "POSIX" = 'A'
+$$);
+DROP TABLE relabel_column;
+
+CREATE TABLE relabel_stats (id int, a text COLLATE "C", active boolean)
+  WITH (autovacuum_enabled = off);
+INSERT INTO relabel_stats SELECT g, chr(65 + g % 52) || g, true
+  FROM generate_series(1, 5200) g;
+CREATE STATISTICS relabel_expr ON (left(a, 1) COLLATE "POSIX")
+  FROM relabel_stats;
+ANALYZE relabel_stats;
+SELECT * FROM check_estimated_rows($$
+  SELECT * FROM relabel_stats WHERE left(a, 1) = 'A'
+$$);
+
+-- Fallback comparisons must ignore outer-join nulling relids as well.
+CREATE TABLE relabel_left (id int) WITH (autovacuum_enabled = off);
+INSERT INTO relabel_left SELECT g FROM generate_series(1, 5200) g;
+ANALYZE relabel_left;
+SELECT * FROM check_estimated_rows($$
+  SELECT left(r.a, 1), count(*) FROM relabel_left l
+    LEFT JOIN relabel_stats r ON l.id = r.id
+    GROUP BY left(r.a, 1)
+$$);
+DROP STATISTICS relabel_expr;
+
+-- Also allow fallback when only the query has top-level relabeling.
+CREATE STATISTICS relabel_expr ON (left(a, 1)) FROM relabel_stats;
+ANALYZE relabel_stats;
+SELECT * FROM check_estimated_rows($$
+  SELECT * FROM relabel_stats WHERE left(a, 1) COLLATE "POSIX" = 'A'
+$$);
+DROP STATISTICS relabel_expr;
+
+-- Neither tree needs a RelabelType when the index collation is external.
+CREATE INDEX relabel_collated ON relabel_stats
+  ((left(a, 1) COLLATE "POSIX"));
+ANALYZE relabel_stats;
+SELECT * FROM check_estimated_rows($$
+  SELECT * FROM relabel_stats WHERE left(a, 1) = 'A'
+$$);
+DROP INDEX relabel_collated;
+
+-- A partial index without statistics must not hide a later usable index.
+CREATE INDEX relabel_full ON relabel_stats (left(a, 1));
+ANALYZE relabel_stats;
+CREATE INDEX relabel_partial ON relabel_stats (left(a, 1)) WHERE active;
+SELECT * FROM check_estimated_rows($$
+  SELECT * FROM relabel_stats WHERE left(a, 1) COLLATE "POSIX" = 'A'
+$$);
+DROP INDEX relabel_partial, relabel_full;
+
+-- Likewise, continue past an extended-statistics expression with no data.
+CREATE STATISTICS relabel_empty ON (left(a, 1) COLLATE "POSIX"), (id + 1)
+  FROM relabel_stats;
+CREATE STATISTICS relabel_full ON (left(a, 1) COLLATE "POSIX")
+  FROM relabel_stats;
+ANALYZE relabel_stats;
+SELECT pg_restore_extended_stats(
+  'schemaname', 'public', 'relname', 'relabel_stats',
+  'statistics_schemaname', 'public', 'statistics_name', 'relabel_empty',
+  'inherited', false, 'exprs', '[null, {"n_distinct": "-1"}]'::jsonb);
+SELECT * FROM check_estimated_rows($$
+  SELECT * FROM relabel_stats WHERE left(a, 1) = 'A'
+$$);
+DROP STATISTICS relabel_empty, relabel_full;
+
+DROP TABLE relabel_left, relabel_stats;
+
+-- Preserve uniqueness found by an exact partial-index expression match.
+CREATE TABLE relabel_unique (a varchar(30) COLLATE "C", active boolean)
+  WITH (autovacuum_enabled = off);
+INSERT INTO relabel_unique SELECT g::text, true FROM generate_series(1, 1000) g;
+INSERT INTO relabel_unique SELECT '123', false FROM generate_series(1, 1000) g;
+CREATE UNIQUE INDEX relabel_unique_idx ON relabel_unique ((a::text)) WHERE active;
+ANALYZE relabel_unique;
+SELECT * FROM check_estimated_rows($$
+  SELECT * FROM relabel_unique WHERE active AND a::text = '123'
+$$);
+DROP TABLE relabel_unique;
+
+-- Infer ordinary-column uniqueness only when falling back to the column.
+-- Stale statistics distinguish an exact expression match from that fallback.
+CREATE TABLE relabel_unique (a varchar(30) COLLATE "C")
+  WITH (autovacuum_enabled = off);
+INSERT INTO relabel_unique SELECT 'x' FROM generate_series(1, 1000) g;
+CREATE STATISTICS relabel_unique_expr ON (a::text) FROM relabel_unique;
+ANALYZE relabel_unique;
+TRUNCATE relabel_unique;
+INSERT INTO relabel_unique SELECT g::text FROM generate_series(1, 1000) g;
+CREATE UNIQUE INDEX relabel_unique_idx ON relabel_unique (a);
+-- Refresh the row count without replacing the stale value statistics.
+VACUUM relabel_unique;
+-- The exact expression statistics are used without inferring column uniqueness.
+SELECT * FROM check_estimated_rows($$
+  SELECT * FROM relabel_unique WHERE a = 'x'
+$$);
+-- Without exact expression statistics, the fallback uses column uniqueness.
+DROP STATISTICS relabel_unique_expr;
+SELECT * FROM check_estimated_rows($$
+  SELECT * FROM relabel_unique WHERE a = 'x'
+$$);
+DROP TABLE relabel_unique;
+
+-- External collation alignment must still check the expression's result type.
+CREATE TABLE relabel_cast (a text COLLATE "C")
+  WITH (autovacuum_enabled = off);
+INSERT INTO relabel_cast
+  SELECT CASE WHEN g % 2 = 0 THEN 'A' ELSE 'A ' END
+  FROM generate_series(1, 1000) g;
+CREATE INDEX relabel_cast_idx ON relabel_cast
+  ((left(a, 3)::pg_catalog.bpchar COLLATE "POSIX"));
+CREATE STATISTICS relabel_cast_stats ON (left(a, 3) COLLATE "POSIX")
+  FROM relabel_cast;
+ANALYZE relabel_cast;
+SELECT * FROM check_estimated_rows($$
+  SELECT left(a, 3) COLLATE "POSIX" FROM relabel_cast
+    GROUP BY left(a, 3) COLLATE "POSIX"
+$$);
+DROP TABLE relabel_cast;
+
+-- A unique text expression need not be unique after relabeling to bpchar.
+CREATE TABLE relabel_cast (a text COLLATE "C", active boolean)
+  WITH (autovacuum_enabled = off);
+INSERT INTO relabel_cast VALUES ('A', true), ('A ', true);
+CREATE UNIQUE INDEX relabel_cast_idx ON relabel_cast (left(a, 3)) WHERE active;
+CREATE STATISTICS relabel_cast_stats ON (left(a, 3)::pg_catalog.bpchar)
+  FROM relabel_cast;
+ANALYZE relabel_cast;
+SELECT * FROM check_estimated_rows($$
+  SELECT left(a, 3)::pg_catalog.bpchar FROM relabel_cast WHERE active
+    GROUP BY left(a, 3)::pg_catalog.bpchar
+$$);
+DROP STATISTICS relabel_cast_stats;
+
+-- Fallback statistics must not acquire uniqueness from a different type.
+CREATE STATISTICS relabel_cast_stats
+  ON (left(a, 3)::pg_catalog.bpchar COLLATE "POSIX") FROM relabel_cast;
+ANALYZE relabel_cast;
+SELECT * FROM check_estimated_rows($$
+  SELECT left(a, 3)::pg_catalog.bpchar FROM relabel_cast WHERE active
+    GROUP BY left(a, 3)::pg_catalog.bpchar
+$$);
+DROP TABLE relabel_cast;
+
+-- Likewise, external collation alignment must preserve the typmod check.
+CREATE TABLE relabel_typmod (id int, a text COLLATE "C")
+  WITH (autovacuum_enabled = off);
+INSERT INTO relabel_typmod SELECT g, 'A' FROM generate_series(1, 1000) g;
+CREATE INDEX relabel_typmod_idx
+  ON relabel_typmod (((left(a, 3)::varchar(3))::varchar) COLLATE "POSIX");
+ANALYZE relabel_typmod;
+ALTER INDEX relabel_typmod_idx ALTER COLUMN 1 SET STATISTICS 0;
+UPDATE relabel_typmod SET a = 'B' WHERE id % 2 = 0;
+CREATE STATISTICS relabel_typmod_stats ON (left(a, 3)::varchar(3) COLLATE "POSIX")
+  FROM relabel_typmod;
+ANALYZE relabel_typmod;
+SELECT * FROM check_estimated_rows($$
+  SELECT left(a, 3)::varchar(3) COLLATE "POSIX" FROM relabel_typmod
+    GROUP BY left(a, 3)::varchar(3) COLLATE "POSIX"
+$$);
+DROP TABLE relabel_typmod;
