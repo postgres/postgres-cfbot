@@ -565,6 +565,74 @@ SELECT * FROM test6a WHERE b = ARRAY['äbc'] COLLATE ctest_nondet;
 CREATE COLLATION case_sensitive (provider = icu, locale = '');
 CREATE COLLATION case_insensitive (provider = icu, locale = '@colStrength=secondary', deterministic = false);
 
+-- A unique column under "C" need not be unique under case_insensitive.
+-- Use the exact expression statistics before considering column statistics.
+CREATE FUNCTION estimated_rows(query text) RETURNS integer
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan json;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
+    RETURN (plan->0->'Plan'->>'Plan Rows')::integer;
+END;
+$$;
+CREATE TABLE relabel_stats (a text COLLATE "C" PRIMARY KEY)
+  WITH (autovacuum_enabled = off);
+INSERT INTO relabel_stats SELECT chr(65 + g) FROM generate_series(0, 51) g;
+CREATE STATISTICS relabel_expr ON (a COLLATE case_insensitive) FROM relabel_stats;
+ANALYZE relabel_stats;
+SELECT estimated_rows($$
+  SELECT count(*) FROM relabel_stats GROUP BY a COLLATE case_insensitive
+$$);
+SELECT estimated_rows($$
+  SELECT count(*) FROM relabel_stats GROUP BY a
+$$);
+
+-- Without expression statistics, fall back to column statistics collected
+-- under "C", which can overestimate the groups under case_insensitive.
+DROP STATISTICS relabel_expr;
+SELECT estimated_rows($$
+  SELECT count(*) FROM relabel_stats GROUP BY a COLLATE case_insensitive
+$$);
+DROP TABLE relabel_stats;
+-- Index collation is external to the expression tree, but still determines
+-- whether the statistics match exactly.
+CREATE TABLE relabel_index_stats (a text COLLATE "C", active boolean)
+  WITH (autovacuum_enabled = off);
+INSERT INTO relabel_index_stats
+  SELECT chr(CASE WHEN g % 52 < 26 THEN 65 + g % 52 ELSE 97 + g % 52 - 26 END), true
+  FROM generate_series(0, 1039) g;
+CREATE INDEX relabel_index_ci
+  ON relabel_index_stats ((left(a, 1) COLLATE case_insensitive));
+CREATE STATISTICS relabel_index_expr ON (left(a, 1)) FROM relabel_index_stats;
+ANALYZE relabel_index_stats;
+SELECT estimated_rows($$
+  SELECT left(a, 1) FROM relabel_index_stats GROUP BY left(a, 1)
+$$);
+SELECT estimated_rows($$
+  SELECT left(a, 1) COLLATE case_insensitive FROM relabel_index_stats
+    GROUP BY left(a, 1) COLLATE case_insensitive
+$$);
+DROP TABLE relabel_index_stats;
+
+-- A fallback match under a different collation must not imply uniqueness.
+CREATE COLLATION relabel_ci FROM case_insensitive;
+CREATE TABLE relabel_index_stats (a text COLLATE "C", active boolean)
+  WITH (autovacuum_enabled = off);
+INSERT INTO relabel_index_stats VALUES ('A', true), ('a', true);
+CREATE UNIQUE INDEX relabel_index_unique
+  ON relabel_index_stats (left(a, 1)) WHERE active;
+CREATE STATISTICS relabel_index_expr ON (left(a, 1) COLLATE case_insensitive)
+  FROM relabel_index_stats;
+ANALYZE relabel_index_stats;
+SELECT estimated_rows($$
+  SELECT left(a, 1) COLLATE relabel_ci FROM relabel_index_stats WHERE active
+    GROUP BY left(a, 1) COLLATE relabel_ci
+$$);
+DROP TABLE relabel_index_stats;
+DROP COLLATION relabel_ci;
+DROP FUNCTION estimated_rows;
+
 SELECT 'abc' <= 'ABC' COLLATE case_sensitive, 'abc' >= 'ABC' COLLATE case_sensitive;
 SELECT 'abc' <= 'ABC' COLLATE case_insensitive, 'abc' >= 'ABC' COLLATE case_insensitive;
 

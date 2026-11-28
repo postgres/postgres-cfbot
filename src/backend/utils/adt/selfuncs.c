@@ -242,7 +242,11 @@ static double convert_timevalue_to_scalar(Datum value, Oid typid,
 										  bool *failure);
 static Node *strip_all_phvs_deep(PlannerInfo *root, Node *node);
 static bool contain_placeholder_walker(Node *node, void *context);
+static Node *strip_all_adjacency_relabeltypes(Node *node);
 static Node *strip_all_phvs_mutator(Node *node, void *context);
+static void examine_index_expression(PlannerInfo *root, IndexOptInfo *index,
+									 int indexcol, bool exact_match,
+									 VariableStatData *vardata);
 static void examine_simple_variable(PlannerInfo *root, Var *var,
 									VariableStatData *vardata);
 static void adjust_statstuple_for_grouping(PlannerInfo *subroot, Var *var,
@@ -5621,9 +5625,16 @@ ReleaseDummy(HeapTuple tuple)
  *	node: the expression tree to examine
  *	varRelid: see specs for restriction selectivity functions
  *
+ * Simple Vars use column statistics directly.  For other expressions, prefer
+ * exact matches, accounting for the collation stored outside index expression
+ * trees.  Only if no exact statistics are found, fall back to comparisons that
+ * ignore top-level relabeling.
+ *
  * Outputs: *vardata is filled as follows:
- *	var: the input expression (with any phvs or binary relabeling stripped,
- *		if it is or contains a variable; but otherwise unchanged)
+ *	var: the input expression (with PHVs stripped and any resulting adjacent
+ *		or redundant RelabelTypes normalized if it is or contains a variable;
+ *		top-level relabeling is also stripped for a fallback lookup;
+ *		otherwise unchanged)
  *	rel: RelOptInfo for relation containing variable; NULL if expression
  *		contains no Vars (NOTE this could point to a RelOptInfo of a
  *		subquery, not one in the current query).
@@ -5654,6 +5665,14 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 	Relids		varnos;
 	Relids		basevarnos;
 	RelOptInfo *onerel;
+	Node	   *stripped_basenode;
+	bool		stripped_is_simple_var = false;
+
+	/* Fallback sources and their corresponding zero-based positions. */
+	List	   *indexes_for_retry = NIL;
+	List	   *indexcols_for_retry = NIL;
+	List	   *statexprs_for_retry = NIL;
+	List	   *statexpr_positions_for_retry = NIL;
 
 	/* Make sure we don't return dangling pointers in vardata */
 	MemSet(vardata, 0, sizeof(VariableStatData));
@@ -5669,14 +5688,6 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 	 * strip them out first.
 	 */
 	basenode = strip_all_phvs_deep(root, node);
-
-	/*
-	 * Look inside any binary-compatible relabeling.  We need to handle nested
-	 * RelabelType nodes here, because the prior stripping of PlaceHolderVars
-	 * may have brought separate RelabelTypes into adjacency.
-	 */
-	while (IsA(basenode, RelabelType))
-		basenode = (Node *) ((RelabelType *) basenode)->arg;
 
 	/* Fast path for a simple Var */
 	if (IsA(basenode, Var) &&
@@ -5696,6 +5707,17 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 
 		return;
 	}
+
+	/*
+	 * Prepare a fallback expression, keeping basenode for the exact lookup.
+	 * Retain nulling relids here for vardata->var; the expression used for
+	 * matching is prepared separately below.
+	 */
+	stripped_basenode = basenode;
+	if (IsA(stripped_basenode, RelabelType))
+		stripped_basenode = (Node *) ((RelabelType *) stripped_basenode)->arg;
+	stripped_is_simple_var = IsA(stripped_basenode, Var) &&
+		(varRelid == 0 || varRelid == ((Var *) stripped_basenode)->varno);
 
 	/*
 	 * Okay, it's a more complicated expression.  Determine variable
@@ -5722,7 +5744,7 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 			{
 				onerel = find_base_rel(root, relid);
 				vardata->rel = onerel;
-				node = basenode;	/* strip any phvs or relabeling */
+				node = basenode;	/* use the expression with PHVs stripped */
 			}
 			/* else treat it as a constant */
 		}
@@ -5733,13 +5755,13 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 			{
 				/* treat it as a variable of a join relation */
 				vardata->rel = find_join_rel(root, varnos);
-				node = basenode;	/* strip any phvs or relabeling */
+				node = basenode;	/* use the expression with PHVs stripped */
 			}
 			else if (bms_is_member(varRelid, varnos))
 			{
 				/* ignore the vars belonging to other relations */
 				vardata->rel = find_base_rel(root, varRelid);
-				node = basenode;	/* strip any phvs or relabeling */
+				node = basenode;	/* use the expression with PHVs stripped */
 				/* note: no point in expressional-index search here */
 			}
 			/* else treat it as a constant */
@@ -5755,13 +5777,9 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 	if (onerel)
 	{
 		/*
-		 * We have an expression in vars of a single relation.  Try to match
-		 * it to expressional index columns, in hopes of finding some
-		 * statistics.
-		 *
-		 * Note that we consider all index columns including INCLUDE columns,
-		 * since there could be stats for such columns.  But the test for
-		 * uniqueness needs to be warier.
+		 * We have an expression in vars of a single relation.  Look for exact
+		 * matches in index expressions, then extended statistics.  Record
+		 * possible fallback matches without using their statistics yet.
 		 *
 		 * XXX it's conceivable that there are multiple matches with different
 		 * index opfamilies; if so, we need to pick one that matches the
@@ -5769,6 +5787,7 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 		 */
 		ListCell   *ilist;
 		ListCell   *slist;
+		Node	   *stripped_matchnode;
 
 		/*
 		 * The nullingrels bits within the expression could prevent us from
@@ -5777,6 +5796,16 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 		 */
 		if (bms_overlap(varnos, root->outer_join_rels))
 			node = remove_nulling_relids(node, root->outer_join_rels, NULL);
+
+		/*
+		 * Build the stripped matching expression after removing nulling
+		 * relids. Unlike stripped_basenode, this version is only used for
+		 * comparisons. Both index collation alignment and fallback matching
+		 * need it.
+		 */
+		stripped_matchnode = node;
+		if (IsA(stripped_matchnode, RelabelType))
+			stripped_matchnode = (Node *) ((RelabelType *) stripped_matchnode)->arg;
 
 		foreach(ilist, onerel->indexlist)
 		{
@@ -5793,93 +5822,75 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 				if (index->indexkeys[pos] == 0)
 				{
 					Node	   *indexkey;
+					Node	   *index_stripped;
+					Oid			idxcoll;
+					bool		exact_match;
 
 					if (indexpr_item == NULL)
 						elog(ERROR, "too few entries in indexprs list");
 					indexkey = (Node *) lfirst(indexpr_item);
-					if (indexkey && IsA(indexkey, RelabelType))
-						indexkey = (Node *) ((RelabelType *) indexkey)->arg;
-					if (equal(node, indexkey))
+
+					/*
+					 * Statistics for an index expression use the index
+					 * column's collation when comparing result values. CREATE
+					 * INDEX stores a top-level COLLATE separately in
+					 * indcollation[], outside indexprs, so this collation
+					 * need not agree with exprCollation(indexkey).
+					 */
+					Assert(pos < index->nkeycolumns);
+					idxcoll = index->indexcollations[pos];
+
+					index_stripped = indexkey;
+					if (IsA(index_stripped, RelabelType))
+						index_stripped =
+							(Node *) ((RelabelType *) index_stripped)->arg;
+
+					if (idxcoll == exprCollation(indexkey))
 					{
 						/*
-						 * Found a match ... is it a unique index? Tests here
-						 * should match has_unique_index().
+						 * The tree already exposes the index column's
+						 * collation.
 						 */
-						if (index->unique &&
-							index->nkeycolumns == 1 &&
-							pos == 0 &&
-							(index->indpred == NIL || index->predOK))
-							vardata->isunique = true;
-
+						exact_match = equal(node, indexkey);
+					}
+					else
+					{
 						/*
-						 * Has it got stats?  We only consider stats for
-						 * non-partial indexes, since partial indexes probably
-						 * don't reflect whole-relation statistics; the above
-						 * check for uniqueness is the only info we take from
-						 * a partial index.
-						 *
-						 * An index stats hook, however, must make its own
-						 * decisions about what to do with partial indexes.
+						 * Match the query's collation to the index column's,
+						 * then compare beneath the top-level relabels.  Check
+						 * the result type and typmod too, since a RelabelType
+						 * can change those as well as the collation.
 						 */
-						if (get_index_stats_hook &&
-							(*get_index_stats_hook) (root, index->indexoid,
-													 pos + 1, vardata))
-						{
-							/*
-							 * The hook took control of acquiring a stats
-							 * tuple.  If it did supply a tuple, it'd better
-							 * have supplied a freefunc.
-							 */
-							if (HeapTupleIsValid(vardata->statsTuple) &&
-								!vardata->freefunc)
-								elog(ERROR, "no function provided to release variable stats with");
-						}
-						else if (index->indpred == NIL)
-						{
-							vardata->statsTuple =
-								SearchSysCache3(STATRELATTINH,
-												ObjectIdGetDatum(index->indexoid),
-												Int16GetDatum(pos + 1),
-												BoolGetDatum(false));
-							vardata->freefunc = ReleaseSysCache;
+						exact_match =
+							exprCollation(node) == idxcoll &&
+							exprType(node) == exprType(indexkey) &&
+							exprTypmod(node) == exprTypmod(indexkey) &&
+							equal(stripped_matchnode, index_stripped);
+					}
 
-							if (HeapTupleIsValid(vardata->statsTuple))
-							{
-								/*
-								 * Test if user has permission to access all
-								 * rows from the index's table.
-								 *
-								 * For simplicity, we insist on the whole
-								 * table being selectable, rather than trying
-								 * to identify which column(s) the index
-								 * depends on.
-								 *
-								 * Note that for an inheritance child,
-								 * permissions are checked on the inheritance
-								 * root parent, and whole-table select
-								 * privilege on the parent doesn't quite
-								 * guarantee that the user could read all
-								 * columns of the child.  But in practice it's
-								 * unlikely that any interesting security
-								 * violation could result from allowing access
-								 * to the expression index's stats, so we
-								 * allow it anyway.  See similar code in
-								 * examine_simple_variable() for additional
-								 * comments.
-								 */
-								vardata->acl_ok =
-									all_rows_selectable(root,
-														index->rel->relid,
-														NULL);
-							}
-							else
-							{
-								/* suppress leakproofness checks later */
-								vardata->acl_ok = true;
-							}
-						}
+					if (exact_match)
+					{
+						examine_index_expression(root, index, pos, true, vardata);
 						if (vardata->statsTuple)
 							break;
+					}
+
+					/*
+					 * Record a candidate if the expressions match after
+					 * stripping top-level relabeling.  Use it only if no
+					 * exact statistics are found later.  If stripping exposes
+					 * a simple Var, use column statistics for the fallback
+					 * instead.
+					 *
+					 * Do not require a RelabelType in either tree: the index
+					 * column's collation is stored separately and can differ
+					 * from the query's even when neither tree has a relabel.
+					 */
+					if (!stripped_is_simple_var &&
+						equal(stripped_matchnode, index_stripped))
+					{
+						indexes_for_retry = lappend(indexes_for_retry, index);
+						indexcols_for_retry = lappend_int(indexcols_for_retry, pos);
 					}
 					indexpr_item = lnext(index->indexprs, indexpr_item);
 				}
@@ -5889,10 +5900,11 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 		}
 
 		/*
-		 * Search extended statistics for one with a matching expression.
-		 * There might be multiple ones, so just grab the first one. In the
-		 * future, we might consider the statistics target (and pick the most
-		 * accurate statistics) and maybe some other parameters.
+		 * Search extended statistics for an exact expression match.  There
+		 * may be multiple matching objects, so use the first one that
+		 * provides statistics.  In the future, we might consider the
+		 * statistics target (and pick the most accurate statistics) and other
+		 * parameters.
 		 */
 		foreach(slist, onerel->statlist)
 		{
@@ -5922,10 +5934,6 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 				Node	   *expr = (Node *) lfirst(expr_item);
 
 				Assert(expr);
-
-				/* strip RelabelType before comparing it */
-				if (expr && IsA(expr, RelabelType))
-					expr = (Node *) ((RelabelType *) expr)->arg;
 
 				/* found a match, see if we can extract pg_statistic row */
 				if (equal(node, expr))
@@ -5968,17 +5976,217 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 					break;
 				}
 
+				/*
+				 * Record a candidate if the expressions match after stripping
+				 * top-level relabeling from either side.  Use it only if no
+				 * exact statistics are found later.  If stripping exposes a
+				 * simple Var, use column statistics for the fallback instead.
+				 */
+				if (!stripped_is_simple_var)
+				{
+					Node	   *stripped_expr = expr;
+
+					if (IsA(stripped_expr, RelabelType))
+						stripped_expr =
+							(Node *) ((RelabelType *) stripped_expr)->arg;
+
+					if (equal(stripped_matchnode, stripped_expr))
+					{
+						statexprs_for_retry = lappend(statexprs_for_retry, info);
+						statexpr_positions_for_retry =
+							lappend_int(statexpr_positions_for_retry, pos);
+					}
+				}
+
 				pos++;
 			}
 		}
 	}
 
 	bms_free(varnos);
+
+	/*
+	 * If no exact statistics were found, use column statistics when stripping
+	 * exposes a simple Var.  Otherwise, try the recorded index candidates,
+	 * then extended-statistics candidates, in their original order.  Keep any
+	 * uniqueness information collected while looking for exact matches.
+	 */
+	if (!vardata->statsTuple)
+	{
+		if (vardata->rel)
+		{
+			/* Keep vartype as the original expression's exposed type. */
+			vardata->var = stripped_basenode;
+			vardata->atttype = exprType(stripped_basenode);
+			vardata->atttypmod = exprTypmod(stripped_basenode);
+		}
+
+		if (stripped_is_simple_var)
+		{
+			Var		   *var = (Var *) stripped_basenode;
+
+			vardata->var = stripped_basenode;
+			vardata->rel = find_base_rel(root, var->varno);
+			vardata->atttype = var->vartype;
+			vardata->atttypmod = var->vartypmod;
+
+			/*
+			 * Use the column's uniqueness only if the original expression has
+			 * the same collation and default equality operator.  Preserve any
+			 * uniqueness found by an exact expression-index match.
+			 */
+			if (exprCollation(basenode) == var->varcollid)
+			{
+				TypeCacheEntry *exprtype;
+				TypeCacheEntry *vartype;
+
+				exprtype = lookup_type_cache(exprType(basenode), TYPECACHE_EQ_OPR);
+				vartype = lookup_type_cache(var->vartype, TYPECACHE_EQ_OPR);
+				if (OidIsValid(exprtype->eq_opr) &&
+					exprtype->eq_opr == vartype->eq_opr)
+					vardata->isunique |= has_unique_index(vardata->rel,
+														  var->varattno);
+			}
+
+			examine_simple_variable(root, var, vardata);
+		}
+		else if (onerel)
+		{
+			ListCell   *lc;
+			ListCell   *poslc;
+
+			forboth(lc, indexes_for_retry, poslc, indexcols_for_retry)
+			{
+				IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
+
+				examine_index_expression(root, index, lfirst_int(poslc), false,
+										 vardata);
+				if (vardata->statsTuple)
+					break;
+			}
+
+			forboth(lc, statexprs_for_retry, poslc, statexpr_positions_for_retry)
+			{
+				StatisticExtInfo *info = (StatisticExtInfo *) lfirst(lc);
+				RangeTblEntry *rte = planner_rt_fetch(onerel->relid, root);
+
+				if (vardata->statsTuple)
+					break;
+
+				vardata->statsTuple =
+					statext_expressions_load(info->statOid, rte->inh,
+											 lfirst_int(poslc));
+				if (vardata->statsTuple != NULL)
+					vardata->freefunc = ReleaseDummy;
+
+				vardata->acl_ok = all_rows_selectable(root, onerel->relid, NULL);
+			}
+		}
+	}
+
+	list_free(indexes_for_retry);
+	list_free(indexcols_for_retry);
+	list_free(statexprs_for_retry);
+	list_free(statexpr_positions_for_retry);
+}
+
+/*
+ * examine_index_expression
+ *		Helper for examine_variable() to collect uniqueness and statistics
+ *		for a matching index expression.
+ *
+ * indexcol is the zero-based index column number.  The caller has already
+ * matched the expression and initialized the other fields of *vardata, with
+ * statsTuple still NULL.  Both lookup stages use this helper: exact matches
+ * pass exact_match = true, and recorded fallback candidates pass false only
+ * after the exact lookup has found no statistics.
+ *
+ * Only an exact match may add uniqueness information, even if the index has
+ * no usable statistics.  A fallback match can load statistics but leaves
+ * isunique unchanged: ignoring top-level relabeling can change the result
+ * type or collation and hence the equality semantics.  If no statistics are
+ * obtained, statsTuple stays NULL so the caller can try another candidate.
+ */
+static void
+examine_index_expression(PlannerInfo *root, IndexOptInfo *index,
+						 int indexcol, bool exact_match, VariableStatData *vardata)
+{
+	/*
+	 * For an exact match, collect uniqueness independently of whether usable
+	 * statistics are available.  The index tests should match
+	 * has_unique_index().
+	 */
+	if (exact_match && index->unique &&
+		index->nkeycolumns == 1 &&
+		indexcol == 0 &&
+		(index->indpred == NIL || index->predOK))
+		vardata->isunique = true;
+
+	/*
+	 * Has it got stats?  We only consider stats for non-partial indexes,
+	 * since partial indexes probably don't reflect whole-relation statistics;
+	 * the above check for uniqueness is the only info we take from a partial
+	 * index.
+	 *
+	 * An index stats hook, however, must make its own decisions about what to
+	 * do with partial indexes.
+	 */
+	if (get_index_stats_hook &&
+		(*get_index_stats_hook) (root, index->indexoid,
+								 indexcol + 1, vardata))
+	{
+		/*
+		 * The hook took control of acquiring a stats tuple.  If it did supply
+		 * a tuple, it'd better have supplied a freefunc.
+		 */
+		if (HeapTupleIsValid(vardata->statsTuple) &&
+			!vardata->freefunc)
+			elog(ERROR, "no function provided to release variable stats with");
+	}
+	else if (index->indpred == NIL)
+	{
+		vardata->statsTuple =
+			SearchSysCache3(STATRELATTINH,
+							ObjectIdGetDatum(index->indexoid),
+							Int16GetDatum(indexcol + 1),
+							BoolGetDatum(false));
+		vardata->freefunc = ReleaseSysCache;
+
+		if (HeapTupleIsValid(vardata->statsTuple))
+		{
+			/*
+			 * Test if user has permission to access all rows from the index's
+			 * table.
+			 *
+			 * For simplicity, we insist on the whole table being selectable,
+			 * rather than trying to identify which column(s) the index
+			 * depends on.
+			 *
+			 * Note that for an inheritance child, permissions are checked on
+			 * the inheritance root parent, and whole-table select privilege
+			 * on the parent doesn't quite guarantee that the user could read
+			 * all columns of the child.  But in practice it's unlikely that
+			 * any interesting security violation could result from allowing
+			 * access to the expression index's stats, so we allow it anyway.
+			 * See similar code in examine_simple_variable() for additional
+			 * comments.
+			 */
+			vardata->acl_ok = all_rows_selectable(root, index->rel->relid, NULL);
+		}
+		else
+		{
+			/* suppress leakproofness checks later */
+			vardata->acl_ok = true;
+		}
+	}
 }
 
 /*
  * strip_all_phvs_deep
  *		Deeply strip all PlaceHolderVars in an expression.
+ *
+ * Normalize adjacent or redundant RelabelTypes in the copied tree, since
+ * stripping PlaceHolderVars can expose them at any depth.
  *
  * As a performance optimization, we first use a lightweight walker to check
  * for the presence of any PlaceHolderVars.  The expensive mutator is invoked
@@ -6014,8 +6222,43 @@ contain_placeholder_walker(Node *node, void *context)
 }
 
 /*
+ * strip_all_adjacency_relabeltypes
+ *		Normalize adjacent or redundant RelabelTypes at the current node.
+ *
+ * Follow applyRelabelType()'s rules for merging stacked RelabelTypes and
+ * removing no-op relabels: retain only the outer relabel, and drop that too
+ * if its argument already has the required type, typmod, and collation.
+ * The caller has already copied and processed the subtree, so it is safe
+ * to modify the outer relabel in place.
+ */
+static Node *
+strip_all_adjacency_relabeltypes(Node *node)
+{
+	RelabelType *relabel;
+	Node	   *arg;
+
+	if (node == NULL || !IsA(node, RelabelType))
+		return node;
+
+	relabel = (RelabelType *) node;
+	arg = (Node *) relabel->arg;
+
+	while (arg && IsA(arg, RelabelType))
+		arg = (Node *) ((RelabelType *) arg)->arg;
+
+	if (exprType(arg) == relabel->resulttype &&
+		exprTypmod(arg) == relabel->resulttypmod &&
+		exprCollation(arg) == relabel->resultcollid)
+		node = arg;
+	else
+		relabel->arg = (Expr *) arg;
+
+	return node;
+}
+
+/*
  * strip_all_phvs_mutator
- *		Mutator to deeply strip all PlaceHolderVars
+ *		Deeply strip all PlaceHolderVars and normalize RelabelTypes
  */
 static Node *
 strip_all_phvs_mutator(Node *node, void *context)
@@ -6030,7 +6273,15 @@ strip_all_phvs_mutator(Node *node, void *context)
 		return strip_all_phvs_mutator((Node *) phv->phexpr, context);
 	}
 
-	return expression_tree_mutator(node, strip_all_phvs_mutator, context);
+	node = expression_tree_mutator(node, strip_all_phvs_mutator, context);
+
+	/*
+	 * Stripping PHVs can expose adjacent or redundant RelabelTypes at any
+	 * depth.  Normalize them after processing the children, so they do not
+	 * prevent matching to index or statistics expressions that have already
+	 * been simplified by eval_const_expressions().
+	 */
+	return strip_all_adjacency_relabeltypes(node);
 }
 
 /*

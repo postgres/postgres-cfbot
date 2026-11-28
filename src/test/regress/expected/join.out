@@ -13349,6 +13349,91 @@ WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
       42
 (1 row)
 
+-- Removing a PHV can expose adjacent RelabelTypes inside a function argument:
+-- lower(RT_C(PHV(RT_POSIX(E)))) -> lower(RT_C(RT_POSIX(E)))).
+-- Top-level RelabelType stripping in examine_variable() cannot reach them.
+-- Check row estimates, since the plan shape need not change.
+CREATE FUNCTION check_phv_estimated_rows(query text)
+RETURNS TABLE (estimated int, actual int)
+LANGUAGE plpgsql AS $$
+DECLARE
+  plan json;
+BEGIN
+  EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) ' || query INTO plan;
+  RETURN QUERY SELECT (plan->0->'Plan'->>'Plan Rows')::int,
+                      (plan->0->'Plan'->>'Actual Rows')::numeric::int;
+END;
+$$;
+-- COALESCE makes the expression on the nullable side require a PHV.
+CREATE TABLE phv_relabel_left (id int) WITH (autovacuum_enabled = off);
+CREATE TABLE phv_relabel_right (id int, a text COLLATE "C")
+  WITH (autovacuum_enabled = off);
+INSERT INTO phv_relabel_left SELECT g FROM generate_series(1, 1000) g;
+INSERT INTO phv_relabel_right SELECT g, chr(65 + g % 10) || g
+  FROM generate_series(1, 1000) g;
+-- Without expression statistics, the number of groups is overestimated.
+ANALYZE phv_relabel_left, phv_relabel_right;
+SELECT * FROM check_phv_estimated_rows($$
+  SELECT lower(r.x COLLATE "C"), count(*) FROM phv_relabel_left l
+    LEFT JOIN (SELECT id, coalesce(left(a, 1), '') COLLATE "POSIX" AS x
+               FROM phv_relabel_right) r ON l.id = r.id
+    GROUP BY lower(r.x COLLATE "C")
+$$);
+ estimated | actual 
+-----------+--------
+      1000 |     10
+(1 row)
+
+-- PHV removal exposes relabels that cancel inside lower()'s argument.
+CREATE INDEX phv_relabel_idx ON phv_relabel_right
+  (lower(coalesce(left(a, 1), '')));
+ANALYZE phv_relabel_right;
+SELECT * FROM check_phv_estimated_rows($$
+  SELECT lower(r.x COLLATE "C"), count(*) FROM phv_relabel_left l
+    LEFT JOIN (SELECT id, coalesce(left(a, 1), '') COLLATE "POSIX" AS x
+               FROM phv_relabel_right) r ON l.id = r.id
+    GROUP BY lower(r.x COLLATE "C")
+$$);
+ estimated | actual 
+-----------+--------
+        10 |     10
+(1 row)
+
+DROP INDEX phv_relabel_idx;
+-- The same normalization is needed to match expression statistics.
+CREATE STATISTICS phv_relabel_stats ON (lower(coalesce(left(a, 1), '')))
+  FROM phv_relabel_right;
+ANALYZE phv_relabel_right;
+SELECT * FROM check_phv_estimated_rows($$
+  SELECT lower(r.x COLLATE "C"), count(*) FROM phv_relabel_left l
+    LEFT JOIN (SELECT id, coalesce(left(a, 1), '') COLLATE "POSIX" AS x
+               FROM phv_relabel_right) r ON l.id = r.id
+    GROUP BY lower(r.x COLLATE "C")
+$$);
+ estimated | actual 
+-----------+--------
+        10 |     10
+(1 row)
+
+DROP STATISTICS phv_relabel_stats;
+-- Keep the outer collation when it differs from the underlying expression.
+CREATE STATISTICS phv_relabel_stats
+  ON (lower(coalesce(left(a, 1), '') COLLATE "default"))
+  FROM phv_relabel_right;
+ANALYZE phv_relabel_right;
+SELECT * FROM check_phv_estimated_rows($$
+  SELECT lower(r.x COLLATE "default"), count(*) FROM phv_relabel_left l
+    LEFT JOIN (SELECT id, coalesce(left(a, 1), '') COLLATE "POSIX" AS x
+               FROM phv_relabel_right) r ON l.id = r.id
+    GROUP BY lower(r.x COLLATE "default")
+$$);
+ estimated | actual 
+-----------+--------
+        10 |     10
+(1 row)
+
+DROP TABLE phv_relabel_left, phv_relabel_right;
+DROP FUNCTION check_phv_estimated_rows(text);
 --
 -- Test for a nested loop join involving index scan, transforming OR-clauses
 -- to SAOP.
