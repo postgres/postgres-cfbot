@@ -4836,6 +4836,8 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
         <para>
          Specifies the maximum number of replication slots for use of
          the <command>REPACK</command> command.  The default is 5.
+         With a value of zero, <command>REPACK</command> cannot be used
+         with the <literal>CONCURRENTLY</literal> option.
          This parameter can only be set at server start.
         </para>
        </listitem>
