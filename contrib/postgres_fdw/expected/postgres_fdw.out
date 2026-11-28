@@ -2543,6 +2543,108 @@ SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1 AND CURRENT_USER =
                Remote SQL: SELECT r1."C 1", r2."C 1", r1.c3 FROM ("S 1"."T 1" r1 INNER JOIN "S 1"."T 1" r2 ON (((r2."C 1" = r1."C 1")))) ORDER BY r1.c3 ASC NULLS LAST, r1."C 1" ASC NULLS LAST
 (9 rows)
 
+-- join with pseudoconstant quals and FOR UPDATE/SHARE; the pseudoconstant
+-- quals should be evaluated by a gating Result node
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c1 < 10 AND CURRENT_USER <> SESSION_USER FOR UPDATE;
+                                                                                                                                                                                                 QUERY PLAN                                                                                                                                                                                                 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Result
+   Output: t1.c1, t2.c1, t1.*, t2.*
+   One-Time Filter: (CURRENT_USER <> SESSION_USER)
+   ->  Foreign Scan
+         Output: t1.c1, t2.c1, t1.*, t2.*
+         Relations: (public.ft1 t1) INNER JOIN (public.ft2 t2)
+         Remote SQL: SELECT r1."C 1", r2."C 1", CASE WHEN (r1.*)::text IS NOT NULL THEN ROW(r1."C 1", r1.c2, r1.c3, r1.c4, r1.c5, r1.c6, r1.c7, r1.c8) END, CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2."C 1", r2.c2, r2.c3, r2.c4, r2.c5, r2.c6, r2.c7, r2.c8) END FROM ("S 1"."T 1" r1 INNER JOIN "S 1"."T 1" r2 ON (((r2."C 1" = r1."C 1")) AND ((r1."C 1" < 10)))) FOR UPDATE OF r1 FOR UPDATE OF r2
+(7 rows)
+
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c1 < 10 AND CURRENT_USER <> SESSION_USER FOR UPDATE;
+ c1 | c1 
+----+----
+(0 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c1 < 10 AND CURRENT_USER <> SESSION_USER FOR SHARE OF t1;
+                                                                                                                                                                                        QUERY PLAN                                                                                                                                                                                        
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Result
+   Output: t1.c1, t2.c1, t1.*, t2.*
+   One-Time Filter: (CURRENT_USER <> SESSION_USER)
+   ->  Foreign Scan
+         Output: t1.c1, t2.c1, t1.*, t2.*
+         Relations: (public.ft1 t1) INNER JOIN (public.ft2 t2)
+         Remote SQL: SELECT r1."C 1", r2."C 1", CASE WHEN (r1.*)::text IS NOT NULL THEN ROW(r1."C 1", r1.c2, r1.c3, r1.c4, r1.c5, r1.c6, r1.c7, r1.c8) END, CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2."C 1", r2.c2, r2.c3, r2.c4, r2.c5, r2.c6, r2.c7, r2.c8) END FROM ("S 1"."T 1" r1 INNER JOIN "S 1"."T 1" r2 ON (((r2."C 1" = r1."C 1")) AND ((r1."C 1" < 10)))) FOR SHARE OF r1
+(7 rows)
+
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c1 < 10 AND CURRENT_USER <> SESSION_USER FOR SHARE OF t1;
+ c1 | c1 
+----+----
+(0 rows)
+
+-- pseudoconstant qual in an inner join's ON clause of a 3-way join
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1, t3.c1 FROM (ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1 AND CURRENT_USER <> SESSION_USER)) JOIN ft4 t3 ON (t2.c1 = t3.c1) WHERE t1.c1 < 10 FOR UPDATE;
+                                                                                                                                                                                                                                                                           QUERY PLAN                                                                                                                                                                                                                                                                           
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Result
+   Output: t1.c1, t2.c1, t3.c1, t1.*, t2.*, t3.*
+   One-Time Filter: (CURRENT_USER <> SESSION_USER)
+   ->  Foreign Scan
+         Output: t1.c1, t2.c1, t3.c1, t1.*, t2.*, t3.*
+         Relations: ((public.ft1 t1) INNER JOIN (public.ft2 t2)) INNER JOIN (public.ft4 t3)
+         Remote SQL: SELECT r1."C 1", r2."C 1", r4.c1, CASE WHEN (r1.*)::text IS NOT NULL THEN ROW(r1."C 1", r1.c2, r1.c3, r1.c4, r1.c5, r1.c6, r1.c7, r1.c8) END, CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2."C 1", r2.c2, r2.c3, r2.c4, r2.c5, r2.c6, r2.c7, r2.c8) END, CASE WHEN (r4.*)::text IS NOT NULL THEN ROW(r4.c1, r4.c2, r4.c3) END FROM (("S 1"."T 1" r1 INNER JOIN "S 1"."T 1" r2 ON (((r2."C 1" = r1."C 1")) AND ((r1."C 1" < 10)))) INNER JOIN "S 1"."T 3" r4 ON (((r1."C 1" = r4.c1)))) FOR UPDATE OF r1 FOR UPDATE OF r2 FOR UPDATE OF r4
+(7 rows)
+
+SELECT t1.c1, t2.c1, t3.c1 FROM (ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1 AND CURRENT_USER <> SESSION_USER)) JOIN ft4 t3 ON (t2.c1 = t3.c1) WHERE t1.c1 < 10 FOR UPDATE;
+ c1 | c1 | c1 
+----+----+----
+(0 rows)
+
+-- join with pseudoconstant quals and LIMIT; the pseudoconstant quals should
+-- be evaluated by a gating Result node even when the LIMIT is pushed down
+SET plan_cache_mode = force_generic_plan;
+PREPARE pseudoconst_limit(bool) AS
+SELECT t1.c1, t2.c1 FROM ft1 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE $1 LIMIT 1;
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE pseudoconst_limit(false);
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
+ Result
+   Output: t1.c1, t2.c1
+   One-Time Filter: $1
+   ->  Foreign Scan
+         Output: t1.c1, t2.c1
+         Relations: (public.ft1 t1) LEFT JOIN (public.ft2 t2)
+         Remote SQL: SELECT r1."C 1", r2."C 1" FROM ("S 1"."T 1" r1 LEFT JOIN "S 1"."T 1" r2 ON (((r1."C 1" = r2."C 1")))) LIMIT 1::bigint
+(7 rows)
+
+EXECUTE pseudoconst_limit(false);
+ c1 | c1 
+----+----
+(0 rows)
+
+DEALLOCATE pseudoconst_limit;
+RESET plan_cache_mode;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE EXISTS (SELECT 1 FROM "S 1"."T 1" WHERE "C 1" < 0) LIMIT 1;
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
+ Result
+   Output: t1.c1, t2.c1
+   One-Time Filter: (InitPlan exists_1).col1
+   InitPlan exists_1
+     ->  Index Only Scan using t1_pkey on "S 1"."T 1"
+           Index Cond: ("T 1"."C 1" < 0)
+   ->  Foreign Scan
+         Output: t1.c1, t2.c1
+         Relations: (public.ft1 t1) LEFT JOIN (public.ft2 t2)
+         Remote SQL: SELECT r1."C 1", r2."C 1" FROM ("S 1"."T 1" r1 LEFT JOIN "S 1"."T 1" r2 ON (((r1."C 1" = r2."C 1")))) LIMIT 1::bigint
+(10 rows)
+
+SELECT t1.c1, t2.c1 FROM ft1 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE EXISTS (SELECT 1 FROM "S 1"."T 1" WHERE "C 1" < 0) LIMIT 1;
+ c1 | c1 
+----+----
+(0 rows)
+
 -- non-Var items in targetlist of the nullable rel of a join preventing
 -- push-down in some cases
 -- unable to push {ft1, ft2}

@@ -741,6 +741,30 @@ SELECT t1."C 1" FROM "S 1"."T 1" t1, LATERAL (SELECT DISTINCT t2.c1, t3.c1 FROM 
 -- join with pseudoconstant quals
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1 AND CURRENT_USER = SESSION_USER) ORDER BY t1.c3, t1.c1 OFFSET 100 LIMIT 10;
+-- join with pseudoconstant quals and FOR UPDATE/SHARE; the pseudoconstant
+-- quals should be evaluated by a gating Result node
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c1 < 10 AND CURRENT_USER <> SESSION_USER FOR UPDATE;
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c1 < 10 AND CURRENT_USER <> SESSION_USER FOR UPDATE;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c1 < 10 AND CURRENT_USER <> SESSION_USER FOR SHARE OF t1;
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c1 < 10 AND CURRENT_USER <> SESSION_USER FOR SHARE OF t1;
+-- pseudoconstant qual in an inner join's ON clause of a 3-way join
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1, t3.c1 FROM (ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1 AND CURRENT_USER <> SESSION_USER)) JOIN ft4 t3 ON (t2.c1 = t3.c1) WHERE t1.c1 < 10 FOR UPDATE;
+SELECT t1.c1, t2.c1, t3.c1 FROM (ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1 AND CURRENT_USER <> SESSION_USER)) JOIN ft4 t3 ON (t2.c1 = t3.c1) WHERE t1.c1 < 10 FOR UPDATE;
+-- join with pseudoconstant quals and LIMIT; the pseudoconstant quals should
+-- be evaluated by a gating Result node even when the LIMIT is pushed down
+SET plan_cache_mode = force_generic_plan;
+PREPARE pseudoconst_limit(bool) AS
+SELECT t1.c1, t2.c1 FROM ft1 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE $1 LIMIT 1;
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE pseudoconst_limit(false);
+EXECUTE pseudoconst_limit(false);
+DEALLOCATE pseudoconst_limit;
+RESET plan_cache_mode;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE EXISTS (SELECT 1 FROM "S 1"."T 1" WHERE "C 1" < 0) LIMIT 1;
+SELECT t1.c1, t2.c1 FROM ft1 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE EXISTS (SELECT 1 FROM "S 1"."T 1" WHERE "C 1" < 0) LIMIT 1;
 
 -- non-Var items in targetlist of the nullable rel of a join preventing
 -- push-down in some cases
