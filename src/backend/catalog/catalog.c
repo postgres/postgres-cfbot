@@ -22,6 +22,7 @@
 
 #include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/relscan.h"
 #include "access/table.h"
 #include "access/transam.h"
 #include "catalog/catalog.h"
@@ -563,6 +564,18 @@ GetNewOidWithIndex(Relation relation, Oid indexId, AttrNumber oidcolumn)
 		/* see notes above about using SnapshotAny */
 		scan = systable_beginscan(relation, indexId, true,
 								  SnapshotAny, 1, &key);
+
+		/*
+		 * Also check index entries that are marked LP_DEAD, since the rows
+		 * they point to may not have been pruned yet.  The mark is only a
+		 * hint: a crash can lose it, and a standby ignores it during recovery
+		 * and may not have it after promotion.  Wherever it is missing or
+		 * ignored, reusing the OID of a deleted TOAST value whose chunks are
+		 * still in the heap would make SnapshotToast return the chunks of
+		 * both values.
+		 */
+		if (scan->iscan)
+			scan->iscan->ignore_killed_tuples = false;
 
 		collides = HeapTupleIsValid(systable_getnext(scan));
 
