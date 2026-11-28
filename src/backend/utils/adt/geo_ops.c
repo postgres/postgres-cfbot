@@ -4427,6 +4427,25 @@ boxes_bound_box(PG_FUNCTION_ARGS)
 	PG_RETURN_BOX_P(container);
 }
 
+/*
+ * Can the two boxes be merged into one bounding box?
+ *
+ * Not if either has a NaN coordinate: the bounding box would have NaN
+ * bounds too, and no box operator matches those.  This is the mergeable
+ * support function of BRIN box_inclusion_ops.
+ */
+Datum
+box_mergeable(PG_FUNCTION_ARGS)
+{
+	BOX		   *box1 = PG_GETARG_BOX_P(0),
+			   *box2 = PG_GETARG_BOX_P(1);
+
+	PG_RETURN_BOOL(!(isnan(box1->high.x) || isnan(box1->high.y) ||
+					 isnan(box1->low.x) || isnan(box1->low.y) ||
+					 isnan(box2->high.x) || isnan(box2->high.y) ||
+					 isnan(box2->low.x) || isnan(box2->low.y)));
+}
+
 
 /***********************************************************************
  **
