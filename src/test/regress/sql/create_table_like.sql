@@ -195,6 +195,24 @@ CREATE TABLE ctlt1 (LIKE ctlt1 INCLUDING ALL);
 \d+ ctlt1
 ROLLBACK;
 
+-- Check that copied comments go to a new temp table, not to a same-named
+-- permanent table that precedes pg_temp in the search path
+BEGIN;
+SET LOCAL search_path = public, pg_temp;
+CREATE TABLE ctlt_src (a int NOT NULL CONSTRAINT ctlt_src_a_check CHECK (a > 0));
+COMMENT ON COLUMN ctlt_src.a IS 'src column';
+COMMENT ON CONSTRAINT ctlt_src_a_not_null ON ctlt_src IS 'src not-null';
+COMMENT ON CONSTRAINT ctlt_src_a_check ON ctlt_src IS 'src check';
+CREATE TABLE ctlt_temp (a int);
+COMMENT ON COLUMN ctlt_temp.a IS 'unrelated column';
+CREATE TEMP TABLE ctlt_temp (LIKE ctlt_src INCLUDING COMMENTS INCLUDING CONSTRAINTS);
+SELECT relpersistence, col_description(oid, 1) AS column_comment
+FROM pg_class WHERE relname = 'ctlt_temp' ORDER BY 1;
+SELECT c.relpersistence, con.conname, obj_description(con.oid, 'pg_constraint')
+FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid
+WHERE c.relname = 'ctlt_temp' ORDER BY 1, 2;
+ROLLBACK;
+
 DROP TABLE ctlt1, ctlt2, ctlt3, ctlt4, ctlt12_storage, ctlt12_comments, ctlt1_inh, ctlt13_inh, ctlt13_like, ctlt_all, ctla, ctlb CASCADE;
 
 -- LIKE must respect NO INHERIT property of constraints
