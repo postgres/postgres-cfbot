@@ -33,6 +33,19 @@ REPACK (CONCURRENTLY) rpk_missing;
 SELECT * FROM rpk_missing;
 DROP TABLE rpk_missing;
 
+-- Verify that REPACK (CONCURRENTLY) can rebuild an exclusion constraint index
+-- using parallel workers
+CREATE TABLE rpk_excl (
+	id int PRIMARY KEY,
+	a int,
+	EXCLUDE USING btree (a WITH =)
+) WITH (parallel_workers = 2);
+INSERT INTO rpk_excl VALUES (1, 10), (2, 20);
+REPACK (CONCURRENTLY) rpk_excl;
+SELECT id, a FROM rpk_excl ORDER BY id;
+INSERT INTO rpk_excl VALUES (3, 10);
+DROP TABLE rpk_excl;
+
 -- Verify handling of !indisready indexes
 CREATE TABLE repack_conc_invidx (i int PRIMARY KEY, j int);
 INSERT INTO repack_conc_invidx VALUES (1, 0), (2, 0);
