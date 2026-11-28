@@ -797,7 +797,7 @@ check_exclusion_or_unique_constraint(Relation heap, Relation index,
 							   isnull[i] ? SK_ISNULL | SK_SEARCHNULL : 0,
 							   i + 1,
 							   constr_strats[i],
-							   InvalidOid,
+							   index->rd_opcintype[i],
 							   index_collations[i],
 							   constr_procs[i],
 							   values[i]);
