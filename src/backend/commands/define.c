@@ -374,3 +374,58 @@ errorConflictingDefElem(DefElem *defel, ParseState *pstate)
 			errmsg("conflicting or redundant options"),
 			parser_errposition(pstate, defel->location));
 }
+
+/*
+ * Collapse a DefElem option list to "last specification wins" semantics.
+ *
+ * Several utility commands (VACUUM, EXPLAIN, CHECKPOINT, REPACK, ...) accept a
+ * parenthesized list of options and intend that, when an option is given more
+ * than once, the last specification takes effect.  Historically each command
+ * implemented its own parse loop, and getting last-wins right for every option
+ * was easy to botch -- for example a loop that OR'd a boolean would keep an
+ * option enabled even if its final specification was OFF.
+ *
+ * This helper centralizes that behavior.  It returns a newly-built list that
+ * contains, for each distinct option name (compared case-sensitively on
+ * defname), only the DefElem for its last occurrence in the input, keeping the
+ * relative order of those surviving entries.  Callers can then run their
+ * existing option-parsing loop over the result without worrying about repeated
+ * options at all.
+ *
+ * The input list is not modified; the DefElem nodes themselves are not copied,
+ * only referenced from the returned list.  A NIL input yields NIL.
+ */
+List *
+deduplicateDefElemList(List *options)
+{
+	List	   *result = NIL;
+	ListCell   *outer;
+
+	foreach(outer, options)
+	{
+		DefElem    *opt = (DefElem *) lfirst(outer);
+		bool		superseded = false;
+		ListCell   *inner;
+
+		/*
+		 * Keep this entry only if no later entry carries the same option
+		 * name.  This is O(n^2) in the number of options, but option lists are
+		 * short (a handful of entries), so a hash table would be overkill.
+		 */
+		for_each_cell(inner, options, lnext(options, outer))
+		{
+			DefElem    *later = (DefElem *) lfirst(inner);
+
+			if (strcmp(opt->defname, later->defname) == 0)
+			{
+				superseded = true;
+				break;
+			}
+		}
+
+		if (!superseded)
+			result = lappend(result, opt);
+	}
+
+	return result;
+}
