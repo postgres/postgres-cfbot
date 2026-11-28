@@ -1143,6 +1143,12 @@ typedef struct JsonExprState
 	 * Reset for each evaluation of EEOP_JSONEXPR_PATH.
 	 */
 	ErrorSaveContext escontext;
+
+	/*
+	 * True for JSON_VALUE() RETURNING json, jsonb, or a domain over either,
+	 * in which case a scalar string result keeps its quotes.
+	 */
+	bool		returning_json;
 } JsonExprState;
 
 
