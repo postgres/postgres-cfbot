@@ -496,6 +496,8 @@ helpVariables(unsigned short int pager)
 		  "    set output format [unaligned, aligned, wrapped, html, asciidoc, ...]\n");
 	HELP0("  linestyle\n"
 		  "    set the border line drawing style [ascii, old-ascii, unicode]\n");
+	HELP0("  n_decimals\n"
+		  "    set number of digits after the decimal point [all, integer value]\n");
 	HELP0("  null\n"
 		  "    set the string to be printed in place of a null value\n");
 	HELP0("  numericlocale\n"
