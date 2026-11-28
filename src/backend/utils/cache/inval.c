@@ -873,6 +873,14 @@ LocalExecuteInvalidationMessage(SharedInvalidationMessage *msg)
 		rlocator.backend = (msg->sm.backend_hi << 16) | (int) msg->sm.backend_lo;
 		smgrreleaserellocator(rlocator);
 	}
+	else if (msg->id == SHAREDINVALSMGRNBLOCKS_ID)
+	{
+		RelFileLocatorBackend rlocator;
+
+		rlocator.locator = msg->sm.rlocator;
+		rlocator.backend = (msg->sm.backend_hi << 16) | (int) msg->sm.backend_lo;
+		smgrforgetnblocks(rlocator);
+	}
 	else if (msg->id == SHAREDINVALRELMAP_ID)
 	{
 		/* We only care about our own database and shared catalogs */
@@ -1755,6 +1763,28 @@ CacheInvalidateSmgr(RelFileLocatorBackend rlocator)
 					 "MAX_BACKENDS_BITS is too big for inval.c");
 
 	msg.sm.id = SHAREDINVALSMGR_ID;
+	msg.sm.backend_hi = rlocator.backend >> 16;
+	msg.sm.backend_lo = rlocator.backend & 0xffff;
+	msg.sm.rlocator = rlocator.locator;
+	/* check AddCatcacheInvalidationMessage() for an explanation */
+	VALGRIND_MAKE_MEM_DEFINED(&msg, sizeof(msg));
+
+	SendSharedInvalidMessages(&msg, 1);
+}
+
+/*
+ * CacheInvalidateSmgrNblocks
+ *		Make other backends forget their cached sizes of a physical relation's
+ *		forks, without closing its files.
+ *
+ * Like CacheInvalidateSmgr, this is nontransactional and sent immediately.
+ */
+void
+CacheInvalidateSmgrNblocks(RelFileLocatorBackend rlocator)
+{
+	SharedInvalidationMessage msg;
+
+	msg.sm.id = SHAREDINVALSMGRNBLOCKS_ID;
 	msg.sm.backend_hi = rlocator.backend >> 16;
 	msg.sm.backend_lo = rlocator.backend & 0xffff;
 	msg.sm.rlocator = rlocator.locator;
