@@ -657,6 +657,13 @@ SELECT to_timestamp('2015-02-11 86400', 'YYYY-MM-DD SSSS');
 SELECT to_timestamp('2015-02-11 86000', 'YYYY-MM-DD SSSSS');  -- ok
 SELECT to_timestamp('2015-02-11 86400', 'YYYY-MM-DD SSSSS');
 SELECT to_timestamp('1000000000,999', 'Y,YYY');
+-- millennia too large for int:
+SELECT to_date('4294969320,024', 'Y,YYY');
+SELECT to_date('-4294965272,024', 'Y,YYY');
+SELECT to_timestamp('4294969320,024', 'Y,YYY');
+-- malformed Y,YYY (no comma / no years after comma):
+SELECT to_date('2024', 'Y,YYY');
+SELECT to_date('2,', 'Y,YYY');
 SELECT to_timestamp('0.-2147483648', 'SS.MS');
 SELECT to_timestamp('613566758', 'W');
 SELECT to_timestamp('2024 613566758 1', 'YYYY WW D');
