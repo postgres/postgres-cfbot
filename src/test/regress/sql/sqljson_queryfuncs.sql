@@ -625,3 +625,30 @@ SELECT JSON_VALUE(x, '$' RETURNING json) FROM (VALUES ('1'::json), ('null'), ('2
 SELECT JSON_VALUE(x, '$.a' RETURNING jsonb) FROM (VALUES ('{"a": 1}'::jsonb), ('{}'), ('{"a": 2}')) v(x);
 SELECT JSON_VALUE(x, 'strict $.a' RETURNING jsonb) FROM (VALUES ('{"a": 1}'::jsonb), ('[]'), ('{"a": 2}')) v(x);
 SELECT JSON_VALUE(x, '$' RETURNING jsonb) FROM (VALUES ('1'::jsonb), (NULL), ('2')) v(x);
+
+-- Check that JSON_VALUE() keeps the quotes of a scalar string when
+-- RETURNING a domain over json or jsonb, like it does for json and jsonb
+-- themselves, and when coercing a jsonb DEFAULT expression (bug #19825).
+CREATE DOMAIN queryfuncs_jsonb AS jsonb;
+CREATE DOMAIN queryfuncs_json AS json;
+CREATE DOMAIN queryfuncs_jsonb2 AS queryfuncs_jsonb;
+CREATE DOMAIN queryfuncs_jsonb_str AS jsonb CHECK (jsonb_typeof(VALUE) = 'string');
+CREATE DOMAIN queryfuncs_jsonb_obj AS jsonb CHECK (jsonb_typeof(VALUE) = 'object');
+CREATE DOMAIN queryfuncs_json_str AS json CHECK (json_typeof(VALUE) = 'string');
+SELECT JSON_VALUE(jsonb '"aaa"', '$' RETURNING queryfuncs_jsonb);
+SELECT JSON_VALUE(jsonb '"aaa"', '$' RETURNING queryfuncs_json);
+SELECT JSON_VALUE(jsonb '"aaa"', '$' RETURNING queryfuncs_jsonb2);
+SELECT JSON_VALUE(jsonb '"aaa"', '$' RETURNING queryfuncs_jsonb ERROR ON ERROR);
+SELECT JSON_VALUE(jsonb '"aaa"', '$' RETURNING queryfuncs_jsonb_str);
+SELECT JSON_VALUE(jsonb '"aaa"', '$' RETURNING queryfuncs_json_str ERROR ON ERROR);
+SELECT JSON_VALUE(jsonb '"{}"', '$' RETURNING queryfuncs_jsonb_str);
+SELECT JSON_VALUE(jsonb '"{}"', '$' RETURNING queryfuncs_jsonb_obj ERROR ON ERROR);
+SELECT JSON_VALUE(jsonb '123', '$' RETURNING queryfuncs_jsonb_str);
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING json DEFAULT jsonb '"bbb"' ON EMPTY);
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING json DEFAULT jsonb '"123"' ON EMPTY);
+SELECT JSON_VALUE(jsonb '[1,2]', '$[*]' RETURNING json DEFAULT jsonb '"123"' ON ERROR);
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING queryfuncs_jsonb_str DEFAULT jsonb '"bbb"' ON EMPTY);
+-- JSON_QUERY() with OMIT QUOTES still removes them
+SELECT JSON_QUERY(jsonb '"123"', '$' RETURNING queryfuncs_jsonb OMIT QUOTES);
+DROP DOMAIN queryfuncs_jsonb2, queryfuncs_jsonb, queryfuncs_json,
+  queryfuncs_jsonb_str, queryfuncs_jsonb_obj, queryfuncs_json_str;

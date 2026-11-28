@@ -4783,10 +4783,22 @@ ExecInitJsonExpr(JsonExpr *jsexpr, ExprState *state,
 	ErrorSaveContext *escontext;
 	bool		returning_domain =
 		get_typtype(jsexpr->returning->typid) == TYPTYPE_DOMAIN;
+	Oid			returning_basetype = getBaseType(jsexpr->returning->typid);
+	bool		omit_quotes;
 
 	Assert(jsexpr->on_error != NULL);
 
 	jsestate->jsexpr = jsexpr;
+
+	/*
+	 * JSON_VALUE() omits the quotes from a scalar string result, but not when
+	 * RETURNING json or jsonb, because the result must be valid JSON.  The
+	 * same applies to a domain over either type, and to the coercion of the
+	 * ON EMPTY and ON ERROR expressions.
+	 */
+	jsestate->returning_json = jsexpr->op == JSON_VALUE_OP &&
+		(returning_basetype == JSONOID || returning_basetype == JSONBOID);
+	omit_quotes = jsexpr->omit_quotes && !jsestate->returning_json;
 
 	/*
 	 * Evaluate formatted_expr storing the result into
@@ -4878,7 +4890,7 @@ ExecInitJsonExpr(JsonExpr *jsexpr, ExprState *state,
 		jsestate->jump_eval_coercion = state->steps_len;
 
 		ExecInitJsonCoercion(state, jsexpr->returning, escontext,
-							 jsexpr->omit_quotes,
+							 omit_quotes,
 							 jsexpr->op == JSON_EXISTS_OP,
 							 resv, resnull);
 	}
@@ -4970,7 +4982,7 @@ ExecInitJsonExpr(JsonExpr *jsexpr, ExprState *state,
 		/* Step to coerce the ON ERROR expression if needed */
 		if (jsexpr->on_error->coerce)
 			ExecInitJsonCoercion(state, jsexpr->returning, escontext,
-								 jsexpr->omit_quotes, false,
+								 omit_quotes, false,
 								 resv, resnull);
 
 		/*
@@ -5030,7 +5042,7 @@ ExecInitJsonExpr(JsonExpr *jsexpr, ExprState *state,
 		/* Step to coerce the ON EMPTY expression if needed */
 		if (jsexpr->on_empty->coerce)
 			ExecInitJsonCoercion(state, jsexpr->returning, escontext,
-								 jsexpr->omit_quotes, false,
+								 omit_quotes, false,
 								 resv, resnull);
 
 		/*

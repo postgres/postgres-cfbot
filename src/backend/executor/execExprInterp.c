@@ -4998,8 +4998,13 @@ ExecEvalJsonExprPath(ExprState *state, ExprEvalStep *op,
 				}
 				else if (!error && !empty)
 				{
-					if (jsexpr->returning->typid == JSONOID ||
-						jsexpr->returning->typid == JSONBOID)
+					/*
+					 * For json, jsonb or a domain over either without
+					 * constraints, use the quoted form of the item.  A domain
+					 * with constraints is coerced below with
+					 * json_populate_type(), which keeps the quotes too.
+					 */
+					if (jsestate->returning_json && !jsexpr->use_json_coercion)
 					{
 						val_string = DatumGetCString(DirectFunctionCall1(jsonb_out,
 																		 JsonbPGetDatum(JsonbValueToJsonb(jbv))));
