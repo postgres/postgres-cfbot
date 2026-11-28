@@ -81,6 +81,10 @@ const char *pretty_diff_opts = "--strip-trailing-cr -U3";
  */
 #define WAIT_TICKS_PER_SECOND 20
 
+/*
+ * Maximum supported number of concurrent tests
+ */
+#define MAX_PARALLEL_TESTS 100
 typedef enum TAPtype
 {
 	DIAG = 0,
@@ -105,7 +109,7 @@ char	   *bindir = PGBINDIR;
 char	   *launcher = NULL;
 static _stringlist *loadextension = NULL;
 static int	max_connections = 0;
-static int	max_concurrent_tests = 0;
+static int	max_concurrent_tests = MAX_PARALLEL_TESTS;
 static char *encoding = NULL;
 static _stringlist *schedulelist = NULL;
 static _stringlist *extra_tests = NULL;
@@ -1709,6 +1713,500 @@ log_child_failure(int exitstatus)
 		diag("(test process exited with unrecognized status %d)", exitstatus);
 }
 
+
+
+/*
+ * Dependency graph data structures
+ *
+ * Both edge and node are defined as a linked list, where
+ * an edge simply points to the next node 
+ */
+typedef struct _dep_edge
+{
+	struct _dep_node *to;
+	struct _dep_edge *next;
+} _dep_edge;
+
+typedef struct _dep_node
+{
+	void	   *data;
+	int			waiting;
+	_dep_edge  *out;
+	/* link for the graph node set */
+	struct _dep_node *next;
+	/* link on the ready list */
+	struct _dep_node *link;
+} _dep_node;
+
+typedef struct
+{
+	/* list of all nodes in the graph*/
+	_dep_node  *nodes;
+	/* linked list, nodes with all dependencies fullfilled */
+	_dep_node  *ready;
+} _dep_graph;
+
+static _dep_node *
+dep_add(_dep_graph *g, void *data)
+{
+	_dep_node  *n = pg_malloc0_object(_dep_node);
+
+	n->data = data;
+	n->next = g->nodes;
+	g->nodes = n;
+	return n;
+}
+
+/*
+ * By adding an edge from *from to *to, the depencency relation
+ * bethem them is established.
+ * i.e. *to cannot be started before *from is finished.
+ */
+static void
+dep_link(_dep_node *from, _dep_node *to)
+{
+	_dep_edge  *e = pg_malloc_object(_dep_edge);
+
+	e->to = to;
+	e->next = from->out;
+	from->out = e;
+	to->waiting++;
+}
+
+/*
+ * One node is done, update each dependent, decreasing their waiting count
+ * and moving them to the ready list if when the last dependency is fulfilled.
+ */
+static void
+dep_done(_dep_graph *g, _dep_node *n)
+{
+	_dep_edge  *e;
+
+	for (e = n->out; e != NULL; e = e->next)
+	{
+		if (--e->to->waiting == 0)
+		{
+			e->to->link = g->ready;
+			g->ready = e->to;
+		}
+	}
+}
+
+/*
+ * Destruct a dependency graph
+ */
+static void
+dep_free(_dep_graph *g)
+{
+	/* graph node list */
+	for(_dep_node *n_next, *n = g->nodes; n != NULL; n = n_next)
+	{
+		/* fanout of each node */
+		for(_dep_edge *e_next, *e = n->out; e != NULL; e = e_next)
+		{
+			e_next = e->next;
+			pg_free(e);
+		}
+		/* string holding test name */
+		if (n->data)
+			pg_free(n->data);
+		/* node itself */
+		n_next = n->next;
+		pg_free(n);
+	}
+}
+
+/*
+ * schedule  = ( space | comment | group )+
+ * group     = "test" [ "batch" | "concurrently" | "sequentially" ] ":" items
+ * items     = name+                          -- batch (default) and concurrently
+ *           | ( "(" name+ ")" | name )+      -- sequentially
+ * name      = (space "\" space comment? newline)+ test-name
+ * comment   = "#" .*
+ * space     = [ \t]*
+ * newline   = "\n" | "\r\n"
+ * test-name = [^ \t\n\r#\\,:()]+
+ *
+ * batch runs its names in parallel and shifts the barrier. concurrently and
+ * sequentially share one next barrier, created when it is missing, so those
+ * groups overlap. A parenthesized sequential list hangs off an auxiliary
+ * node so the next item still splits a single edge.
+ */
+typedef struct
+{
+	const char *schedule;
+	FILE	   *file;
+	int			line_num;
+	bool		line_has_name;
+	char		buf[1024];
+	char	   *p;
+	_dep_graph *graph;
+	_dep_node  *fence;
+	_dep_node  *open;			/* next barrier; NULL if none yet */
+} _sched;
+
+/*
+ * Read a line from the schedule file.
+ */
+static bool
+schedule_read_line(_sched *s)
+{
+	/* fgets overrides buf[N-1] only when the line does not fit */
+	const int N = sizeof(s->buf);
+	s->buf[0] = '\0';
+	s->buf[N - 2] = '\0';
+	s->p = s->buf;
+	if (fgets(s->buf, N, s->file) == NULL)
+		return false;
+	s->line_num++;
+	if (s->buf[N - 2] != '\0' && s->buf[N - 2] != '\n')
+		bail("line too long in schedule file \"%s\" line %d",
+			 s->schedule, s->line_num);
+	s->p = s->buf;
+	return true;
+}
+
+/*
+ * check whether the character at the current cursor marks the end of a line.
+ */
+static bool
+schedule_is_eol(const char c)
+{
+	switch (c)
+	{
+		case '\0':
+		case '\n':
+		case '\r':
+		case '#':
+			return true;
+		default:
+			return false;
+	}
+}
+
+/* test if character is part of a test name */
+static bool
+schedule_is_name(const char c)
+{
+	switch (c)
+	{
+		/* line end */
+		case '\0':
+		case '\n':
+		case '\r':
+		case '#':
+		/* spaces */
+		case '\t':
+		case ' ':
+		/* reserved symbols */
+		case '\\':
+		case ':':
+		case ',':
+		case '(':
+		case ')':
+			return false;
+		default:
+			return true;
+	}
+}
+
+/*
+ * Skip leading whitespace characters.
+ */
+static void schedule_skip_whitespace(_sched *s)
+{
+	while (*s->p == ' ' || *s->p == '\t')
+		s->p++;
+}
+
+/* Read on test name, returns NULL if the next token is not a valid test name */
+static char *
+schedule_read_name(_sched *s)
+{
+	size_t		len;
+	char	   *name;
+
+	/* Discard witespaces comments and read more lines if necessary */
+	for(;;){
+		schedule_skip_whitespace(s);
+
+		/* test continues on next line */
+		if (*s->p == '\\')
+		{
+			s->p++;
+			/* accept spaces and comments after the backslash */
+			schedule_skip_whitespace(s);
+			if (!schedule_is_eol(*s->p))
+				bail("syntax error in schedule file \"%s\" line %d: "
+					"test name after \\",
+					s->schedule, s->line_num);
+			/* read the next line */
+			if (!schedule_read_line(s))
+				return NULL;
+			continue;
+		}
+		/* end of line, also end of test list */
+		if (schedule_is_eol(*s->p))
+		{
+			return NULL;
+		}
+		/* possibly a test */
+		break;
+	}
+
+	/* scan one single test name */
+	for (len = 0; len < sizeof(s->buf) ; ++len)
+	{
+		if (!schedule_is_name(s->p[len]))
+			break;
+	}
+
+	if (len == 0)
+		return NULL;
+    
+	name = pg_malloc(len + 1);
+	strncpy(name, s->p, len);
+	name[len] = '\0';
+	s->p += len;
+	return name;
+}
+
+/*
+ * One item from prev toward next: a name, or "(" names ")" joined by an
+ * auxiliary node. next may be NULL; the caller links the returned node.
+ * NULL means this group is finished.
+ */
+static _dep_node *
+schedule_read_item(_sched *s, _dep_node *prev, _dep_node *next)
+{
+	char	   *name;
+	_dep_node  *aux;
+	_dep_node  *test;
+	int			count;
+
+	name = schedule_read_name(s);
+
+	/* a test name */
+	if (name != NULL)
+	{
+		test = dep_add(s->graph, name);
+		dep_link(prev, test);
+		if (next != NULL)
+			dep_link(test, next);
+		return test;
+	}
+
+	/* end of a test group */
+	if (schedule_is_eol(*s->p))
+		return NULL;
+
+	/* an subgroup in brackets */
+	if (*s->p != '(')
+		bail("syntax error in schedule file \"%s\" %d: expected test name or '(' but got \"%s\"",
+			 s->schedule, s->line_num, s->p);
+	s->p++; /* skip the '(' */
+	aux = dep_add(s->graph, NULL);
+	count = 0;
+
+	/* process all tests in the group */
+	while((name = schedule_read_name(s)) != NULL)
+	{
+		test = dep_add(s->graph, name);
+		dep_link(prev, test);
+		dep_link(test, aux);
+		count++;
+	}
+
+	if (*s->p != ')')
+		bail("syntax error in schedule file \"%s\" %d: unclosed '('",
+			 s->schedule, s->line_num);
+
+	if (count == 0)
+		bail("empty test group in schedule file \"%s\" line %d",
+			 s->schedule, s->line_num);
+
+	s->p++; /* skip the ')' */
+
+	/* establish the dependency between this group and next fence */
+	if (next != NULL)
+		dep_link(aux, next);
+	return aux;
+}
+
+/* One group, or false at end of file. */
+static bool
+schedule_read_group(_sched *s)
+{
+	int start_line;
+	int			num_tests = 0;
+	bool		concurrent = false;
+	bool		sequential = false;
+	bool		batch;
+	_dep_node  *next;
+	_dep_node  *prev;
+	_dep_node  *item;
+
+	/* discard white spaces and comments */
+	for (;;)
+	{
+		schedule_skip_whitespace(s);
+		if (schedule_is_eol(*s->p))
+		{
+			if (!schedule_read_line(s))
+				return false;
+			continue;
+		}
+		break;
+	}
+	/* check the magic word test */
+	if (strncmp(s->p, "test", 4) != 0)
+		bail("syntax error in schedule file \"%s\" line %d: "
+			 "expected \"test:\" or comment, got \"%.*s\"",
+			 s->schedule, s->line_num,
+			 (int) strcspn(s->p, "\r\n"), s->p);
+
+	/* skip spaces after `test`, then an optional kind */
+	s->p += 4;
+	schedule_skip_whitespace(s);
+	if (strncmp(s->p, "batch", 5) == 0)
+	{
+		s->p += 5;
+	}
+	else if (strncmp(s->p, "concurrently", 12) == 0)
+	{
+		s->p += 12;
+		concurrent = true;
+	}
+	else if (strncmp(s->p, "sequentially", 12) == 0)
+	{
+		s->p += 12;
+		sequential = true;
+	}
+	schedule_skip_whitespace(s);
+
+	/* check for the colon separator */
+	if (*(s->p++) != ':')
+		bail("syntax error in schedule file \"%s\" line %d: expected \":\" after \"test\"",
+			 s->schedule, s->line_num);
+	start_line = s->line_num;
+
+	/*
+	 * A batch shifts onto the pending barrier and then gets a new one.
+	 * Sequential and concurrent groups share the pending barrier, creating
+	 * it only when there is none.
+	 */
+	batch = !concurrent && !sequential;
+	if (batch && s->open != NULL)
+	{
+		s->fence = s->open;
+		s->open = NULL;
+	}
+	if (s->open == NULL)
+		s->open = dep_add(s->graph, NULL);
+	next = s->open;
+
+	/* Sequential walks prev. Linking each item to the barrier would skip the rest. */
+	prev = s->fence;
+	for (;;)
+	{
+		item = schedule_read_item(s, prev, sequential ? NULL : next);
+		if (item == NULL)
+			break;
+		num_tests++;
+		if (sequential)
+			prev = item;
+	}
+	if (num_tests == 0)
+		bail("empty test group in schedule file \"%s\" line %d",
+			 s->schedule, start_line);
+	if (sequential)
+		dep_link(prev, next);
+	if (batch)
+	{
+		s->fence = next;
+		s->open = NULL;
+	}
+	return true;
+}
+
+/*
+ * During  the test execution the concurrency level varies
+ * this computes the average concurrency from the moment the
+ * first test starts to the moment the last test stops.
+ */
+static void
+log_group_concurrency(instr_time *test_start, instr_time *test_stop, 
+	double *grand_total, int num_tests)
+{
+	double group_start = INSTR_TIME_GET_NANOSEC(test_start[0]);
+	double group_stop = INSTR_TIME_GET_NANOSEC(test_stop[0]);
+	double total = (group_stop - group_start);
+	for(int i = 1; i < num_tests; i++)
+	{
+		double t0 = INSTR_TIME_GET_NANOSEC(test_start[i]);
+		double tf = INSTR_TIME_GET_NANOSEC(test_stop[i]);
+		if (t0 < group_start)
+			group_start = t0;
+		if (tf > group_stop)
+			group_stop = tf;
+		total += tf - t0;
+	}
+	*grand_total += total;
+	if (num_tests > 1)
+		note("effective concurrency %.2f / %d", total / (group_stop - group_start), num_tests);
+}
+
+/*
+ * reap_one - return the index of the slot that exited
+ *
+ * Wait until one running slot exits. Assume that every background
+ * process is a test. The diff processes that compare results on failures
+ * don't affect this because they are started sycnhronously so none of
+ * those will be running concurrently with this function.
+ */
+static int
+reap_one(PID_TYPE *pids, int *statuses, instr_time *stoptimes, int nslots)
+{
+	int			i;
+	PID_TYPE	child;
+	int			status;
+
+	for (;;)
+	{
+#ifdef WIN32
+		PID_TYPE	active[MAX_PARALLEL_TESTS];
+		int			nactive = 0;
+		DWORD		wstatus;
+		int			r;
+
+		for (i = 0; i < nslots; i++)
+			if (pids[i] != INVALID_PID)
+				active[nactive++] = pids[i];
+		r = WaitForMultipleObjects(nactive, active, FALSE, INFINITE);
+		if (r < WAIT_OBJECT_0 || r >= WAIT_OBJECT_0 + nactive)
+			bail("failed to wait for subprocesses: error code %lu", GetLastError());
+		child = active[r - WAIT_OBJECT_0];
+		GetExitCodeProcess(child, &wstatus);
+		CloseHandle(child);
+		status = (int) wstatus;
+#else
+		child = wait(&status);
+		if (child == INVALID_PID)
+			bail("failed to wait for subprocesses: %m");
+#endif
+		for (i = 0; i < nslots; i++)
+		{
+			if (pids[i] == child)
+			{
+				pids[i] = INVALID_PID;
+				statuses[i] = status;
+				INSTR_TIME_SET_CURRENT(stoptimes[i]);
+				return i;
+			}
+		}
+	}
+}
+
 /*
  * Run all the tests specified in one schedule file
  */
@@ -1716,7 +2214,6 @@ static void
 run_schedule(const char *schedule, test_start_function startfunc,
 			 postprocess_result_function postfunc)
 {
-#define MAX_PARALLEL_TESTS 100
 	char	   *tests[MAX_PARALLEL_TESTS];
 	_stringlist *resultfiles[MAX_PARALLEL_TESTS];
 	_stringlist *expectfiles[MAX_PARALLEL_TESTS];
@@ -1725,133 +2222,112 @@ run_schedule(const char *schedule, test_start_function startfunc,
 	instr_time	starttimes[MAX_PARALLEL_TESTS];
 	instr_time	stoptimes[MAX_PARALLEL_TESTS];
 	int			statuses[MAX_PARALLEL_TESTS];
-	char		scbuf[1024];
-	FILE	   *scf;
-	int			line_num = 0;
+	_dep_node  *nodes[MAX_PARALLEL_TESTS];
+	_dep_graph	graph;
+	_dep_node  *t;
+	_sched		rd;
+	double		total_test_time = 0;
+	double		schedule_elapsed_time = 0;	
+	instr_time	schedule_start_time;
+	instr_time	schedule_stop_time;
+	int			num_tests;
+	bool		is_parallel;
+	int			i;
+	int			next_slot[MAX_PARALLEL_TESTS];
+	int			free_head;
+	int			nrunning;
+	int			ndone;
+	int			pool;
+	double		group_origin;
+	double		group_end;
+	double		group_base;
+	double		t0;
+	double		tf;
 
 	memset(tests, 0, sizeof(tests));
 	memset(resultfiles, 0, sizeof(resultfiles));
 	memset(expectfiles, 0, sizeof(expectfiles));
 	memset(tags, 0, sizeof(tags));
 
-	scf = fopen(schedule, "r");
-	if (!scf)
+	memset(&graph, 0, sizeof(graph));
+	memset(&rd, 0, sizeof(rd));
+	rd.schedule = schedule;
+	rd.p = rd.buf;
+	rd.graph = &graph;
+	rd.file = fopen(schedule, "r");
+	if (!rd.file)
 		bail("could not open file \"%s\" for reading: %m", schedule);
+	t = dep_add(&graph, NULL);
+	rd.fence = t;
+	while (schedule_read_group(&rd))
+		;
+	fclose(rd.file);
 
-	while (fgets(scbuf, sizeof(scbuf), scf))
+	nrunning = 0;
+	ndone = 0;
+	pool = max_concurrent_tests;
+	if (max_connections > 0 && max_connections < pool)
+		pool = max_connections;
+	free_head = 0;
+	for (i = 0; i < pool; i++)
 	{
-		char	   *test = NULL;
-		char	   *c;
-		int			num_tests;
-		bool		inword;
-		int			i;
+		next_slot[i] = i + 1;
+		pids[i] = INVALID_PID;
+	}
+	next_slot[pool - 1] = -1;
 
-		line_num++;
-
-		/* strip trailing whitespace, especially the newline */
-		i = strlen(scbuf);
-		while (i > 0 && isspace((unsigned char) scbuf[i - 1]))
-			scbuf[--i] = '\0';
-
-		if (scbuf[0] == '\0' || scbuf[0] == '#')
-			continue;
-		if (strncmp(scbuf, "test: ", 6) == 0)
-			test = scbuf + 6;
-		else
+	INSTR_TIME_SET_CURRENT(schedule_start_time);
+	dep_done(&graph, t);
+	for (;;)
+	{
+		if (nrunning == 0)
+			group_base = total_test_time;
+		while (nrunning < pool && graph.ready != NULL)
 		{
-			bail("syntax error in schedule file \"%s\" line %d: %s",
-				 schedule, line_num, scbuf);
-		}
+			t = graph.ready;
+			graph.ready = t->link;
 
-		num_tests = 0;
-		inword = false;
-		for (c = test;; c++)
-		{
-			if (*c == '\0' || isspace((unsigned char) *c))
+			/* a fence node */
+			if (t->data == NULL)
 			{
-				if (inword)
-				{
-					/* Reached end of a test name */
-					char		sav;
-
-					if (num_tests >= MAX_PARALLEL_TESTS)
-					{
-						bail("too many parallel tests (more than %d) in schedule file \"%s\" line %d: %s",
-							 MAX_PARALLEL_TESTS, schedule, line_num, scbuf);
-					}
-					sav = *c;
-					*c = '\0';
-					tests[num_tests] = pg_strdup(test);
-					num_tests++;
-					*c = sav;
-					inword = false;
-				}
-				if (*c == '\0')
-					break;		/* loop exit is here */
+				dep_done(&graph, t);
+				continue;
 			}
-			else if (!inword)
-			{
-				/* Start of a test name */
-				test = c;
-				inword = true;
-			}
+			
+			/* a test node */
+			num_tests = free_head;
+			free_head = next_slot[num_tests];
+			nodes[num_tests] = t;
+			tests[num_tests] = t->data;
+			resultfiles[num_tests] = NULL;
+			expectfiles[num_tests] = NULL;
+			tags[num_tests] = NULL;
+			pids[num_tests] = (startfunc) (tests[num_tests],
+										   &resultfiles[num_tests],
+										   &expectfiles[num_tests],
+										   &tags[num_tests]);
+			INSTR_TIME_SET_CURRENT(starttimes[num_tests]);
+			nrunning++;
 		}
+		if (nrunning == 0)
+			break;
 
-		if (num_tests == 0)
-		{
-			bail("syntax error in schedule file \"%s\" line %d: %s",
-				 schedule, line_num, scbuf);
-		}
+		i = reap_one(pids, statuses, stoptimes, pool);
 
-		if (num_tests == 1)
-		{
-			pids[0] = (startfunc) (tests[0], &resultfiles[0], &expectfiles[0], &tags[0]);
-			INSTR_TIME_SET_CURRENT(starttimes[0]);
-			wait_for_tests(pids, statuses, stoptimes, NULL, 1);
-			/* status line is finished below */
-		}
-		else if (max_concurrent_tests > 0 && max_concurrent_tests < num_tests)
-		{
-			bail("too many parallel tests (more than %d) in schedule file \"%s\" line %d: %s",
-				 max_concurrent_tests, schedule, line_num, scbuf);
-		}
-		else if (max_connections > 0 && max_connections < num_tests)
-		{
-			int			oldest = 0;
+		/* timing */
+		t0 = INSTR_TIME_GET_NANOSEC(starttimes[i]);
+		tf = INSTR_TIME_GET_NANOSEC(stoptimes[i]);
 
-			note_detail("parallel group (%d tests, in groups of %d): ",
-						num_tests, max_connections);
-			for (i = 0; i < num_tests; i++)
-			{
-				if (i - oldest >= max_connections)
-				{
-					wait_for_tests(pids + oldest, statuses + oldest,
-								   stoptimes + oldest,
-								   tests + oldest, i - oldest);
-					oldest = i;
-				}
-				pids[i] = (startfunc) (tests[i], &resultfiles[i], &expectfiles[i], &tags[i]);
-				INSTR_TIME_SET_CURRENT(starttimes[i]);
-			}
-			wait_for_tests(pids + oldest, statuses + oldest,
-						   stoptimes + oldest,
-						   tests + oldest, i - oldest);
-			note_end();
-		}
-		else
-		{
-			note_detail("parallel group (%d tests): ", num_tests);
-			for (i = 0; i < num_tests; i++)
-			{
-				pids[i] = (startfunc) (tests[i], &resultfiles[i], &expectfiles[i], &tags[i]);
-				INSTR_TIME_SET_CURRENT(starttimes[i]);
-			}
-			wait_for_tests(pids, statuses, stoptimes, tests, num_tests);
-			note_end();
-		}
+		if (ndone == 0 || t0 < group_origin)
+			group_origin = t0;
 
+		if (ndone == 0 || tf > group_end)
+			group_end = tf;
+
+		log_group_concurrency(&starttimes[i], &stoptimes[i], &total_test_time, 1);
+		is_parallel = (nrunning > 1 || ndone > 0);
+		
 		/* Check results for all tests */
-		for (i = 0; i < num_tests; i++)
 		{
 			_stringlist *rl,
 					   *el,
@@ -1886,33 +2362,43 @@ run_schedule(const char *schedule, test_start_function startfunc,
 
 			if (statuses[i] != 0)
 			{
-				test_status_failed(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), (num_tests > 1));
+				test_status_failed(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), is_parallel);
 				log_child_failure(statuses[i]);
 			}
 			else
 			{
 				if (differ)
-				{
-					test_status_failed(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), (num_tests > 1));
-				}
+					test_status_failed(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), is_parallel);
 				else
-				{
-					test_status_ok(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), (num_tests > 1));
-				}
+					test_status_ok(tests[i], INSTR_TIME_GET_MILLISEC(stoptimes[i]), is_parallel);
 			}
 		}
 
-		for (i = 0; i < num_tests; i++)
 		{
-			pg_free(tests[i]);
 			tests[i] = NULL;
 			free_stringlist(&resultfiles[i]);
 			free_stringlist(&expectfiles[i]);
 			free_stringlist(&tags[i]);
 		}
+		next_slot[i] = free_head;
+		free_head = i;
+		nrunning--;
+		ndone++;
+		dep_done(&graph, nodes[i]);
+		if (nrunning == 0 && ndone > 1)
+			note("effective concurrency %.2f / %d",
+				 (total_test_time - group_base) / (group_end - group_origin), ndone);
+		if (nrunning == 0)
+			ndone = 0;
 	}
+	INSTR_TIME_SET_CURRENT(schedule_stop_time);
+	schedule_elapsed_time = INSTR_TIME_GET_NANOSEC(schedule_stop_time) - INSTR_TIME_GET_NANOSEC(schedule_start_time);
+	note("schedule effective concurrency %.2f, %.2f seconds", 
+		total_test_time / schedule_elapsed_time, schedule_elapsed_time * 1e-9
+	);
 
-	fclose(scf);
+	/* cleanup */
+	dep_free(&graph);
 }
 
 /*
@@ -2113,7 +2599,7 @@ help(void)
 	printf(_("      --max-connections=N       maximum number of concurrent connections\n"));
 	printf(_("                                (default is 0, meaning unlimited)\n"));
 	printf(_("      --max-concurrent-tests=N  maximum number of concurrent tests in schedule\n"));
-	printf(_("                                (default is 0, meaning unlimited)\n"));
+	printf(_("                                default: %d\n"), MAX_PARALLEL_TESTS);
 	printf(_("      --outputdir=DIR           place output files in DIR (default \".\")\n"));
 	printf(_("      --schedule=FILE           use test ordering schedule from FILE\n"));
 	printf(_("                                (can be used multiple times to concatenate)\n"));
@@ -2295,6 +2781,10 @@ regression_main(int argc, char *argv[],
 				break;
 			case 25:
 				max_concurrent_tests = atoi(optarg);
+				if (max_concurrent_tests <= 0 || max_concurrent_tests > MAX_PARALLEL_TESTS)
+					bail("--max-concurrent-tests=%s expected to be integer in range 1-%d" , optarg, MAX_PARALLEL_TESTS);
+				if (max_concurrent_tests > MAX_PARALLEL_TESTS)
+					bail("value for --max-concurrent-tests must be no more than %d", MAX_PARALLEL_TESTS);
 				break;
 			case 26:
 				expecteddir = pg_strdup(optarg);
