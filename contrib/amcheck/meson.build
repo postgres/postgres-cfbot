@@ -50,6 +50,10 @@ tests += {
       't/004_verify_nbtree_unique.pl',
       't/005_pitr.pl',
       't/006_verify_gin.pl',
+      't/007_prefix.pl',
+      't/008_prefix_limits.pl',
+      't/009_prefix_split.pl',
+      't/010_prefix_multicol.pl',
     ],
   },
 }

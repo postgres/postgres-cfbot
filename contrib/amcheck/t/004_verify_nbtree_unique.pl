@@ -250,5 +250,42 @@ like(
 	qr/index uniqueness is violated for index "bttest_unique_idx3"/,
 	'detected uniqueness violation for index "bttest_unique_idx3"');
 
+# Mark an index containing duplicates as unique.  Prefix decoding reuses its
+# tuple buffer, but the diagnostic must retain the previous entry's heap TID.
+$node->safe_psql(
+	'postgres', q(
+	CREATE TABLE bttest_unique_prefix (u text COLLATE "C");
+	INSERT INTO bttest_unique_prefix
+		SELECT repeat('prefix/', 12) || lpad(g::text, 4, '0')
+		FROM generate_series(1, 20) g;
+	INSERT INTO bttest_unique_prefix
+		SELECT u FROM bttest_unique_prefix
+		WHERE u = repeat('prefix/', 12) || '0010';
+	CREATE INDEX bttest_unique_prefix_idx ON bttest_unique_prefix (u)
+		WITH (prefix_compression = on, deduplicate_items = off);
+	UPDATE pg_index SET indisunique = true
+		WHERE indexrelid = 'bttest_unique_prefix_idx'::regclass;
+));
+my $duplicate_tids = $node->safe_psql(
+	'postgres', q(
+	SELECT string_agg('tid=' || ctid::text, ' and ' ORDER BY ctid)
+	FROM bttest_unique_prefix
+	WHERE u = repeat('prefix/', 12) || '0010';
+));
+for my $check ('bt_index_check', 'bt_index_parent_check')
+{
+	my $args = $check eq 'bt_index_check' ? 'true, true' : 'true, true, true';
+	($result, $stdout, $stderr) = $node->psql(
+		'postgres', "SELECT $check('bttest_unique_prefix_idx', $args)");
+	like(
+		$stderr,
+		qr/index uniqueness is violated for index "bttest_unique_prefix_idx"/,
+		"$check detects uniqueness violation in prefix-compressed index");
+	like(
+		$stderr,
+		qr/point to heap \Q$duplicate_tids\E/,
+		"$check reports both distinct heap TIDs in prefix-compressed index");
+}
+
 $node->stop;
 done_testing();

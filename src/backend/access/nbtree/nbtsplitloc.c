@@ -459,6 +459,13 @@ _bt_recsplitloc(FindSplitData *state,
 	Size		postingsz = 0;
 	bool		newitemisfirstright;
 
+	/*
+	 * Reject an empty left half.  A prefix representation limit can force a
+	 * split of a sparse page, where the space checks below would accept one.
+	 */
+	if (olddataitemstoleft == 0 && !newitemonleft)
+		return;
+
 	/* Is the new item going to be split point's firstright tuple? */
 	newitemisfirstright = (firstrightoff == state->newitemoff &&
 						   !newitemonleft);

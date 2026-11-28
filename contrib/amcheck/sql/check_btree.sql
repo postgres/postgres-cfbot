@@ -183,6 +183,33 @@ INSERT INTO varlena_bug VALUES (repeat('Test', 250));
 ALTER TABLE varlena_bug ALTER COLUMN v SET STORAGE extended;
 SELECT bt_index_check('varlena_bug_idx', true);
 
+-- amcheck must decode prefix-compressed leaves and check the BTP_PREFIX
+-- invariants.  Most keys share a long prefix; the unshared key and the NULL
+-- stay uncoded.  The row count forces splits and deduplication.
+CREATE TABLE prefix_bug (v text COLLATE "C");
+INSERT INTO prefix_bug
+  SELECT 'https://example.com/path/to/resource/' || lpad(g::text, 8, '0')
+  FROM generate_series(1, 20000) g;
+INSERT INTO prefix_bug
+  SELECT 'https://example.com/path/to/resource/' || lpad((g % 100)::text, 8, '0')
+  FROM generate_series(1, 20000) g;
+INSERT INTO prefix_bug VALUES ('zzz-no-shared-prefix'), (NULL);
+CREATE INDEX prefix_bug_idx ON prefix_bug (v) WITH (prefix_compression = on);
+SELECT bt_index_check('prefix_bug_idx', heapallindexed => true);
+SELECT bt_index_parent_check('prefix_bug_idx', heapallindexed => true, rootdescend => true);
+
+-- The final leaf's decoded split budget includes its last posting tuple,
+-- not the smaller high key that would replace it on a non-rightmost leaf.
+DROP INDEX prefix_bug_idx;
+TRUNCATE prefix_bug;
+INSERT INTO prefix_bug
+  SELECT repeat('x', 115) || lpad(g::text, 4, '0')
+  FROM generate_series(1, 106) g;
+INSERT INTO prefix_bug
+  SELECT repeat('x', 115) || '0107' FROM generate_series(1, 113);
+CREATE INDEX prefix_bug_idx ON prefix_bug (v) WITH (prefix_compression = on);
+SELECT bt_index_parent_check('prefix_bug_idx', heapallindexed => true, rootdescend => true);
+
 -- cleanup
 DROP TABLE bttest_a;
 DROP TABLE bttest_b;
@@ -194,3 +221,4 @@ DROP TABLE bttest_unique_nulls;
 DROP OWNED BY regress_bttest_role; -- permissions
 DROP ROLE regress_bttest_role;
 DROP TABLE varlena_bug;
+DROP TABLE prefix_bug;
