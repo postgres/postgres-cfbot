@@ -632,14 +632,6 @@ RegisterRelcacheInvalidation(InvalidationInfo *info, Oid dbId, Oid relId)
 	AddRelcacheInvalidationMessage(&info->CurrentCmdInvalidMsgs, dbId, relId);
 
 	/*
-	 * Most of the time, relcache invalidation is associated with system
-	 * catalog updates, but there are a few cases where it isn't.  Quick hack
-	 * to ensure that the next CommandCounterIncrement() will think that we
-	 * need to do CommandEndInvalidationMessages().
-	 */
-	(void) GetCurrentCommandId(true);
-
-	/*
 	 * If the relation being invalidated is one of those cached in a relcache
 	 * init file, mark that we need to zap that file at commit. For simplicity
 	 * invalidations for a specific database always invalidate the shared file
@@ -685,6 +677,15 @@ PrepareInvalidationState(void)
 	AssertCouldGetRelation();
 	/* Can't queue transactional message while collecting inplace messages. */
 	Assert(inplaceInvalInfo == NULL);
+
+	/*
+	 * Most of the time, cache invalidation is associated with system catalog
+	 * updates, but there are a few cases where it isn't (for example, manual
+	 * CacheInvalidateHeapTuple or CacheInvalidateRelcache calls).  Quick hack
+	 * to ensure that the next CommandCounterIncrement() will think that we
+	 * need to do CommandEndInvalidationMessages().
+	 */
+	(void) GetCurrentCommandId(true);
 
 	if (transInvalInfo != NULL &&
 		transInvalInfo->my_level == GetCurrentTransactionNestLevel())

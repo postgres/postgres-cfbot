@@ -1426,3 +1426,32 @@ SELECT * FROM information_schema.check_constraints
  regression         | public            | pos_int_not_null | VALUE IS NOT NULL
 (4 rows)
 
+--
+-- Subtransaction DDL after ALTER DOMAIN ... DROP CONSTRAINT
+--
+CREATE DOMAIN dom_inval AS int CONSTRAINT c CHECK (value > 0);
+SELECT 1::dom_inval;  -- warm typcache
+ dom_inval 
+-----------
+         1
+(1 row)
+
+BEGIN;
+ALTER DOMAIN dom_inval DROP CONSTRAINT c;
+SELECT (-1)::dom_inval;  -- verify local typcache was invalidated
+ dom_inval 
+-----------
+        -1
+(1 row)
+
+SAVEPOINT s;
+ALTER DOMAIN dom_inval ADD CONSTRAINT c2 CHECK (value < 5);
+ROLLBACK TO SAVEPOINT s;
+COMMIT;
+-- Also verify DROP CONSTRAINT IF EXISTS in a fresh transaction (no XID)
+BEGIN;
+ALTER DOMAIN dom_inval DROP CONSTRAINT IF EXISTS nonexistent;
+NOTICE:  constraint "nonexistent" of domain "dom_inval" does not exist, skipping
+SAVEPOINT s;
+DROP DOMAIN dom_inval;
+COMMIT;
