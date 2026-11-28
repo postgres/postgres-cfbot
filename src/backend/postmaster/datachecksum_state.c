@@ -1401,7 +1401,7 @@ done:
 	}
 
 	/* Shut down progress reporting as we are done */
-	pgstat_progress_end_command();
+	pgstat_progress_end_command(false);
 
 	launcher_running = false;
 	DataChecksumState->launcher_running = false;
@@ -1996,7 +1996,7 @@ DataChecksumsWorkerMain(Datum arg)
 	list_free(InitialTempTableList);
 
 	/* worker done */
-	pgstat_progress_end_command();
+	pgstat_progress_end_command(false);
 
 	LWLockAcquire(DataChecksumsWorkerLock, LW_EXCLUSIVE);
 	if (DataChecksumState->worker_invocation == worker_invocation)

@@ -82,6 +82,36 @@ typedef struct PgBackendGSSStatus
 
 } PgBackendGSSStatus;
 
+/*
+ * Command progress reporting.  Any command which wishes can advertise that it
+ * is running by setting st_progress_command, st_progress_command_target, and
+ * st_progress_param[].  st_progress_command_target should be the OID of the
+ * relation which the command targets (we assume there's just one, as this is
+ * meant for utility commands), but the meaning of each element in the
+ * st_progress_param array is command-specific.
+ */
+typedef struct PgBackendProgress
+{
+	ProgressCommandType command;
+	Oid			command_target;
+	/* Transaction nesting level the monitoring started at. */
+	int			xact_level;
+
+	/*
+	 * If a backend tries to start monitoring of a command of and another
+	 * command of the same type is already being monitored, mark the new
+	 * command as dummy, so that it's not actually used. (We still need the
+	 * command in the stack so that pgstat_progress_end_command() works
+	 * correctly.)
+	 *
+	 * The typical scenario is COPY TO running on a table having an insert
+	 * trigger that scans a file_fdw table (which in turn runs COPY FROM). In
+	 * this case, we can only monitor the "outer" COPY TO.
+	 */
+	bool		is_dummy;
+
+	int64		param[PGSTAT_NUM_PROGRESS_PARAM];
+} PgBackendProgress;
 
 /* ----------
  * PgBackendStatus
@@ -156,18 +186,13 @@ typedef struct PgBackendStatus
 	 */
 	char	   *st_activity_raw;
 
+	/* Command progress reporting. */
+	PgBackendProgress st_progress;
 	/*
-	 * Command progress reporting.  Any command which wishes can advertise
-	 * that it is running by setting st_progress_command,
-	 * st_progress_command_target, and st_progress_param[].
-	 * st_progress_command_target should be the OID of the relation which the
-	 * command targets (we assume there's just one, as this is meant for
-	 * utility commands), but the meaning of each element in the
-	 * st_progress_param array is command-specific.
+	 * If a subcommand is being monitored, the command that triggered it is
+	 * reported here.
 	 */
-	ProgressCommandType st_progress_command;
-	Oid			st_progress_command_target;
-	int64		st_progress_param[PGSTAT_NUM_PROGRESS_PARAM];
+	PgBackendProgress	st_progress_top;
 
 	/* query identifier, optionally computed using post_parse_analyze_hook */
 	int64		st_query_id;
@@ -290,6 +315,10 @@ typedef struct LocalPgBackendStatus
 extern PGDLLIMPORT bool pgstat_track_activities;
 extern PGDLLIMPORT int pgstat_track_activity_query_size;
 
+/*
+ * This is to turn off progress tracking while pgstat_track_activities is on.
+ */
+extern bool pgstat_track_progress;
 
 /* ----------
  * Other global variables

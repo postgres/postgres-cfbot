@@ -1,0 +1,68 @@
+Parsed test spec with 4 sessions
+
+starting permutation: repack_wait check_index wakeup
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+step repack_wait: 
+        SELECT injection_points_attach('progress-end-command-nested', 'wait');
+        REPACK progress_test;
+ <waiting ...>
+step check_index: 
+        SELECT command FROM pg_stat_progress_create_index;
+
+command
+-------
+REINDEX
+(1 row)
+
+step wakeup: 
+        SELECT injection_points_wakeup('progress-end-command-nested');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step repack_wait: <... completed>
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: repack_error check_repack
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+step repack_error: 
+        SELECT injection_points_attach('progress-update-param-nested', 'error');
+        REPACK progress_test;
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+ERROR:  error triggered for injection point progress-update-param-nested
+step check_repack: 
+        SELECT command FROM pg_stat_progress_repack;
+
+command
+-------
+(0 rows)
+

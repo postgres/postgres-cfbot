@@ -21,6 +21,7 @@ WAIT_CLEANUP_TST = $(if $(filter win32,$(PORTNAME)),,wait_cleanup)
 
 ISOLATION = basic \
 	    inplace \
+	    progress \
 	    reindex_concurrently_deferred \
 	    reindex_concurrently_toast \
 	    repack \

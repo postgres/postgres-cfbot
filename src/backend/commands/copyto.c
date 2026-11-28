@@ -776,7 +776,7 @@ EndCopy(CopyToState cstate)
 							cstate->filename)));
 	}
 
-	pgstat_progress_end_command();
+	pgstat_progress_end_command(false);
 
 	MemoryContextDelete(cstate->copycontext);
 

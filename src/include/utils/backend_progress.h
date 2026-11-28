@@ -41,7 +41,11 @@ extern void pgstat_progress_incr_param(int index, int64 incr);
 extern void pgstat_progress_parallel_incr_param(int index, int64 incr);
 extern void pgstat_progress_update_multi_param(int nparam, const int *index,
 											   const int64 *val);
-extern void pgstat_progress_end_command(void);
+extern void pgstat_progress_end_command(bool xact);
+extern void AtStart_BackendProgress(int nestingLevel);
+extern void AtEOXact_BackendProgress(int nestingLevel);
+extern void AtSubStart_BackendProgress(int nestingLevel);
+extern void AtEOSubXact_BackendProgress(int nestingLevel);
 
 
 #endif							/* BACKEND_PROGRESS_H */
