@@ -4128,6 +4128,24 @@ send_message_to_frontend(ErrorData *edata)
 
 		pq_sendbyte(&msgbuf, '\0'); /* terminator */
 
+		/*
+		 * On a client socket, don't let a FATAL report delay process exit.
+		 * Suppress further client output after the send attempt.  Workers that
+		 * report errors through a shared-memory queue use the regular path.
+		 */
+		if (edata->elevel == FATAL && MyProcPort != NULL)
+		{
+			pq_putmessage_noblock(msgbuf.cursor, msgbuf.data, msgbuf.len);
+			pfree(msgbuf.data);
+
+			(void) pq_flush_if_writable();
+
+			if (whereToSendOutput == DestRemote)
+				whereToSendOutput = DestNone;
+
+			return;
+		}
+
 		pq_endmessage(&msgbuf);
 	}
 	else
