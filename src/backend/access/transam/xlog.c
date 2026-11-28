@@ -6090,6 +6090,7 @@ StartupXLOG(void)
 	bool		haveBackupLabel;
 	XLogRecPtr	EndOfLog;
 	TimeLineID	EndOfLogTLI;
+	XLogRecPtr	minRecoveryPoint;
 	TimeLineID	newTLI;
 	bool		performedWalRecovery;
 	EndOfWalRecoveryInfo *endOfRecoveryInfo;
@@ -6589,13 +6590,20 @@ StartupXLOG(void)
 	 * or snapshot-style backups (which don't), backupEndRequired will be set
 	 * to false.
 	 *
-	 * Note: it is indeed okay to look at the local variable
-	 * LocalMinRecoveryPoint here, even though ControlFile->minRecoveryPoint
-	 * might be further ahead --- ControlFile->minRecoveryPoint cannot have
-	 * been advanced beyond the WAL we processed.
+	 * Note: we look at minRecoveryPoint in pg_control here, not at the local
+	 * variable LocalMinRecoveryPoint.  The local copy is only set in archive
+	 * recovery, but the point has to be reached in crash recovery as well: a
+	 * server started without signal files enters archive recovery through the
+	 * backup label alone, and that is gone after the first startup attempt.
+	 * The value in pg_control might be further ahead than the local copy, but
+	 * it cannot have been advanced beyond the WAL we processed.
 	 */
+	LWLockAcquire(ControlFileLock, LW_SHARED);
+	minRecoveryPoint = ControlFile->minRecoveryPoint;
+	LWLockRelease(ControlFileLock);
+
 	if (InRecovery &&
-		(EndOfLog < LocalMinRecoveryPoint ||
+		(EndOfLog < minRecoveryPoint ||
 		 XLogRecPtrIsValid(ControlFile->backupStartPoint)))
 	{
 		/*
@@ -6604,18 +6612,25 @@ StartupXLOG(void)
 		 * recover from an online backup but never called pg_backup_stop(), or
 		 * you didn't archive all the WAL needed.
 		 */
-		if (ArchiveRecoveryRequested || ControlFile->backupEndRequired)
-		{
-			if (XLogRecPtrIsValid(ControlFile->backupStartPoint) || ControlFile->backupEndRequired)
-				ereport(FATAL,
-						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						 errmsg("WAL ends before end of online backup"),
-						 errhint("All WAL generated while online backup was taken must be available at recovery.")));
-			else
-				ereport(FATAL,
-						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						 errmsg("WAL ends before consistent recovery point")));
-		}
+		if (ControlFile->backupEndRequired ||
+			(XLogRecPtrIsValid(ControlFile->backupStartPoint) &&
+			 ArchiveRecoveryRequested))
+			ereport(FATAL,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("WAL ends before end of online backup"),
+					 errhint("All WAL generated while online backup was taken must be available at recovery.")));
+
+		/*
+		 * If minRecoveryPoint has not been reached, the data is not yet
+		 * consistent. This applies regardless of whether archive recovery was
+		 * requested - pg_rewind sets minRecoveryPoint without signal files,
+		 * and opening the database without reaching it would expose
+		 * inconsistent data.
+		 */
+		if (EndOfLog < minRecoveryPoint)
+			ereport(FATAL,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("WAL ends before consistent recovery point")));
 	}
 
 	/*
