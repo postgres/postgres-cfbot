@@ -20,6 +20,7 @@
 #include "access/multixact.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
@@ -79,6 +80,7 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 {
 	Relation	pgrel;
 	HeapTuple	tuple;
+	Form_pg_class classform;
 
 	Assert(relation->rd_rel->relkind == RELKIND_MATVIEW);
 
@@ -94,7 +96,14 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 		elog(ERROR, "cache lookup failed for relation %u",
 			 RelationGetRelid(relation));
 
-	((Form_pg_class) GETSTRUCT(tuple))->relispopulated = newstate;
+	classform = (Form_pg_class) GETSTRUCT(tuple);
+
+	if (!newstate)
+		classform->relpopulated = RELPOPULATED_NONE;
+	else if (relation->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED)
+		classform->relpopulated = (int64) GetUnloggedPopulatedEpoch();
+	else
+		classform->relpopulated = RELPOPULATED_ETERNAL;
 
 	CatalogTupleUpdate(pgrel, &tuple->t_self, tuple);
 
@@ -106,6 +115,76 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 	 * visible.
 	 */
 	CommandCounterIncrement();
+}
+
+/*
+ * MatViewPopulatedValueIsValid
+ *		Does this pg_class.relpopulated value denote currently valid data?
+ */
+bool
+MatViewPopulatedValueIsValid(int64 value)
+{
+	if (value == RELPOPULATED_NONE)
+		return false;
+	if (value == RELPOPULATED_ETERNAL)
+		return true;
+
+	/*
+	 * Epoch stamp: valid only if it matches the current epoch.  During
+	 * recovery always treat it as invalid -- a standby never has the unlogged
+	 * data, and its epoch is still the one its base backup came with, which
+	 * may well be the primary's current one.
+	 */
+	if (RecoveryInProgress())
+		return false;
+
+	return (uint64) value == GetUnloggedPopulatedEpoch();
+}
+
+/*
+ * RelationIsPopulated
+ *		Does this relation currently hold valid data?  Only a materialized
+ *		view can return false.
+ */
+bool
+RelationIsPopulated(Relation relation)
+{
+	/* Only unlogged matviews may carry an epoch stamp. */
+	Assert(relation->rd_rel->relpopulated == RELPOPULATED_NONE ||
+		   relation->rd_rel->relpopulated == RELPOPULATED_ETERNAL ||
+		   (relation->rd_rel->relkind == RELKIND_MATVIEW &&
+			relation->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED));
+
+	return MatViewPopulatedValueIsValid(relation->rd_rel->relpopulated);
+}
+
+/*
+ * pg_matview_is_populated
+ *		Does the materialized view currently hold valid data?
+ *
+ * Returns NULL if the argument is not a materialized view, or if it does
+ * not exist.
+ */
+Datum
+pg_matview_is_populated(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	HeapTuple	tuple;
+	Form_pg_class classform;
+	bool		result;
+
+	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(tuple))
+		PG_RETURN_NULL();
+	classform = (Form_pg_class) GETSTRUCT(tuple);
+	if (classform->relkind != RELKIND_MATVIEW)
+	{
+		ReleaseSysCache(tuple);
+		PG_RETURN_NULL();
+	}
+	result = MatViewPopulatedValueIsValid(classform->relpopulated);
+	ReleaseSysCache(tuple);
+	PG_RETURN_BOOL(result);
 }
 
 /*
@@ -294,10 +373,20 @@ RefreshMatViewByOid(Oid matviewOid, bool is_create, bool skipData,
 
 	/*
 	 * Tentatively mark the matview as populated or not, if its state is
-	 * changing (this will roll back if we fail later).
+	 * changing (this will roll back if we fail later).  WITH NO DATA must
+	 * also clear a stale epoch stamp, which reads as not populated but still
+	 * records that the matview is meant to hold data.
 	 */
-	if (RelationIsPopulated(matviewRel) != !skipData)
-		SetMatViewPopulatedState(matviewRel, !skipData);
+	if (skipData)
+	{
+		if (matviewRel->rd_rel->relpopulated != RELPOPULATED_NONE)
+			SetMatViewPopulatedState(matviewRel, false);
+	}
+	else
+	{
+		if (!RelationIsPopulated(matviewRel))
+			SetMatViewPopulatedState(matviewRel, true);
+	}
 
 	/* Concurrent refresh builds new data in temp tablespace, and does diff. */
 	if (concurrent)

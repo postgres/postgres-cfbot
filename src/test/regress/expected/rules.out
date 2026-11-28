@@ -1414,7 +1414,7 @@ pg_matviews| SELECT n.nspname AS schemaname,
     pg_get_userbyid(c.relowner) AS matviewowner,
     t.spcname AS tablespace,
     c.relhasindex AS hasindexes,
-    c.relispopulated AS ispopulated,
+    pg_matview_is_populated((c.oid)::regclass) AS ispopulated,
     pg_get_viewdef(c.oid) AS definition
    FROM ((pg_class c
      LEFT JOIN pg_namespace n ON ((n.oid = c.relnamespace)))
