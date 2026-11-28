@@ -273,6 +273,7 @@ _PG_output_plugin_init(OutputPluginCallbacks *cb)
 	cb->commit_prepared_cb = pgoutput_commit_prepared_txn;
 	cb->rollback_prepared_cb = pgoutput_rollback_prepared_txn;
 	cb->filter_by_origin_cb = pgoutput_origin_filter;
+	cb->filter_by_rlocator_cb = NULL;
 	cb->shutdown_cb = pgoutput_shutdown;
 
 	/* transaction streaming */

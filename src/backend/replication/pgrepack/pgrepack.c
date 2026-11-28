@@ -34,6 +34,8 @@ static void repack_process_change(LogicalDecodingContext *ctx, ReorderBufferTXN 
 								  Relation relation, ReorderBufferChange *change);
 static void repack_store_change(LogicalDecodingContext *ctx, Relation relation,
 								ConcurrentChangeKind kind, HeapTuple tuple);
+static bool repack_filter_by_rlocator(LogicalDecodingContext *ctx,
+									  RelFileLocator rlocator);
 
 void
 _PG_output_plugin_init(OutputPluginCallbacks *cb)
@@ -41,8 +43,27 @@ _PG_output_plugin_init(OutputPluginCallbacks *cb)
 	cb->startup_cb = repack_startup;
 	cb->begin_cb = repack_begin_txn;
 	cb->change_cb = repack_process_change;
+	cb->truncate_cb = NULL;
 	cb->commit_cb = repack_commit_txn;
+	cb->message_cb = NULL;
+	cb->filter_by_origin_cb = NULL;
+	cb->filter_by_rlocator_cb = repack_filter_by_rlocator;
 	cb->shutdown_cb = repack_shutdown;
+
+	cb->filter_prepare_cb = NULL;
+	cb->begin_prepare_cb = NULL;
+	cb->prepare_cb = NULL;
+	cb->commit_prepared_cb = NULL;
+	cb->rollback_prepared_cb = NULL;
+
+	cb->stream_start_cb = NULL;
+	cb->stream_stop_cb = NULL;
+	cb->stream_abort_cb = NULL;
+	cb->stream_prepare_cb = NULL;
+	cb->stream_commit_cb = NULL;
+	cb->stream_change_cb = NULL;
+	cb->stream_message_cb = NULL;
+	cb->stream_truncate_cb = NULL;
 }
 
 
@@ -303,4 +324,44 @@ repack_store_change(LogicalDecodingContext *ctx, Relation relation,
 	/* Cleanup. */
 	MemoryContextSwitchTo(oldcxt);
 	MemoryContextReset(dstate->change_cxt);
+}
+
+/*
+ * rlocator-based filter callback for REPACK (CONCURRENTLY)
+ *
+ * If the given RelFileLocator matches one of the locators being processed by
+ * REPACK, return false to have this record be skipped by decoding.  Otherwise
+ * return true.
+ */
+static bool
+repack_filter_by_rlocator(struct LogicalDecodingContext *ctx,
+						  RelFileLocator rlocator)
+{
+	RepackDecodingState *dstate;
+
+	dstate = (RepackDecodingState *) ctx->output_writer_private;
+
+	/* TOAST locator should not be set unless the main is. */
+	Assert(!OidIsValid(dstate->rel_toast_locator.relNumber) ||
+		   OidIsValid(dstate->rel_locator.relNumber));
+
+	/*
+	 * This filter does not apply to decoders not involved in REPACK
+	 * (CONCURRENTLY).
+	 */
+	if (!OidIsValid(dstate->rel_locator.relNumber))
+		return false;
+
+	/*
+	 * Decode the change if it belongs to the table we are repacking, or if it
+	 * belongs to its TOAST relation.
+	 */
+	if (RelFileLocatorEquals(rlocator, dstate->rel_locator))
+		return false;
+	if (OidIsValid(dstate->rel_toast_locator.relNumber) &&
+		RelFileLocatorEquals(rlocator, dstate->rel_toast_locator))
+		return false;
+
+	/* Filter out changes of other tables. */
+	return true;
 }

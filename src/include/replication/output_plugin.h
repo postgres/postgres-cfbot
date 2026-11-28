@@ -101,6 +101,12 @@ typedef bool (*LogicalDecodeFilterByOriginCB) (struct LogicalDecodingContext *ct
 											   ReplOriginId origin_id);
 
 /*
+ * Filter changes by relation file locator.
+ */
+typedef bool (*LogicalDecodeFilterByRelFileLocatorCB) (struct LogicalDecodingContext *ctx,
+													   RelFileLocator rlocator);
+
+/*
  * Called to shutdown an output plugin.
  */
 typedef void (*LogicalDecodeShutdownCB) (struct LogicalDecodingContext *ctx);
@@ -228,6 +234,7 @@ typedef struct OutputPluginCallbacks
 	LogicalDecodeCommitCB commit_cb;
 	LogicalDecodeMessageCB message_cb;
 	LogicalDecodeFilterByOriginCB filter_by_origin_cb;
+	LogicalDecodeFilterByRelFileLocatorCB filter_by_rlocator_cb;
 	LogicalDecodeShutdownCB shutdown_cb;
 
 	/* streaming of changes at prepare time */

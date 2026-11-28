@@ -42,6 +42,13 @@ typedef struct RepackDecodingState
 	/* The relation whose changes we're decoding. */
 	Oid			relid;
 
+	/*
+	 * Keep track of the its locator(s), to skip logical decoding of data from
+	 * other relations.
+	 */
+	RelFileLocator rel_locator;
+	RelFileLocator rel_toast_locator;
+
 	/* Per-change memory context. */
 	MemoryContext change_cxt;
 

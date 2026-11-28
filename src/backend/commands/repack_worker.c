@@ -51,13 +51,6 @@ static bool am_repack_worker = false;
 /* The WAL segment being decoded. */
 static XLogSegNo repack_current_segment = 0;
 
-/*
- * Keep track of the table we're processing, to skip logical decoding of data
- * from other relations.
- */
-static RelFileLocator repacked_rel_locator = {.relNumber = InvalidOid};
-static RelFileLocator repacked_rel_toast_locator = {.relNumber = InvalidOid};
-
 
 /* REPACK decoding worker entry point */
 void
@@ -248,6 +241,8 @@ repack_setup_logical_decoding(Oid relid, DecodingWorkerShared *shared)
 	char		slotname[NAMEDATALEN];
 	RepackDecodingState *dstate;
 	MemoryContext oldcxt;
+	RelFileLocator repacked_rel_locator,
+				repacked_rel_toast_locator;
 
 	/*
 	 * REPACK CONCURRENTLY is not allowed in a transaction block, so this
@@ -292,6 +287,8 @@ repack_setup_logical_decoding(Oid relid, DecodingWorkerShared *shared)
 		repacked_rel_toast_locator = toastrel->rd_locator;
 		table_close(toastrel, AccessShareLock);
 	}
+	else
+		repacked_rel_toast_locator.relNumber = InvalidOid;
 	table_close(rel, AccessShareLock);
 
 	set_repack_worker_setup_phase(shared,
@@ -317,6 +314,8 @@ repack_setup_logical_decoding(Oid relid, DecodingWorkerShared *shared)
 	dstate->relid = relid;
 	dstate->worker_cxt = CurrentMemoryContext;
 	dstate->worker_resowner = CurrentResourceOwner;
+	dstate->rel_locator = repacked_rel_locator;
+	dstate->rel_toast_locator = repacked_rel_toast_locator;
 
 	/* We don't have control on fast_forward, but verify it's sane */
 	Assert(!ctx->fast_forward);
@@ -546,47 +545,4 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 	ConditionVariableSignal(&shared->cv);
 
 	return done;
-}
-
-/*
- * Does the WAL record contain a data change that this backend does not need
- * to decode on behalf of REPACK (CONCURRENTLY)?
- */
-bool
-change_useless_for_repack(XLogRecordBuffer *buf)
-{
-	XLogReaderState *r = buf->record;
-	RelFileLocator locator;
-
-	/* TOAST locator should not be set unless the main is. */
-	Assert(!OidIsValid(repacked_rel_toast_locator.relNumber) ||
-		   OidIsValid(repacked_rel_locator.relNumber));
-
-	/*
-	 * Backends not involved in REPACK (CONCURRENTLY) should not do the
-	 * filtering.
-	 */
-	if (!OidIsValid(repacked_rel_locator.relNumber))
-		return false;
-
-	/*
-	 * If the record does not contain the block 0, it's probably not INSERT /
-	 * UPDATE / DELETE. In any case, we do not have enough information to
-	 * filter the change out.
-	 */
-	if (!XLogRecGetBlockTagExtended(r, 0, &locator, NULL, NULL, NULL))
-		return false;
-
-	/*
-	 * Decode the change if it belongs to the table we are repacking, or if it
-	 * belongs to its TOAST relation.
-	 */
-	if (RelFileLocatorEquals(locator, repacked_rel_locator))
-		return false;
-	if (OidIsValid(repacked_rel_toast_locator.relNumber) &&
-		RelFileLocatorEquals(locator, repacked_rel_toast_locator))
-		return false;
-
-	/* Filter out changes of other tables. */
-	return true;
 }

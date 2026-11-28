@@ -32,8 +32,4 @@ extern void logicalmsg_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf
 extern void LogicalDecodingProcessRecord(LogicalDecodingContext *ctx,
 										 XLogReaderState *record);
 
-/* in commands/repack_worker.c */
-extern bool change_useless_for_repack(XLogRecordBuffer *buf);
-
-
 #endif
